@@ -19,6 +19,9 @@
         .btn-primary { background: #004ac6; color: #fff; }
         .btn-primary:hover { background: #003ea8; transform: translateY(-1px); }
         .btn-outline { background: #fff; color: #1c1e21; border: 1px solid #d1d5db; }
+        .btn-soft { background: #eff6ff; color: #004ac6; border: 1px solid #bfdbfe; }
+        .btn-soft:hover { background: #dbeafe; }
+        .btn-compact { padding: 9px 14px; font-size: 13px; border-radius: 7px; }
         .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
         /* Stats */
@@ -35,6 +38,9 @@
         /* Main Sections */
         .card { background: #fff; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); overflow: hidden; margin-bottom: 25px; }
         .card-header { padding: 18px 25px; border-bottom: 1px solid #f3f4f6; font-weight: 700; background: #fafafa; display: flex; justify-content: space-between; align-items: center; color: #111827; }
+        .card-title-block { display: flex; flex-direction: column; gap: 4px; }
+        .file-meta { font-size: 12px; color: #6b7280; font-weight: 400; }
+        .card-header-actions { display: flex; align-items: center; gap: 14px; }
         
         /* Table Styles (Clear & Sharp) */
         .table-wrap { max-height: 500px; overflow: auto; }
@@ -61,6 +67,40 @@
         .upload-zone { border: 2px dashed #3b82f6; border-radius: 12px; padding: 20px; text-align: center; cursor: pointer; transition: 0.2s; height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; }
         .upload-zone:hover { background: #eff6ff; border-color: #2563eb; }
         .upload-zone.dragover { background: #dbeafe; }
+
+        /* Report modal */
+        .modal-backdrop { position: fixed; inset: 0; background: rgba(15, 23, 42, 0.45); display: none; align-items: center; justify-content: center; padding: 24px; z-index: 50; }
+        .modal-backdrop.active { display: flex; }
+        .report-modal { width: min(720px, 100%); max-height: 88vh; background: #fff; border-radius: 12px; box-shadow: 0 25px 70px rgba(15, 23, 42, 0.28); display: flex; flex-direction: column; overflow: hidden; }
+        .modal-header { padding: 20px 24px; border-bottom: 1px solid #e5e7eb; display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+        .modal-title { font-size: 18px; font-weight: 800; color: #111827; }
+        .modal-subtitle { margin-top: 4px; color: #6b7280; font-size: 13px; font-weight: 500; }
+        .icon-btn { width: 38px; height: 38px; border: 1px solid #e5e7eb; background: #fff; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; color: #4b5563; }
+        .icon-btn:hover { background: #f3f4f6; color: #111827; }
+        .modal-body { padding: 20px 24px; overflow: auto; }
+        .report-toolbar { display: grid; grid-template-columns: 1fr auto auto; gap: 10px; align-items: center; margin-bottom: 14px; }
+        .search-input { width: 100%; border: 1px solid #d1d5db; border-radius: 8px; padding: 10px 12px; font-size: 14px; outline: none; }
+        .search-input:focus { border-color: #004ac6; box-shadow: 0 0 0 3px rgba(0, 74, 198, 0.12); }
+        .partner-list { border: 1px solid #e5e7eb; border-radius: 10px; max-height: 340px; overflow: auto; background: #fff; }
+        .partner-item { display: flex; align-items: center; gap: 12px; padding: 12px 14px; border-bottom: 1px solid #f3f4f6; cursor: pointer; }
+        .partner-item:last-child { border-bottom: none; }
+        .partner-item:hover { background: #f8fafc; }
+        .partner-item input { width: 18px; height: 18px; accent-color: #004ac6; }
+        .partner-name { font-weight: 600; color: #1f2937; }
+        .report-summary { margin-top: 12px; color: #4b5563; font-size: 13px; font-weight: 600; }
+        .modal-footer { padding: 16px 24px; border-top: 1px solid #e5e7eb; display: flex; justify-content: flex-end; gap: 10px; background: #f9fafb; }
+        .empty-state { padding: 34px 20px; text-align: center; color: #6b7280; font-weight: 600; }
+
+        @media (max-width: 760px) {
+            body { padding: 12px; }
+            .header, .card-header { flex-direction: column; align-items: stretch; gap: 12px; }
+            .card-header-actions { justify-content: space-between; }
+            .stats-grid { grid-template-columns: repeat(2, 1fr); }
+            .controls-row { flex-direction: column; }
+            .report-toolbar { grid-template-columns: 1fr; }
+            .modal-footer { flex-direction: column-reverse; }
+            .modal-footer .btn { justify-content: center; width: 100%; }
+        }
     </style>
 </head>
 <body>
@@ -106,8 +146,15 @@
         <!-- Excel Content Table -->
         <div class="card">
             <div class="card-header">
-                <span>NỘI DUNG FILE EXCEL HIỆN TẠI</span>
-                <span style="font-size:12px; color:#6b7280; font-weight:400" id="currentFileNameDisp">Chưa có file</span>
+                <div class="card-title-block">
+                    <span>NỘI DUNG FILE EXCEL HIỆN TẠI</span>
+                    <span class="file-meta" id="currentFileNameDisp">Chưa có file</span>
+                </div>
+                <div class="card-header-actions">
+                    <button class="btn btn-soft btn-compact" onclick="openReportModal()">
+                        <span class="material-icons-outlined">summarize</span> Xuất báo cáo
+                    </button>
+                </div>
             </div>
             <div class="table-wrap">
                 <table id="previewTable">
@@ -145,8 +192,41 @@
         </div>
     </div>
 
+    <div class="modal-backdrop" id="reportModal" aria-hidden="true">
+        <div class="report-modal" role="dialog" aria-modal="true" aria-labelledby="reportModalTitle">
+            <div class="modal-header">
+                <div>
+                    <div class="modal-title" id="reportModalTitle">Xuất báo cáo theo đối tác</div>
+                    <div class="modal-subtitle" id="reportModalSubtitle">Chọn một hoặc nhiều đối tác để tạo file báo cáo.</div>
+                </div>
+                <button class="icon-btn" onclick="closeReportModal()" aria-label="Đóng">
+                    <span class="material-icons-outlined">close</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="report-toolbar">
+                    <input class="search-input" id="partnerSearch" type="search" placeholder="Tìm đối tác..." oninput="renderPartnerList()">
+                    <button class="btn btn-outline btn-compact" onclick="selectAllPartners()">Chọn tất cả</button>
+                    <button class="btn btn-outline btn-compact" onclick="clearAllPartners()">Bỏ chọn</button>
+                </div>
+                <div class="partner-list" id="partnerList">
+                    <div class="empty-state">Đang tải danh sách đối tác...</div>
+                </div>
+                <div class="report-summary" id="reportSummary">Chưa chọn đối tác nào.</div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeReportModal()">Hủy</button>
+                <button class="btn btn-primary" id="exportReportBtn" onclick="exportPartnerReport()" disabled>
+                    <span class="material-icons-outlined">download</span> Xuất báo cáo
+                </button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let ws;
+        let reportPartners = [];
+        let selectedPartners = new Set();
         const startBtn = document.getElementById('startBtn');
 
         function addLog(msg) {
@@ -215,6 +295,149 @@
                     loadPreview();
                 }
             } catch(e) { addLog(`Lỗi: ${e.message}`); }
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? '')
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;')
+                .replaceAll("'", '&#039;');
+        }
+
+        async function openReportModal() {
+            const modal = document.getElementById('reportModal');
+            const list = document.getElementById('partnerList');
+            const search = document.getElementById('partnerSearch');
+            modal.classList.add('active');
+            modal.setAttribute('aria-hidden', 'false');
+            document.body.style.overflow = 'hidden';
+            search.value = '';
+            reportPartners = [];
+            selectedPartners = new Set();
+            list.innerHTML = '<div class="empty-state">Đang tải danh sách đối tác...</div>';
+            updateReportSummary();
+
+            try {
+                const res = await fetch('/report-partners');
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || 'Không tải được danh sách đối tác');
+
+                reportPartners = data.partners || [];
+                document.getElementById('reportModalSubtitle').textContent = `File: ${data.file} - ${reportPartners.length} đối tác`;
+                renderPartnerList();
+            } catch(e) {
+                list.innerHTML = `<div class="empty-state">${escapeHtml(e.message)}</div>`;
+                addLog(`Lỗi: ${e.message}`);
+            }
+        }
+
+        function closeReportModal() {
+            const modal = document.getElementById('reportModal');
+            modal.classList.remove('active');
+            modal.setAttribute('aria-hidden', 'true');
+            document.body.style.overflow = '';
+        }
+
+        function renderPartnerList() {
+            const list = document.getElementById('partnerList');
+            const searchValue = document.getElementById('partnerSearch').value.trim().toLowerCase();
+            const visiblePartners = reportPartners
+                .map((name, index) => ({ name, index }))
+                .filter(item => item.name.toLowerCase().includes(searchValue));
+
+            if (visiblePartners.length === 0) {
+                list.innerHTML = '<div class="empty-state">Không tìm thấy đối tác phù hợp.</div>';
+                updateReportSummary();
+                return;
+            }
+
+            list.innerHTML = visiblePartners.map(item => `
+                <label class="partner-item">
+                    <input class="partner-checkbox" type="checkbox" data-index="${item.index}" ${selectedPartners.has(item.name) ? 'checked' : ''}>
+                    <span class="partner-name">${escapeHtml(item.name)}</span>
+                </label>
+            `).join('');
+            updateReportSummary();
+        }
+
+        function selectAllPartners() {
+            selectedPartners = new Set(reportPartners);
+            renderPartnerList();
+        }
+
+        function clearAllPartners() {
+            selectedPartners = new Set();
+            renderPartnerList();
+        }
+
+        function updateReportSummary() {
+            const count = selectedPartners.size;
+            const total = reportPartners.length;
+            const summary = document.getElementById('reportSummary');
+            const exportBtn = document.getElementById('exportReportBtn');
+            summary.textContent = count === 0
+                ? 'Chưa chọn đối tác nào.'
+                : `Đã chọn ${count}/${total} đối tác. Chọn 1 đối tác để tải .xlsx, chọn nhiều đối tác để tải .zip.`;
+            exportBtn.disabled = count === 0;
+        }
+
+        function downloadBlob(blob, filename) {
+            const url = URL.createObjectURL(blob);
+            const link = document.createElement('a');
+            link.href = url;
+            link.download = filename;
+            document.body.appendChild(link);
+            link.click();
+            link.remove();
+            URL.revokeObjectURL(url);
+        }
+
+        function filenameFromDisposition(disposition, fallback) {
+            const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+            if (utf8Match) return decodeURIComponent(utf8Match[1]);
+
+            const plainMatch = disposition.match(/filename="?([^";]+)"?/i);
+            return plainMatch ? plainMatch[1] : fallback;
+        }
+
+        async function exportPartnerReport() {
+            const partners = reportPartners.filter(name => selectedPartners.has(name));
+            if (partners.length === 0) {
+                addLog('Vui lòng chọn ít nhất một đối tác để xuất báo cáo.');
+                return;
+            }
+
+            const btn = document.getElementById('exportReportBtn');
+            const originalHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> Đang xuất...';
+
+            try {
+                const res = await fetch('/export-report', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({ partners })
+                });
+
+                if (!res.ok) {
+                    const data = await res.json().catch(() => ({}));
+                    throw new Error(data.error || 'Không xuất được báo cáo');
+                }
+
+                const blob = await res.blob();
+                const fallback = partners.length === 1 ? `${partners[0]}.xlsx` : 'bao_cao_doi_tac.zip';
+                const filename = filenameFromDisposition(res.headers.get('Content-Disposition') || '', fallback);
+                downloadBlob(blob, filename);
+                addLog(`Đã xuất báo cáo: ${filename}`);
+                closeReportModal();
+            } catch(e) {
+                addLog(`Lỗi xuất báo cáo: ${e.message}`);
+            } finally {
+                btn.disabled = selectedPartners.size === 0;
+                btn.innerHTML = originalHtml;
+            }
         }
 
         async function loadPreview() {
@@ -320,6 +543,25 @@
                 const dt = new DataTransfer(); dt.items.add(file);
                 document.getElementById('fileInput').files = dt.files;
                 uploadFile(document.getElementById('fileInput'));
+            }
+        });
+
+        document.getElementById('partnerList').addEventListener('change', (e) => {
+            if (!e.target.classList.contains('partner-checkbox')) return;
+            const partner = reportPartners[Number(e.target.dataset.index)];
+            if (!partner) return;
+            if (e.target.checked) selectedPartners.add(partner);
+            else selectedPartners.delete(partner);
+            updateReportSummary();
+        });
+
+        document.getElementById('reportModal').addEventListener('click', (e) => {
+            if (e.target.id === 'reportModal') closeReportModal();
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'Escape' && document.getElementById('reportModal').classList.contains('active')) {
+                closeReportModal();
             }
         });
 
