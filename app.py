@@ -3,6 +3,7 @@ from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from fastapi.templating import Jinja2Templates
 import asyncio
 import io
+import json
 import os
 import re
 import shutil
@@ -47,6 +48,7 @@ class ConnectionManager:
 
 manager = ConnectionManager()
 EXCEL_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRAPE_TASK = None
 
 # Biến toàn cục lưu file đang được chọn
 CURRENT_SELECTED_FILE = "Report_v1.xlsx"
@@ -54,7 +56,10 @@ REPORT_COLUMNS = ["NGÀY AIR", "LINK AIR", "LƯỢT XEM", "TIM", "BÌNH LUẬN",
 
 
 def excel_files():
-    return sorted([f for f in os.listdir(EXCEL_DIR) if f.endswith('.xlsx') or f.endswith('.xls')])
+    return sorted([
+        f for f in os.listdir(EXCEL_DIR)
+        if (f.endswith('.xlsx') or f.endswith('.xls')) and not f.startswith('~$')
+    ])
 
 
 def ensure_selected_file():
@@ -245,6 +250,16 @@ def build_partner_report(partner, df):
 def content_disposition(filename):
     return f"attachment; filename*=UTF-8''{quote(filename)}"
 
+
+async def run_scraper_safely(target_path, worker_count):
+    try:
+        await run_scraper(target_path, manager, worker_count=worker_count)
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        await manager.broadcast_log(f"Lỗi quét: {str(e)}")
+        await manager.broadcast_status({"total": 0, "processed": 0, "success": 0, "error": 1, "done": True})
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse(request=request, name="index.html")
@@ -381,13 +396,25 @@ async def upload_excel(file: UploadFile = File(...)):
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
+    global SCRAPE_TASK
     await manager.connect(websocket)
     try:
         while True:
             data = await websocket.receive_text()
-            if data == "start":
+            try:
+                payload = json.loads(data)
+            except json.JSONDecodeError:
+                payload = {"action": data}
+
+            action = payload.get("action")
+            if action == "start":
+                if SCRAPE_TASK and not SCRAPE_TASK.done():
+                    await manager.broadcast_log("Đang có phiên quét chạy. Vui lòng chờ hoàn tất trước khi chạy phiên mới.")
+                    continue
+
                 target_path = current_excel_path()
-                asyncio.create_task(run_scraper(target_path, manager))
+                worker_count = payload.get("workers", 5)
+                SCRAPE_TASK = asyncio.create_task(run_scraper_safely(target_path, worker_count))
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 

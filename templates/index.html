@@ -14,6 +14,10 @@
         /* Header */
         .header { background: #fff; padding: 20px 30px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 25px; display: flex; justify-content: space-between; align-items: center; border-left: 6px solid #004ac6; }
         .header h1 { font-size: 24px; color: #004ac6; display: flex; align-items: center; gap: 12px; }
+        .header-actions { display: flex; align-items: center; gap: 12px; }
+        .scan-setting { display: inline-flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb; }
+        .scan-setting span { font-size: 12px; color: #4b5563; font-weight: 700; text-transform: uppercase; }
+        .scan-setting select { width: 78px; margin-top: 0; padding: 8px; font-size: 14px; background: #fff; }
         
         .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 24px; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; border: none; transition: 0.2s; }
         .btn-primary { background: #004ac6; color: #fff; }
@@ -52,6 +56,8 @@
         
         .col-url { color: #004ac6; font-weight: 500; }
         .col-status { font-weight: 600; padding: 4px 12px; border-radius: 100px; font-size: 12px; }
+        .error-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 22px; padding: 0 8px; border-radius: 999px; background: #fee2e2; color: #b91c1c; font-size: 12px; font-weight: 800; margin-left: 8px; }
+        .failed-reason { color: #b91c1c; font-weight: 600; max-width: 360px; }
 
         /* Log Box */
         .log-box { height: 400px; overflow-y: auto; padding: 20px; background: #0f172a; color: #38bdf8; font-family: 'Fira Code', 'Courier New', monospace; font-size: 12px; line-height: 1.7; }
@@ -94,6 +100,9 @@
         @media (max-width: 760px) {
             body { padding: 12px; }
             .header, .card-header { flex-direction: column; align-items: stretch; gap: 12px; }
+            .header-actions { flex-direction: column; align-items: stretch; }
+            .scan-setting { justify-content: space-between; }
+            .header-actions .btn { justify-content: center; width: 100%; }
             .card-header-actions { justify-content: space-between; }
             .stats-grid { grid-template-columns: repeat(2, 1fr); }
             .controls-row { flex-direction: column; }
@@ -107,7 +116,19 @@
     <div class="container">
         <div class="header">
             <h1><span class="material-icons-outlined" style="font-size:32px">insights</span> TIKTOK BOT DATA PRO</h1>
-            <div style="display:flex; gap:12px">
+            <div class="header-actions">
+                <label class="scan-setting">
+                    <span>Luồng</span>
+                    <select id="workerCountSelect">
+                        <option value="1">1</option>
+                        <option value="3">3</option>
+                        <option value="5" selected>5</option>
+                        <option value="8">8</option>
+                        <option value="10">10</option>
+                        <option value="20">20</option>
+                        <option value="50">50</option>
+                    </select>
+                </label>
                 <button class="btn btn-primary" id="startBtn" onclick="startScraping()">
                     <span class="material-icons-outlined">play_circle</span> BẮT ĐẦU QUÉT
                 </button>
@@ -186,6 +207,32 @@
                 </div>
             </div>
             <div class="card">
+                <div class="card-header">
+                    <span>LINK BỊ LỖI <span class="error-badge" id="failedCountBadge">0</span></span>
+                    <div class="card-header-actions">
+                        <button class="btn btn-outline btn-compact" onclick="copyFailedLinks()">
+                            <span class="material-icons-outlined">content_copy</span> Copy link lỗi
+                        </button>
+                        <button class="btn btn-outline btn-compact" onclick="clearFailedLinks()">
+                            <span class="material-icons-outlined">delete_sweep</span> Xóa danh sách
+                        </button>
+                    </div>
+                </div>
+                <div class="table-wrap" style="max-height:260px">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>LINK LỖI</th>
+                                <th>LÝ DO</th>
+                                <th>LUỒNG</th>
+                            </tr>
+                        </thead>
+                        <tbody id="failedLinksBody"><tr><td colspan="4" style="text-align:center; padding:32px; color:#9ca3af">Chưa có link lỗi</td></tr></tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="card">
                 <div class="card-header">NHẬT KÝ HỆ THỐNG</div>
                 <div class="log-box" id="logs" style="height: 300px;"></div>
             </div>
@@ -227,7 +274,9 @@
         let ws;
         let reportPartners = [];
         let selectedPartners = new Set();
+        let failedLinks = [];
         const startBtn = document.getElementById('startBtn');
+        const workerCountSelect = document.getElementById('workerCountSelect');
 
         function addLog(msg) {
             const logs = document.getElementById('logs');
@@ -486,10 +535,24 @@
                 addLog('Lỗi: Chưa kết nối được server. Vui lòng kiểm tra CMD.');
                 return;
             }
-            ws.send('start');
+            const workers = Number(workerCountSelect.value || 5);
+            ws.send(JSON.stringify({ action: 'start', workers }));
             startBtn.disabled = true;
+            workerCountSelect.disabled = true;
             startBtn.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> ĐANG QUÉT...';
             document.getElementById('dataFeed').innerHTML = '';
+            clearFailedLinks(false);
+        }
+
+        function formatDuration(seconds) {
+            if (seconds === null || seconds === undefined) return '';
+            if (seconds < 60) return `${seconds}s`;
+            const minutes = Math.floor(seconds / 60);
+            const remainSeconds = seconds % 60;
+            if (minutes < 60) return `${minutes}m ${remainSeconds}s`;
+            const hours = Math.floor(minutes / 60);
+            const remainMinutes = minutes % 60;
+            return `${hours}h ${remainMinutes}m`;
         }
 
         function updateProgress(data) {
@@ -499,9 +562,16 @@
             document.getElementById('errorLinks').textContent = data.error;
             const pct = data.total > 0 ? (data.processed / data.total) * 100 : 0;
             document.getElementById('progressBar').style.width = pct + '%';
-            document.getElementById('progressText').textContent = `Tiến độ: ${data.processed}/${data.total} (${Math.round(pct)}%)`;
-            if(data.processed === data.total && data.total > 0) {
+            const progressParts = [`Tiến độ: ${data.processed}/${data.total} (${Math.round(pct)}%)`];
+            if (data.workers) progressParts.push(`${data.workers} luồng`);
+            if (data.rate) progressParts.push(`${data.rate} link/phút`);
+            if (data.etaSeconds !== null && data.etaSeconds !== undefined && !data.done) {
+                progressParts.push(`còn ~${formatDuration(data.etaSeconds)}`);
+            }
+            document.getElementById('progressText').textContent = progressParts.join(' • ');
+            if(data.done || (data.processed === data.total && data.total > 0)) {
                 startBtn.disabled = false;
+                workerCountSelect.disabled = false;
                 startBtn.innerHTML = '<span class="material-icons-outlined">play_circle</span> BẮT ĐẦU QUÉT';
                 addLog('--- QUÉT HOÀN TẤT ---');
                 loadPreview(); // Tự động nạp lại bảng Preview khi xong
@@ -528,9 +598,70 @@
                 <td style="text-align:right; font-weight:bold">${comments}</td>
                 <td style="text-align:right; font-weight:bold">${saves}</td>
                 <td style="text-align:right; font-weight:bold">${shares}</td>
-                <td><span class="col-status" style="color:${row.status==='Success'?'#16a34a':'#dc2626'}">${row.status==='Success'?'OK':'LỖI'}</span></td>
+                <td><span class="col-status" title="${escapeHtml(row.status || '')}" style="color:${row.status==='Success'?'#16a34a':'#dc2626'}">${row.status==='Success'?'OK':'LỖI'}</span></td>
             `;
             tbody.prepend(tr);
+            if (row.status !== 'Success') appendFailedLink(row);
+        }
+
+        function renderFailedLinks() {
+            const tbody = document.getElementById('failedLinksBody');
+            const badge = document.getElementById('failedCountBadge');
+            badge.textContent = failedLinks.length;
+
+            if (failedLinks.length === 0) {
+                tbody.innerHTML = '<tr><td colspan="4" style="text-align:center; padding:32px; color:#9ca3af">Chưa có link lỗi</td></tr>';
+                return;
+            }
+
+            tbody.innerHTML = failedLinks.map(item => `
+                <tr>
+                    <td>${item.id}</td>
+                    <td class="col-url" title="${escapeHtml(item.url)}"><a href="${escapeHtml(item.url)}" target="_blank" style="color: inherit; text-decoration: none;">${escapeHtml(item.url)}</a></td>
+                    <td class="failed-reason" title="${escapeHtml(item.status || '')}">${escapeHtml(item.status || 'Lỗi không xác định')}</td>
+                    <td>${item.worker ? `Luồng ${item.worker}` : ''}</td>
+                </tr>
+            `).join('');
+        }
+
+        function appendFailedLink(row) {
+            failedLinks.unshift({
+                id: row.id,
+                url: row.url,
+                status: row.status,
+                worker: row.worker
+            });
+            renderFailedLinks();
+        }
+
+        async function copyFailedLinks() {
+            if (failedLinks.length === 0) {
+                addLog('Không có link lỗi để copy.');
+                return;
+            }
+
+            const text = failedLinks.map(item => item.url).join('\n');
+            try {
+                if (navigator.clipboard) {
+                    await navigator.clipboard.writeText(text);
+                } else {
+                    const textarea = document.createElement('textarea');
+                    textarea.value = text;
+                    document.body.appendChild(textarea);
+                    textarea.select();
+                    document.execCommand('copy');
+                    textarea.remove();
+                }
+                addLog(`Đã copy ${failedLinks.length} link lỗi.`);
+            } catch(e) {
+                addLog(`Lỗi copy link: ${e.message}`);
+            }
+        }
+
+        function clearFailedLinks(showLog = true) {
+            failedLinks = [];
+            renderFailedLinks();
+            if (showLog) addLog('Đã xóa danh sách link lỗi.');
         }
 
         const area = document.getElementById('uploadArea');
