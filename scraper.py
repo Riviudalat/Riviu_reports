@@ -8,6 +8,14 @@ import unicodedata
 import openpyxl
 from playwright.async_api import async_playwright
 
+from workbook_utils import (
+    clean_text,
+    rebuild_summary_sheet,
+    workbook_data_sheet_names,
+    worksheet_partner_column_indexes,
+    worksheet_row_partners,
+)
+
 
 USER_AGENTS = [
     "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1",
@@ -33,14 +41,6 @@ METRIC_KEYS = {
     "shares": "Shares",
 }
 
-FALLBACK_COLUMNS = {
-    "views": 4,
-    "likes": 5,
-    "comments": 6,
-    "saves": 7,
-    "shares": 8,
-}
-
 COUNT_PATTERNS = {
     "Views": r'"playCount"\s*:\s*"?(\d+)"?',
     "Likes": r'"diggCount"\s*:\s*"?(\d+)"?',
@@ -49,16 +49,16 @@ COUNT_PATTERNS = {
     "Shares": r'"shareCount"\s*:\s*"?(\d+)"?',
 }
 
+CHANNEL_PATTERNS = [
+    r'"authorName"\s*:\s*"([^"]+)"',
+    r'"uniqueId"\s*:\s*"([^"]+)"',
+    r'"nickname"\s*:\s*"([^"]+)"',
+]
+
 MAX_WORKERS = 50
 DEFAULT_WORKERS = 5
 DEFAULT_RETRIES = 2
 DEFAULT_SAVE_EVERY = 25
-
-
-def normalize_text(value):
-    text = str(value or "").strip().upper()
-    text = unicodedata.normalize("NFKC", text)
-    return re.sub(r"\s+", " ", text)
 
 
 def clamp_int(value, default, minimum, maximum):
@@ -69,9 +69,28 @@ def clamp_int(value, default, minimum, maximum):
     return max(minimum, min(maximum, number))
 
 
+def normalize_text(value):
+    text = str(value or "").strip().upper()
+    text = unicodedata.normalize("NFKC", text)
+    return re.sub(r"\s+", " ", text)
+
+
+def build_sheet_contexts(workbook):
+    contexts = {}
+    for sheet_name in workbook_data_sheet_names(workbook):
+        sheet = workbook[sheet_name]
+        contexts[sheet_name] = {
+            "worksheet": sheet,
+            "columns": find_columns(sheet),
+        }
+    return contexts
+
+
 def find_columns(sheet):
     column_map = {key: None for key in METRIC_HEADERS}
     column_map["url"] = None
+    column_map["channel"] = None
+    column_map["date"] = None
 
     for cell in sheet[1]:
         header = normalize_text(cell.value)
@@ -79,39 +98,79 @@ def find_columns(sheet):
             continue
         if "URL" in header or "LINK" in header:
             column_map["url"] = cell.column
+        if "TÊN KÊNH" in header or "TEN KENH" in header:
+            column_map["channel"] = cell.column
+        if "NGÀY" in header or "NGAY" in header:
+            column_map["date"] = cell.column
         for key, expected_header in METRIC_HEADERS.items():
             if normalize_text(expected_header) in header:
                 column_map[key] = cell.column
 
-    for key, fallback_col in FALLBACK_COLUMNS.items():
-        if not column_map[key]:
-            column_map[key] = fallback_col
-
+    max_column = sheet.max_column
     if not column_map["url"]:
         for row in range(2, min(sheet.max_row, 25) + 1):
-            for col in range(1, sheet.max_column + 1):
+            for col in range(1, max_column + 1):
                 value = str(sheet.cell(row=row, column=col).value or "")
-                if "tiktok.com" in value:
+                if "tiktok.com" in value or "vt.tiktok.com" in value:
                     column_map["url"] = col
                     break
             if column_map["url"]:
                 break
 
-    if not column_map["url"]:
-        column_map["url"] = 2
+    for key, fallback in {"views": 5, "likes": 6, "comments": 7, "saves": 8, "shares": 9}.items():
+        if not column_map[key] and max_column >= fallback and normalize_text(sheet.cell(row=1, column=fallback).value):
+            column_map[key] = fallback
+
+    if not column_map["channel"]:
+        channel_col = max_column + 1
+        sheet.cell(row=1, column=channel_col).value = "Tên Kênh"
+        column_map["channel"] = channel_col
+        max_column = channel_col
+
+    for key, header in METRIC_HEADERS.items():
+        if not column_map[key]:
+            max_column += 1
+            sheet.cell(row=1, column=max_column).value = header
+            column_map[key] = max_column
 
     return column_map
 
 
-def collect_rows(sheet, url_column):
+def collect_rows(workbook, selected_partner=None):
+    selected_key = selected_partner.casefold() if selected_partner else None
     rows = []
-    for row in range(2, sheet.max_row + 1):
-        url_cell = sheet.cell(row=row, column=url_column).value
-        url = str(url_cell).strip() if url_cell else ""
-        if url and "tiktok.com" in url:
-            rows.append({"sequence": len(rows) + 1, "row": row, "url": url})
-    return rows
 
+    for sheet_name in workbook_data_sheet_names(workbook):
+        worksheet = workbook[sheet_name]
+        partner_columns = worksheet_partner_column_indexes(worksheet)
+        url_column = find_columns(worksheet)["url"]
+        if not url_column:
+            continue
+
+        for row_index in range(2, worksheet.max_row + 1):
+            url = clean_text(worksheet.cell(row=row_index, column=url_column).value)
+            if not url or ("tiktok.com" not in url and "vt.tiktok.com" not in url):
+                continue
+
+            partners = []
+            if partner_columns:
+                partners = worksheet_row_partners(worksheet, row_index, partner_columns)
+
+            if selected_key:
+                if not partners:
+                    continue
+                if selected_key not in {partner.casefold() for partner in partners}:
+                    continue
+
+            rows.append({
+                "sequence": len(rows) + 1,
+                "sheet_name": sheet_name,
+                "row": row_index,
+                "url": url,
+                "partners": partners,
+            })
+
+    return rows
 
 def parse_counts(content):
     data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
@@ -124,6 +183,52 @@ def parse_counts(content):
     return data, found
 
 
+def parse_channel_name(content):
+    for pattern in CHANNEL_PATTERNS:
+        match = re.search(pattern, content)
+        if match:
+            value = clean_text(match.group(1))
+            if value:
+                return value
+    return ""
+
+
+def extract_profile_username(url):
+    match = re.search(r"tiktok\.com/@([^/?]+)", url or "", re.IGNORECASE)
+    return match.group(1).strip() if match else ""
+
+
+async def read_channel_name_from_dom(page, profile_username):
+    if not profile_username:
+        return ""
+
+    selectors = [
+        f'a[href*="@{profile_username}"]',
+        f'a[href="/@{profile_username}"]',
+    ]
+    for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            count = await locator.count()
+            if count == 0:
+                continue
+            for index in range(min(count, 8)):
+                try:
+                    text = clean_text(await locator.nth(index).inner_text(timeout=1500))
+                except Exception:
+                    continue
+                if not text:
+                    continue
+                normalized = text.lstrip("@").strip()
+                if normalize_text(normalized) == normalize_text(profile_username):
+                    continue
+                if text.startswith("@"):
+                    return normalized
+        except Exception:
+            continue
+    return ""
+
+
 async def block_heavy_resources(route):
     if route.request.resource_type in {"image", "media", "font"}:
         await route.abort()
@@ -133,6 +238,8 @@ async def block_heavy_resources(route):
 
 async def scrape_single_link(page, url, timeout_ms=45000):
     data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
+    channel_name = ""
+    profile_username = extract_profile_username(url)
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
         content = ""
@@ -140,31 +247,39 @@ async def scrape_single_link(page, url, timeout_ms=45000):
         for _ in range(24):
             content = await page.content()
             data, found = parse_counts(content)
-            if found:
+            dom_channel = ""
+            if profile_username:
+                dom_channel = await read_channel_name_from_dom(page, profile_username)
+                if dom_channel:
+                    channel_name = dom_channel
+            if not channel_name:
+                channel_name = parse_channel_name(content)
+            if found and (dom_channel or not profile_username):
                 break
             await page.wait_for_timeout(500)
 
         if not found:
-            return data, "Error: Không đọc được số liệu"
+            return data, channel_name, "Error: Không đọc được số liệu"
 
-        return data, "Success"
-    except Exception as e:
-        return data, f"Error: {str(e)}"
+        return data, channel_name, "Success"
+    except Exception as error:
+        return data, channel_name, f"Error: {str(error)}"
 
 
 async def scrape_with_retries(page, url, retries):
     last_data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
     last_status = "Error: Chưa chạy"
+    last_channel = ""
 
     for attempt in range(retries + 1):
         if attempt > 0:
             await asyncio.sleep(random.uniform(1.5, 3.5))
-        data, status = await scrape_single_link(page, url)
-        last_data, last_status = data, status
+        data, channel_name, status = await scrape_single_link(page, url)
+        last_data, last_channel, last_status = data, channel_name, status
         if status == "Success":
-            return data, status, attempt + 1
+            return data, channel_name, status, attempt + 1
 
-    return last_data, last_status, retries + 1
+    return last_data, last_channel, last_status, retries + 1
 
 
 async def worker_loop(worker_id, browser, work_queue, result_queue, retries):
@@ -183,12 +298,13 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries):
                 break
 
             started_at = time.perf_counter()
-            data, status, attempts = await scrape_with_retries(page, item["url"], retries)
+            data, channel_name, status, attempts = await scrape_with_retries(page, item["url"], retries)
             elapsed = time.perf_counter() - started_at
             await result_queue.put({
                 **item,
                 "worker": worker_id,
                 "data": data,
+                "channel_name": channel_name,
                 "status": status,
                 "attempts": attempts,
                 "elapsed": elapsed,
@@ -199,26 +315,35 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries):
         await context.close()
 
 
-def write_result(sheet, column_map, row_idx, data):
+def write_result(sheet_contexts, item, data, channel_name):
+    context = sheet_contexts[item["sheet_name"]]
+    sheet = context["worksheet"]
+    columns = context["columns"]
+    row_index = item["row"]
+
     for metric_key, data_key in METRIC_KEYS.items():
-        value = int(data.get(data_key) or 0)
-        sheet.cell(row=row_idx, column=column_map[metric_key]).value = value
+        column_index = columns.get(metric_key)
+        if column_index:
+            sheet.cell(row=row_index, column=column_index).value = int(data.get(data_key) or 0)
+
+    if columns.get("channel") and channel_name:
+        sheet.cell(row=row_index, column=columns["channel"]).value = channel_name
 
 
-async def save_workbook(wb, file_path, websocket_manager=None):
+async def save_workbook(workbook, file_path, websocket_manager=None):
     try:
-        await asyncio.to_thread(wb.save, file_path)
+        await asyncio.to_thread(workbook.save, file_path)
         return True
     except PermissionError:
         if websocket_manager:
             await websocket_manager.broadcast_log("CẢNH BÁO: File Excel đang mở, không thể ghi đè. Vui lòng đóng file rồi quét lại hoặc chờ lần lưu tiếp theo.")
-    except Exception as e:
+    except Exception as error:
         if websocket_manager:
-            await websocket_manager.broadcast_log(f"CẢNH BÁO: Lỗi lưu file ({str(e)})")
+            await websocket_manager.broadcast_log(f"CẢNH BÁO: Lỗi lưu file ({str(error)})")
     return False
 
 
-def progress_payload(total, processed, success_count, error_count, worker_count, started_at, done=False):
+def progress_payload(total, processed, success_count, error_count, worker_count, started_at, done=False, mode="full", partner="", phase="scanning"):
     elapsed = max(time.perf_counter() - started_at, 0.001)
     rate = processed / elapsed * 60 if processed else 0
     remaining = max(total - processed, 0)
@@ -232,10 +357,13 @@ def progress_payload(total, processed, success_count, error_count, worker_count,
         "rate": round(rate, 1),
         "etaSeconds": eta_seconds,
         "done": done,
+        "mode": mode,
+        "partner": partner,
+        "phase": phase,
     }
 
 
-async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY):
+async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None):
     if not os.path.exists(file_path):
         if websocket_manager:
             await websocket_manager.broadcast_log(f"Lỗi: Không tìm thấy file {file_path}")
@@ -245,24 +373,34 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     retries = clamp_int(retries, DEFAULT_RETRIES, 0, 5)
     save_every = clamp_int(save_every, DEFAULT_SAVE_EVERY, 5, 100)
 
-    wb = openpyxl.load_workbook(file_path)
-    sheet = wb.active
-    column_map = find_columns(sheet)
-    rows_to_process = collect_rows(sheet, column_map["url"])
+    workbook = openpyxl.load_workbook(file_path)
+    sheet_contexts = build_sheet_contexts(workbook)
+    rows_to_process = collect_rows(workbook, selected_partner=selected_partner)
     total = len(rows_to_process)
     started_at = time.perf_counter()
+    mode = "partner" if selected_partner else "full"
 
     if total == 0:
         if websocket_manager:
-            await websocket_manager.broadcast_status(progress_payload(0, 0, 0, 0, worker_count, started_at, done=True))
-            await websocket_manager.broadcast_log("Không tìm thấy link TikTok nào trong file đang chọn.")
+            await websocket_manager.broadcast_status(progress_payload(0, 0, 0, 0, worker_count, started_at, done=True, mode=mode, partner=selected_partner or "", phase="done"))
+            message = "Không tìm thấy link TikTok nào phù hợp để quét."
+            if selected_partner:
+                message = f"Không tìm thấy link nào cho đối tác {selected_partner}."
+            await websocket_manager.broadcast_log(message)
         return
 
     worker_count = min(worker_count, total)
     if websocket_manager:
-        await websocket_manager.broadcast_status(progress_payload(total, 0, 0, 0, worker_count, started_at))
-        await websocket_manager.broadcast_log(
-            f"Bắt đầu quét nhanh {total} links bằng {worker_count} luồng, retry {retries} lần, lưu mỗi {save_every} kết quả."
+        if selected_partner:
+            await websocket_manager.broadcast_log(
+                f"Bắt đầu cập nhật đối tác {selected_partner}: {total} links, {worker_count} luồng, retry {retries} lần."
+            )
+        else:
+            await websocket_manager.broadcast_log(
+                f"Bắt đầu quét nhanh {total} links bằng {worker_count} luồng, retry {retries} lần, lưu mỗi {save_every} kết quả."
+            )
+        await websocket_manager.broadcast_status(
+            progress_payload(total, 0, 0, 0, worker_count, started_at, mode=mode, partner=selected_partner or "", phase="starting")
         )
 
     work_queue = asyncio.Queue()
@@ -277,12 +415,18 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     error_count = 0
     pending_save_count = 0
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
+    async with async_playwright() as playwright:
+        if websocket_manager:
+            await websocket_manager.broadcast_log(f"Đang khởi tạo trình duyệt và {worker_count} luồng...")
+        browser = await playwright.chromium.launch(headless=True)
         workers = [
             asyncio.create_task(worker_loop(index + 1, browser, work_queue, result_queue, retries))
             for index in range(worker_count)
         ]
+        if websocket_manager:
+            await websocket_manager.broadcast_status(
+                progress_payload(total, 0, 0, 0, worker_count, started_at, mode=mode, partner=selected_partner or "", phase="scanning")
+            )
 
         try:
             while processed < total:
@@ -293,7 +437,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
 
                 if status == "Success":
                     success_count += 1
-                    write_result(sheet, column_map, result["row"], data)
+                    write_result(sheet_contexts, result, data, result["channel_name"])
                     pending_save_count += 1
                 else:
                     error_count += 1
@@ -309,16 +453,28 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                         "shares": data["Shares"],
                         "status": status,
                         "worker": result["worker"],
+                        "channelName": result["channel_name"],
+                        "sheetName": result["sheet_name"],
                     })
                     await websocket_manager.broadcast_status(
-                        progress_payload(total, processed, success_count, error_count, worker_count, started_at)
+                        progress_payload(
+                            total,
+                            processed,
+                            success_count,
+                            error_count,
+                            worker_count,
+                            started_at,
+                            mode=mode,
+                            partner=selected_partner or "",
+                            phase="scanning",
+                        )
                     )
 
                 if pending_save_count >= save_every:
-                    saved = await save_workbook(wb, file_path, websocket_manager)
+                    saved = await save_workbook(workbook, file_path, websocket_manager)
                     pending_save_count = 0 if saved else pending_save_count
                     if websocket_manager and saved:
-                        await websocket_manager.broadcast_log(f"Đã lưu tạm Excel tại {processed}/{total} links.")
+                        await websocket_manager.broadcast_log(f"Đã lưu tạm workbook tại {processed}/{total} links.")
 
                 result_queue.task_done()
 
@@ -330,11 +486,35 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                     task.cancel()
             await browser.close()
 
-    await save_workbook(wb, file_path, websocket_manager)
+    try:
+        summary_count = rebuild_summary_sheet(workbook)
+        if websocket_manager:
+            await websocket_manager.broadcast_log(f"Đã cập nhật sheet Tổng kết cho {summary_count} đối tác.")
+    except Exception as error:
+        if websocket_manager:
+            await websocket_manager.broadcast_log(f"CẢNH BÁO: Không cập nhật được sheet Tổng kết ({str(error)})")
+
+    await save_workbook(workbook, file_path, websocket_manager)
     if websocket_manager:
         await websocket_manager.broadcast_status(
-            progress_payload(total, processed, success_count, error_count, worker_count, started_at, done=True)
+            progress_payload(
+                total,
+                processed,
+                success_count,
+                error_count,
+                worker_count,
+                started_at,
+                done=True,
+                mode=mode,
+                partner=selected_partner or "",
+                phase="done",
+            )
         )
-        await websocket_manager.broadcast_log(
-            f"HOÀN THÀNH: Đã quét {processed}/{total} links, thành công {success_count}, lỗi {error_count}."
-        )
+        if selected_partner:
+            await websocket_manager.broadcast_log(
+                f"HOÀN THÀNH: Đã cập nhật đối tác {selected_partner} với {processed} links, thành công {success_count}, lỗi {error_count}."
+            )
+        else:
+            await websocket_manager.broadcast_log(
+                f"HOÀN THÀNH: Đã quét {processed}/{total} links, thành công {success_count}, lỗi {error_count}."
+            )
