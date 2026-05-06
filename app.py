@@ -24,13 +24,13 @@ from workbook_utils import (
     clean_text,
     download_google_sheet,
     ensure_data_dir,
-    google_sheet_file_id,
     is_failed_channel_name,
     list_workbook_partners,
     normalize_header,
     parse_google_spreadsheet_id,
     read_summary_dashboard,
     read_sheet_preview,
+    timestamped_google_sheet_file_id,
     workbook_file_entries,
 )
 
@@ -132,6 +132,10 @@ def safe_report_name(name):
     filename = re.sub(r'[\\/:*?"<>|]+', "-", clean_text(name))
     filename = re.sub(r"\s+", " ", filename).strip(" .")
     return filename[:90] if filename else "doi_tac"
+
+
+def filename_timestamp():
+    return datetime.now().strftime("%d-%m-%Y-%H-%M")
 
 
 def format_metric(value):
@@ -325,7 +329,8 @@ async def sync_google_sheet(data: dict):
 
     try:
         spreadsheet_id = parse_google_spreadsheet_id(source_url)
-        file_id = google_sheet_file_id(spreadsheet_id)
+        timestamp = filename_timestamp()
+        file_id = timestamped_google_sheet_file_id(timestamp)
         target_path = resolve_file_path(file_id)
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         download_google_sheet(source_url, target_path)
@@ -333,7 +338,7 @@ async def sync_google_sheet(data: dict):
         GOOGLE_SHEET_SOURCE_URL = source_url
         CURRENT_SELECTED_FILE = file_id
         CURRENT_SELECTED_SHEET = preview.get("currentSheet", "")
-        await manager.broadcast_log(f"Đã đồng bộ Google Sheet vào {GOOGLE_SHEET_LABEL}: {spreadsheet_id}.")
+        await manager.broadcast_log(f"Đã nạp Google Sheet thành file mới: {os.path.basename(file_id)}.")
         return {
             "success": True,
             "file": file_id,
@@ -422,12 +427,13 @@ async def export_report(data: dict):
         partners = [clean_text(name) for name in selected_partners if clean_text(name) in available_partners]
         if not partners:
             return JSONResponse(content={"error": "Không tìm thấy đối tác đã chọn trong file"}, status_code=404)
+        export_timestamp = filename_timestamp()
 
         if len(partners) == 1:
             partner = partners[0]
             report_rows = build_workbook_rows(target_path, selected_partner=partner)
             report_bytes = build_partner_report(partner, report_rows)
-            filename = f"{safe_report_name(partner)}.xlsx"
+            filename = f"{safe_report_name(partner)}-{export_timestamp}.xlsx"
             return Response(
                 content=report_bytes,
                 media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -440,7 +446,7 @@ async def export_report(data: dict):
             for partner in partners:
                 report_rows = build_workbook_rows(target_path, selected_partner=partner)
                 report_bytes = build_partner_report(partner, report_rows)
-                base_name = safe_report_name(partner)
+                base_name = f"{safe_report_name(partner)}-{export_timestamp}"
                 filename = f"{base_name}.xlsx"
                 counter = 2
                 while filename in used_names:
@@ -453,7 +459,7 @@ async def export_report(data: dict):
         return Response(
             content=archive.getvalue(),
             media_type="application/zip",
-            headers={"Content-Disposition": content_disposition("bao_cao_doi_tac.zip")},
+            headers={"Content-Disposition": content_disposition(f"bao_cao_doi_tac-{export_timestamp}.zip")},
         )
     except Exception as error:
         return JSONResponse(content={"error": f"Lỗi xuất báo cáo: {str(error)}"}, status_code=500)

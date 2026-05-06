@@ -86,10 +86,14 @@
         .summary-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-end; margin-bottom: 16px; }
         .summary-title { font-size: 18px; font-weight: 800; color: #111827; }
         .summary-note { margin-top: 4px; font-size: 13px; color: #6b7280; font-weight: 500; }
-        .summary-kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+        .summary-kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
         .summary-kpi { border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px; background: #f9fafb; }
         .summary-kpi .kpi-label { font-size: 11px; color: #6b7280; font-weight: 800; text-transform: uppercase; }
         .summary-kpi .kpi-value { margin-top: 5px; font-size: 24px; font-weight: 800; color: #111827; }
+        .kpi-label-row { display: inline-flex; align-items: center; gap: 6px; }
+        .kpi-info { width: 18px; height: 18px; border-radius: 999px; border: 1px solid #bfdbfe; color: #004ac6; background: #eff6ff; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 900; cursor: help; position: relative; line-height: 1; }
+        .kpi-info:hover::after { content: attr(data-tooltip); position: absolute; left: 50%; bottom: calc(100% + 8px); transform: translateX(-50%); width: max-content; max-width: 280px; padding: 10px 12px; border-radius: 8px; background: #111827; color: #fff; font-size: 12px; font-weight: 600; text-transform: none; line-height: 1.4; box-shadow: 0 12px 28px rgba(15, 23, 42, 0.22); z-index: 20; }
+        .kpi-info:hover::before { content: ""; position: absolute; left: 50%; bottom: calc(100% + 2px); transform: translateX(-50%); border: 6px solid transparent; border-top-color: #111827; z-index: 21; }
         .summary-table-wrap { border: 1px solid #e5e7eb; border-radius: 10px; overflow: auto; max-height: 520px; }
         .summary-table th { background: #eef4ff; color: #1e3a8a; }
         .summary-table td { max-width: none; }
@@ -204,17 +208,17 @@
                         <div class="source-icon"><span class="material-icons-outlined">link</span></div>
                         <div>
                             <div class="source-block-title">Google Sheet chính</div>
-                            <div class="source-block-meta">Đồng bộ nhanh về local.</div>
+                            <div class="source-block-meta">Nạp thành file mới trong local.</div>
                         </div>
                     </div>
                     <div class="field-stack">
                         <div class="source-inline">
                             <input class="text-input" id="googleSheetUrlInput" type="url" placeholder="Dán URL Google Sheet tại đây">
                             <button class="btn btn-primary btn-compact" id="syncSheetBtn" onclick="syncGoogleSheet()">
-                                <span class="material-icons-outlined">sync</span> Đồng bộ
+                                <span class="material-icons-outlined">sync</span> Nạp sheet
                             </button>
                         </div>
-                        <div class="sheet-chip">Lưu vào `data/` theo `spreadsheet_id`.</div>
+                        <div class="sheet-chip">Lưu vào `data/` theo thời gian nhập.</div>
                     </div>
                 </div>
 
@@ -661,15 +665,17 @@
                             <div class="summary-title">Tổng kết đối tác</div>
                             <div class="summary-note">${escapeHtml(data.fileLabel || data.file || '')} • Sheet: ${escapeHtml(data.sheet || 'Tổng kết')}</div>
                         </div>
-                        <button class="btn btn-soft btn-compact" onclick="openReportModal()">
-                            <span class="material-icons-outlined">summarize</span> Cập nhật / xuất đối tác
-                        </button>
                     </div>
                     <div class="summary-kpis">
                         <div class="summary-kpi"><div class="kpi-label">Đối tác</div><div class="kpi-value">${formatNumber(totals.partners)}</div></div>
                         <div class="summary-kpi"><div class="kpi-label">Tổng link</div><div class="kpi-value">${formatNumber(totals.links)}</div></div>
-                        <div class="summary-kpi"><div class="kpi-label">Lượt xem</div><div class="kpi-value">${formatNumber(totals.views)}</div></div>
-                        <div class="summary-kpi"><div class="kpi-label">Tương tác</div><div class="kpi-value">${formatNumber((totals.likes || 0) + (totals.comments || 0) + (totals.saves || 0) + (totals.shares || 0))}</div></div>
+                        <div class="summary-kpi">
+                            <div class="kpi-label kpi-label-row">
+                                Tổng tương tác
+                                <span class="kpi-info" data-tooltip="Tổng lượt xem: ${formatNumber(totals.views || 0)} • Tim: ${formatNumber(totals.likes || 0)} • Bình luận: ${formatNumber(totals.comments || 0)} • Lượt lưu: ${formatNumber(totals.saves || 0)} • Chia sẻ: ${formatNumber(totals.shares || 0)}">!</span>
+                            </div>
+                            <div class="kpi-value">${formatNumber((totals.likes || 0) + (totals.comments || 0) + (totals.saves || 0) + (totals.shares || 0))}</div>
+                        </div>
                     </div>
                     <div class="summary-table-wrap">
                         <table class="summary-table">

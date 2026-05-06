@@ -11,6 +11,8 @@ from playwright.async_api import async_playwright
 
 from workbook_utils import (
     clean_text,
+    load_channel_overrides,
+    resolve_channel_name,
     rebuild_summary_sheet,
     workbook_data_sheet_names,
     worksheet_partner_column_indexes,
@@ -119,6 +121,10 @@ def build_sheet_contexts(workbook):
     return contexts
 
 
+def username_override_map(file_path):
+    return load_channel_overrides(file_path)
+
+
 def find_columns(sheet):
     column_map = {key: None for key in METRIC_HEADERS}
     column_map["url"] = None
@@ -214,6 +220,48 @@ def collect_rows(workbook, selected_partner=None, selected_partners=None):
 
     return rows
 
+
+def is_total_row(sheet, row_index, url_column):
+    value = clean_text(sheet.cell(row=row_index, column=url_column).value)
+    return normalize_text(value) == "TỔNG" or normalize_text(value) == "TONG"
+
+
+def clear_existing_total_rows(workbook):
+    for sheet_name in workbook_data_sheet_names(workbook):
+        sheet = workbook[sheet_name]
+        url_column = find_columns(sheet)["url"]
+        if not url_column:
+            continue
+        for row_index in range(sheet.max_row, 1, -1):
+            if is_total_row(sheet, row_index, url_column):
+                sheet.delete_rows(row_index, 1)
+
+
+def append_sheet_total_rows(workbook):
+    for sheet_name in workbook_data_sheet_names(workbook):
+        sheet = workbook[sheet_name]
+        columns = find_columns(sheet)
+        url_column = columns.get("url")
+        if not url_column:
+            continue
+
+        last_link_row = 1
+        for row_index in range(2, sheet.max_row + 1):
+            url = clean_text(sheet.cell(row=row_index, column=url_column).value)
+            if "tiktok.com" in url or "vt.tiktok.com" in url:
+                last_link_row = row_index
+        if last_link_row < 2:
+            continue
+
+        total_row = last_link_row + 1
+        sheet.cell(row=total_row, column=url_column).value = "TỔNG"
+        for metric_key in METRIC_HEADERS:
+            column_index = columns.get(metric_key)
+            if column_index:
+                col_letter = openpyxl.utils.get_column_letter(column_index)
+                sheet.cell(row=total_row, column=column_index).value = f"=SUM({col_letter}2:{col_letter}{last_link_row})"
+
+
 def parse_counts(content):
     data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
     found = False
@@ -278,10 +326,12 @@ async def block_heavy_resources(route):
         await route.continue_()
 
 
-async def scrape_single_link(page, url, timeout_ms=45000):
+async def scrape_single_link(page, url, channel_overrides=None, timeout_ms=45000):
     data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
     channel_name = ""
     profile_username = extract_profile_username(url)
+    override_name = (channel_overrides or {}).get(profile_username.casefold()) if profile_username else ""
+    trust_username_fallback = bool(profile_username and profile_username.casefold().endswith(".dalat"))
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
         content = ""
@@ -290,25 +340,34 @@ async def scrape_single_link(page, url, timeout_ms=45000):
             content = await page.content()
             data, found = parse_counts(content)
             dom_channel = ""
-            if profile_username:
+            if override_name:
+                channel_name = override_name
+                dom_channel = override_name
+            elif profile_username and not trust_username_fallback:
                 dom_channel = await read_channel_name_from_dom(page, profile_username)
                 if dom_channel:
                     channel_name = dom_channel
-            if not channel_name:
+            if not channel_name and not profile_username:
                 channel_name = parse_channel_name(content)
-            if found and (dom_channel or not profile_username):
+            if found and (dom_channel or trust_username_fallback or not profile_username):
                 break
             await page.wait_for_timeout(500)
 
         if not found:
+            if not channel_name and profile_username:
+                channel_name = resolve_channel_name(url, "", channel_overrides=channel_overrides)
             return data, channel_name, "Error: Không đọc được số liệu"
 
+        if not channel_name and profile_username:
+            channel_name = resolve_channel_name(url, "", channel_overrides=channel_overrides)
         return data, channel_name, "Success"
     except Exception as error:
+        if not channel_name and profile_username:
+            channel_name = resolve_channel_name(url, "", channel_overrides=channel_overrides)
         return data, channel_name, f"Error: {str(error)}"
 
 
-async def scrape_with_retries(page, url, retries):
+async def scrape_with_retries(page, url, retries, channel_overrides=None):
     last_data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
     last_status = "Error: Chưa chạy"
     last_channel = ""
@@ -316,7 +375,7 @@ async def scrape_with_retries(page, url, retries):
     for attempt in range(retries + 1):
         if attempt > 0:
             await asyncio.sleep(random.uniform(1.5, 3.5))
-        data, channel_name, status = await scrape_single_link(page, url)
+        data, channel_name, status = await scrape_single_link(page, url, channel_overrides=channel_overrides)
         last_data, last_channel, last_status = data, channel_name, status
         if status == "Success":
             return data, channel_name, status, attempt + 1
@@ -324,7 +383,7 @@ async def scrape_with_retries(page, url, retries):
     return last_data, last_channel, last_status, retries + 1
 
 
-async def worker_loop(worker_id, browser, work_queue, result_queue, retries):
+async def worker_loop(worker_id, browser, work_queue, result_queue, retries, channel_overrides=None):
     context = await browser.new_context(
         user_agent=random.choice(USER_AGENTS),
         viewport={"width": 390, "height": 844},
@@ -340,7 +399,7 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries):
                 break
 
             started_at = time.perf_counter()
-            data, channel_name, status, attempts = await scrape_with_retries(page, item["url"], retries)
+            data, channel_name, status, attempts = await scrape_with_retries(page, item["url"], retries, channel_overrides=channel_overrides)
             elapsed = time.perf_counter() - started_at
             await result_queue.put({
                 **item,
@@ -426,8 +485,10 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     partner_label = selected_partner_label(selected_names)
 
     workbook = openpyxl.load_workbook(file_path)
+    clear_existing_total_rows(workbook)
     sheet_contexts = build_sheet_contexts(workbook)
     rows_to_process = collect_rows(workbook, selected_partners=selected_names)
+    channel_overrides = username_override_map(file_path)
     total = len(rows_to_process)
     started_at = time.perf_counter()
     mode = "partner" if selected_names else "full"
@@ -472,7 +533,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             await websocket_manager.broadcast_log(f"Đang khởi tạo trình duyệt và {worker_count} luồng...")
         browser = await playwright.chromium.launch(headless=True)
         workers = [
-            asyncio.create_task(worker_loop(index + 1, browser, work_queue, result_queue, retries))
+            asyncio.create_task(worker_loop(index + 1, browser, work_queue, result_queue, retries, channel_overrides=channel_overrides))
             for index in range(worker_count)
         ]
         if websocket_manager:
@@ -539,6 +600,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             await browser.close()
 
     try:
+        append_sheet_total_rows(workbook)
         summary_update_time = datetime.now().strftime("%d/%m/%Y %H:%M")
         summary_count = rebuild_summary_sheet(
             workbook,

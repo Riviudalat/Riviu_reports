@@ -24,6 +24,25 @@ SUMMARY_METRIC_COLUMNS = ["TỔNG LƯỢT XEM", "TỔNG TIM", "TỔNG BÌNH LU�
 PREFERRED_DATA_SHEET_KEYS = {"thang 5", "thang5"}
 PARTNER_HEADING_MARKERS = ("DANH SÁCH", "DANH SACH", "BỘ ẢNH", "BO ANH")
 CHANNEL_OVERRIDE_FILENAME = "channel_name_overrides.json"
+DEFAULT_CHANNEL_OVERRIDES = {
+    "baoquyen.dalat": "Bảo Quyên",
+    "baothuy.dalat": "Bảo Thúy",
+    "benhi.dalat": "Bé Nhi",
+    "diemhanh.dalat": "Diễm Hạnh",
+    "hoangyen.dalat": "Hoàng Yến",
+    "huongthao.dalat": "Hương Thảo",
+    "huyennhi.dalat": "Huyền Nhi",
+    "kimmai.dalat": "Kim Mai",
+    "lienhoa.dalat": "Liên Hoa",
+    "mailien.dalat": "Mai Liên",
+    "mongquynh.dalat": "Mộng Quỳnh",
+    "mongvi.dalat": "Mộng Vi",
+    "ngocthy.dalat": "Ngọc Thy",
+    "nhatha.dalat": "Nhật Hạ",
+    "thucdoan.dalat": "Thục Đoan",
+    "thuyngan.dalat": "Thùy Ngân",
+    "xuanhoa.dalat": "Xuân Hoa",
+}
 
 
 def ensure_data_dir(base_dir):
@@ -58,6 +77,29 @@ def normalize_channel_display(value):
     return channel_fixes.get(text, text)
 
 
+def prettify_channel_username(username):
+    text = clean_text(username).lstrip("@")
+    if not text:
+        return ""
+    text = re.sub(r"\.dalat$", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"[._-]+", " ", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return " ".join(part[:1].upper() + part[1:] for part in text.split() if part)
+
+
+def resolve_channel_name(link, raw_channel, channel_overrides=None):
+    username = extract_tiktok_username(link)
+    if username:
+        override_name = (channel_overrides or {}).get(username.casefold())
+        if override_name:
+            return override_name
+        if username.casefold().endswith(".dalat"):
+            fallback_name = prettify_channel_username(username)
+            if fallback_name:
+                return fallback_name
+    return normalize_channel_display(raw_channel)
+
+
 def clean_preview_value(value):
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
@@ -89,6 +131,10 @@ def google_sheet_file_id(spreadsheet_id):
     return f"{DATA_DIR_NAME}/{GOOGLE_SHEET_FILENAME_PREFIX}{safe_id}.xlsx"
 
 
+def timestamped_google_sheet_file_id(timestamp):
+    return f"{DATA_DIR_NAME}/Report Seeding Tiktok-{timestamp}.xlsx"
+
+
 def base_dir_for_file(file_path):
     absolute_path = os.path.abspath(file_path)
     parent = os.path.dirname(absolute_path)
@@ -103,16 +149,22 @@ def channel_override_path(file_path):
 
 def load_channel_overrides(file_path):
     path = channel_override_path(file_path)
+    overrides = {
+        str(key).casefold(): clean_text(value)
+        for key, value in DEFAULT_CHANNEL_OVERRIDES.items()
+        if clean_text(value)
+    }
     if not os.path.exists(path):
-        return {}
+        return overrides
     try:
         with open(path, "r", encoding="utf-8") as file_obj:
             data = json.load(file_obj)
     except (OSError, json.JSONDecodeError):
-        return {}
+        return overrides
     if not isinstance(data, dict):
-        return {}
-    return {str(key).casefold(): clean_text(value) for key, value in data.items() if clean_text(value)}
+        return overrides
+    overrides.update({str(key).casefold(): clean_text(value) for key, value in data.items() if clean_text(value)})
+    return overrides
 
 
 def google_sheet_export_url(source_url):
@@ -151,6 +203,35 @@ def is_preferred_data_sheet_name(sheet_name):
     return normalize_key(sheet_name) in PREFERRED_DATA_SHEET_KEYS
 
 
+def is_total_label(value):
+    return normalize_key(clean_text(value)) == "tong"
+
+
+def fill_preview_total_row(frame, link_column, metric_columns):
+    if not link_column or link_column not in frame.columns:
+        return frame
+
+    total_positions = [
+        index
+        for index, value in enumerate(frame[link_column].tolist())
+        if is_total_label(value)
+    ]
+    if not total_positions:
+        return frame
+
+    total_position = total_positions[-1]
+    if total_position <= 0:
+        return frame
+
+    source_frame = frame.iloc[:total_position]
+    for column in metric_columns:
+        if not column or column not in frame.columns:
+            continue
+        total_value = pd.to_numeric(source_frame[column], errors="coerce").fillna(0).sum()
+        frame.iat[total_position, frame.columns.get_loc(column)] = int(total_value)
+    return frame
+
+
 def read_sheet_preview(file_path, sheet_name=None, limit=100):
     workbook = load_excel_file(file_path)
     sheets = workbook.sheet_names
@@ -162,22 +243,48 @@ def read_sheet_preview(file_path, sheet_name=None, limit=100):
     channel_overrides = load_channel_overrides(file_path)
     link_column = find_link_column_name(frame)
     channel_column = find_column_name(frame, ["TÊN KÊNH", "Tên Kênh"])
+    metric_columns = [
+        find_column_name(frame, ["LƯỢT XEM"]),
+        find_column_name(frame, ["TIM"]),
+        find_column_name(frame, ["BÌNH LUẬN"]),
+        find_column_name(frame, ["LƯỢT LƯU"]),
+        find_column_name(frame, ["CHIA SẺ"]),
+    ]
     for column in frame.select_dtypes(include=["datetime"]).columns:
         frame[column] = frame[column].dt.strftime("%Y-%m-%d %H:%M:%S")
+    frame = fill_preview_total_row(frame, link_column, metric_columns)
+
+    preview_frame = frame
+    if link_column and len(frame.index) > limit:
+        total_positions = [
+            index
+            for index, value in enumerate(frame[link_column].tolist())
+            if is_total_label(value)
+        ]
+        if total_positions and total_positions[-1] >= limit:
+            preview_frame = pd.concat(
+                [frame.head(max(limit - 1, 0)), frame.iloc[[total_positions[-1]]]],
+                ignore_index=True,
+            )
+        else:
+            preview_frame = frame.head(limit)
+    else:
+        preview_frame = frame.head(limit)
 
     data = []
-    for record in frame.head(limit).to_dict(orient="records"):
+    for record in preview_frame.to_dict(orient="records"):
         preview_row = {}
         for column, value in record.items():
             cleaned = clean_preview_value(value)
-            if normalize_key(column) == normalize_key("TÊN KÊNH"):
-                cleaned = normalize_channel_display(cleaned)
             preview_row[column] = cleaned
         if link_column and channel_column:
-            username = extract_tiktok_username(record.get(link_column, ""))
-            override_name = channel_overrides.get(username.casefold()) if username else ""
-            if override_name:
-                preview_row[channel_column] = override_name
+            preview_row[channel_column] = clean_preview_value(
+                resolve_channel_name(
+                    record.get(link_column, ""),
+                    preview_row.get(channel_column, ""),
+                    channel_overrides=channel_overrides,
+                )
+            )
         data.append(preview_row)
 
     return {
@@ -402,13 +509,15 @@ def build_workbook_rows(file_path, selected_partner=None):
             link = clean_text(row.get(link_column, ""))
             if not link:
                 continue
-            username = extract_tiktok_username(link)
-            override_name = channel_overrides.get(username.casefold()) if username else ""
 
             rows.append({
                 "sheet_name": sheet_name,
                 "NGÀY AIR": row.get(date_column, "") if date_column else "",
-                "TÊN KÊNH": override_name or (clean_text(row.get(channel_column, "")) if channel_column else ""),
+                "TÊN KÊNH": resolve_channel_name(
+                    link,
+                    clean_text(row.get(channel_column, "")) if channel_column else "",
+                    channel_overrides=channel_overrides,
+                ),
                 "LINK AIR": link,
                 "LƯỢT XEM": row.get(metric_columns["LƯỢT XEM"], "") if metric_columns["LƯỢT XEM"] else "",
                 "TIM": row.get(metric_columns["TIM"], "") if metric_columns["TIM"] else "",
@@ -713,7 +822,10 @@ def workbook_file_entries(base_dir):
             continue
         if filename.endswith(".xlsx") or filename.endswith(".xls"):
             relative_id = f"{DATA_DIR_NAME}/{filename}".replace("\\", "/")
-            label = f"{GOOGLE_SHEET_LABEL}: {filename.removesuffix('.xlsx').replace(GOOGLE_SHEET_FILENAME_PREFIX, '')[:12]}"
+            if filename.startswith("Report Seeding Tiktok-"):
+                label = filename.removesuffix(".xlsx")
+            else:
+                label = f"{GOOGLE_SHEET_LABEL}: {filename.removesuffix('.xlsx').replace(GOOGLE_SHEET_FILENAME_PREFIX, '')[:12]}"
             if relative_id == LEGACY_GOOGLE_SHEET_FILE_ID:
                 label = GOOGLE_SHEET_LABEL
             entries.append({
