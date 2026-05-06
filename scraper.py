@@ -4,6 +4,7 @@ import random
 import re
 import time
 import unicodedata
+from datetime import datetime
 
 import openpyxl
 from playwright.async_api import async_playwright
@@ -41,6 +42,8 @@ METRIC_KEYS = {
     "shares": "Shares",
 }
 
+LAST_UPDATE_HEADER = "Cập nhật lần cuối"
+
 COUNT_PATTERNS = {
     "Views": r'"playCount"\s*:\s*"?(\d+)"?',
     "Likes": r'"diggCount"\s*:\s*"?(\d+)"?',
@@ -59,6 +62,36 @@ MAX_WORKERS = 50
 DEFAULT_WORKERS = 5
 DEFAULT_RETRIES = 2
 DEFAULT_SAVE_EVERY = 25
+
+
+def normalize_selected_partners(selected_partner=None, selected_partners=None):
+    values = []
+    if isinstance(selected_partners, (list, tuple, set)):
+        values.extend(selected_partners)
+    elif selected_partners:
+        values.append(selected_partners)
+    if isinstance(selected_partner, (list, tuple, set)):
+        values.extend(selected_partner)
+    elif selected_partner:
+        values.append(selected_partner)
+
+    partners = []
+    seen = set()
+    for value in values:
+        name = clean_text(value)
+        key = name.casefold()
+        if name and key not in seen:
+            partners.append(name)
+            seen.add(key)
+    return partners
+
+
+def selected_partner_label(partners):
+    if not partners:
+        return ""
+    if len(partners) == 1:
+        return partners[0]
+    return f"{len(partners)} đối tác"
 
 
 def clamp_int(value, default, minimum, maximum):
@@ -91,6 +124,7 @@ def find_columns(sheet):
     column_map["url"] = None
     column_map["channel"] = None
     column_map["date"] = None
+    column_map["last_update"] = None
 
     for cell in sheet[1]:
         header = normalize_text(cell.value)
@@ -102,6 +136,8 @@ def find_columns(sheet):
             column_map["channel"] = cell.column
         if "NGÀY" in header or "NGAY" in header:
             column_map["date"] = cell.column
+        if "CẬP NHẬT LẦN CUỐI" in header or "CAP NHAT LAN CUOI" in header:
+            column_map["last_update"] = cell.column
         for key, expected_header in METRIC_HEADERS.items():
             if normalize_text(expected_header) in header:
                 column_map[key] = cell.column
@@ -133,11 +169,17 @@ def find_columns(sheet):
             sheet.cell(row=1, column=max_column).value = header
             column_map[key] = max_column
 
+    if not column_map["last_update"]:
+        max_column += 1
+        sheet.cell(row=1, column=max_column).value = LAST_UPDATE_HEADER
+        column_map["last_update"] = max_column
+
     return column_map
 
 
-def collect_rows(workbook, selected_partner=None):
-    selected_key = selected_partner.casefold() if selected_partner else None
+def collect_rows(workbook, selected_partner=None, selected_partners=None):
+    selected_names = normalize_selected_partners(selected_partner, selected_partners)
+    selected_keys = {partner.casefold() for partner in selected_names}
     rows = []
 
     for sheet_name in workbook_data_sheet_names(workbook):
@@ -156,10 +198,10 @@ def collect_rows(workbook, selected_partner=None):
             if partner_columns:
                 partners = worksheet_row_partners(worksheet, row_index, partner_columns)
 
-            if selected_key:
+            if selected_keys:
                 if not partners:
                     continue
-                if selected_key not in {partner.casefold() for partner in partners}:
+                if not selected_keys.intersection({partner.casefold() for partner in partners}):
                     continue
 
             rows.append({
@@ -315,19 +357,27 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries):
         await context.close()
 
 
-def write_result(sheet_contexts, item, data, channel_name):
+def write_result(sheet_contexts, item, data, channel_name, status):
     context = sheet_contexts[item["sheet_name"]]
     sheet = context["worksheet"]
     columns = context["columns"]
     row_index = item["row"]
+    update_time = datetime.now().strftime("%d/%m/%Y %H:%M")
 
-    for metric_key, data_key in METRIC_KEYS.items():
-        column_index = columns.get(metric_key)
-        if column_index:
-            sheet.cell(row=row_index, column=column_index).value = int(data.get(data_key) or 0)
+    if status == "Success":
+        for metric_key, data_key in METRIC_KEYS.items():
+            column_index = columns.get(metric_key)
+            if column_index:
+                sheet.cell(row=row_index, column=column_index).value = int(data.get(data_key) or 0)
 
-    if columns.get("channel") and channel_name:
-        sheet.cell(row=row_index, column=columns["channel"]).value = channel_name
+    if columns.get("channel"):
+        if channel_name:
+            sheet.cell(row=row_index, column=columns["channel"]).value = channel_name
+        elif status != "Success":
+            sheet.cell(row=row_index, column=columns["channel"]).value = "Lỗi"
+
+    if columns.get("last_update"):
+        sheet.cell(row=row_index, column=columns["last_update"]).value = update_time
 
 
 async def save_workbook(workbook, file_path, websocket_manager=None):
@@ -363,7 +413,7 @@ def progress_payload(total, processed, success_count, error_count, worker_count,
     }
 
 
-async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None):
+async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None):
     if not os.path.exists(file_path):
         if websocket_manager:
             await websocket_manager.broadcast_log(f"Lỗi: Không tìm thấy file {file_path}")
@@ -372,35 +422,37 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     worker_count = clamp_int(worker_count, DEFAULT_WORKERS, 1, MAX_WORKERS)
     retries = clamp_int(retries, DEFAULT_RETRIES, 0, 5)
     save_every = clamp_int(save_every, DEFAULT_SAVE_EVERY, 5, 100)
+    selected_names = normalize_selected_partners(selected_partner, selected_partners)
+    partner_label = selected_partner_label(selected_names)
 
     workbook = openpyxl.load_workbook(file_path)
     sheet_contexts = build_sheet_contexts(workbook)
-    rows_to_process = collect_rows(workbook, selected_partner=selected_partner)
+    rows_to_process = collect_rows(workbook, selected_partners=selected_names)
     total = len(rows_to_process)
     started_at = time.perf_counter()
-    mode = "partner" if selected_partner else "full"
+    mode = "partner" if selected_names else "full"
 
     if total == 0:
         if websocket_manager:
-            await websocket_manager.broadcast_status(progress_payload(0, 0, 0, 0, worker_count, started_at, done=True, mode=mode, partner=selected_partner or "", phase="done"))
+            await websocket_manager.broadcast_status(progress_payload(0, 0, 0, 0, worker_count, started_at, done=True, mode=mode, partner=partner_label, phase="done"))
             message = "Không tìm thấy link TikTok nào phù hợp để quét."
-            if selected_partner:
-                message = f"Không tìm thấy link nào cho đối tác {selected_partner}."
+            if selected_names:
+                message = f"Không tìm thấy link nào cho {partner_label}."
             await websocket_manager.broadcast_log(message)
         return
 
     worker_count = min(worker_count, total)
     if websocket_manager:
-        if selected_partner:
+        if selected_names:
             await websocket_manager.broadcast_log(
-                f"Bắt đầu cập nhật đối tác {selected_partner}: {total} links, {worker_count} luồng, retry {retries} lần."
+                f"Bắt đầu cập nhật {partner_label}: {total} links, {worker_count} luồng, retry {retries} lần."
             )
         else:
             await websocket_manager.broadcast_log(
                 f"Bắt đầu quét nhanh {total} links bằng {worker_count} luồng, retry {retries} lần, lưu mỗi {save_every} kết quả."
             )
         await websocket_manager.broadcast_status(
-            progress_payload(total, 0, 0, 0, worker_count, started_at, mode=mode, partner=selected_partner or "", phase="starting")
+            progress_payload(total, 0, 0, 0, worker_count, started_at, mode=mode, partner=partner_label, phase="starting")
         )
 
     work_queue = asyncio.Queue()
@@ -425,7 +477,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
         ]
         if websocket_manager:
             await websocket_manager.broadcast_status(
-                progress_payload(total, 0, 0, 0, worker_count, started_at, mode=mode, partner=selected_partner or "", phase="scanning")
+                progress_payload(total, 0, 0, 0, worker_count, started_at, mode=mode, partner=partner_label, phase="scanning")
             )
 
         try:
@@ -437,10 +489,10 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
 
                 if status == "Success":
                     success_count += 1
-                    write_result(sheet_contexts, result, data, result["channel_name"])
-                    pending_save_count += 1
                 else:
                     error_count += 1
+                write_result(sheet_contexts, result, data, result["channel_name"], status)
+                pending_save_count += 1
 
                 if websocket_manager:
                     await websocket_manager.broadcast_data({
@@ -465,7 +517,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                             worker_count,
                             started_at,
                             mode=mode,
-                            partner=selected_partner or "",
+                            partner=partner_label,
                             phase="scanning",
                         )
                     )
@@ -487,7 +539,12 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             await browser.close()
 
     try:
-        summary_count = rebuild_summary_sheet(workbook)
+        summary_update_time = datetime.now().strftime("%d/%m/%Y %H:%M")
+        summary_count = rebuild_summary_sheet(
+            workbook,
+            summary_update_time=summary_update_time,
+            selected_partners=selected_names,
+        )
         if websocket_manager:
             await websocket_manager.broadcast_log(f"Đã cập nhật sheet Tổng kết cho {summary_count} đối tác.")
     except Exception as error:
@@ -506,13 +563,13 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 started_at,
                 done=True,
                 mode=mode,
-                partner=selected_partner or "",
+                partner=partner_label,
                 phase="done",
             )
         )
-        if selected_partner:
+        if selected_names:
             await websocket_manager.broadcast_log(
-                f"HOÀN THÀNH: Đã cập nhật đối tác {selected_partner} với {processed} links, thành công {success_count}, lỗi {error_count}."
+                f"HOÀN THÀNH: Đã cập nhật {partner_label} với {processed} links, thành công {success_count}, lỗi {error_count}."
             )
         else:
             await websocket_manager.broadcast_log(

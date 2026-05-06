@@ -17,7 +17,8 @@ LEGACY_GOOGLE_SHEET_FILE_ID = "data/google_sheet_main.xlsx"
 GOOGLE_SHEET_LABEL = "Google Sheet chính"
 REPORT_COLUMNS = ["NGÀY AIR", "TÊN KÊNH", "LINK AIR", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"]
 SUMMARY_SHEET_NAME = "Tổng kết"
-SUMMARY_COLUMNS = ["Stt", "ĐỐI TÁC", "TỔNG LINK", "TỔNG LƯỢT XEM", "TỔNG TIM", "TỔNG BÌNH LUẬN", "TỔNG LƯỢT LƯU", "TỔNG CHIA SẺ"]
+LAST_UPDATE_COLUMN = "Cập nhật lần cuối"
+SUMMARY_COLUMNS = ["Stt", "ĐỐI TÁC", "TỔNG LINK", "TỔNG LƯỢT XEM", "TỔNG TIM", "TỔNG BÌNH LUẬN", "TỔNG LƯỢT LƯU", "TỔNG CHIA SẺ", LAST_UPDATE_COLUMN]
 METRIC_COLUMNS = ["LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"]
 SUMMARY_METRIC_COLUMNS = ["TỔNG LƯỢT XEM", "TỔNG TIM", "TỔNG BÌNH LUẬN", "TỔNG LƯỢT LƯU", "TỔNG CHIA SẺ"]
 PREFERRED_DATA_SHEET_KEYS = {"thang 5", "thang5"}
@@ -201,6 +202,8 @@ def read_summary_dashboard(file_path):
 
     frame = workbook.parse(summary_sheet).fillna("")
     columns = frame.columns.tolist()
+    if LAST_UPDATE_COLUMN not in columns:
+        columns.append(LAST_UPDATE_COLUMN)
     rows = []
     partner_column = find_column_name(frame, ["ĐỐI TÁC", "Đối tác"])
     total_link_column = find_column_name(frame, ["TỔNG LINK", "Tổng link"])
@@ -212,7 +215,11 @@ def read_summary_dashboard(file_path):
         "shares": find_column_name(frame, ["TỔNG CHIA SẺ", "CHIA SẺ"]),
     }
 
-    numeric_summary_keys = {normalize_key(item) for item in SUMMARY_COLUMNS if normalize_key(item) != "doi tac"}
+    numeric_summary_keys = {
+        normalize_key(item)
+        for item in SUMMARY_COLUMNS
+        if normalize_key(item) not in {"doi tac", normalize_key(LAST_UPDATE_COLUMN)}
+    }
     for record in frame.to_dict(orient="records"):
         partner_name = clean_text(record.get(partner_column or "", ""))
         if not partner_name:
@@ -221,6 +228,7 @@ def read_summary_dashboard(file_path):
         for column in columns:
             value = record.get(column, "")
             row[column] = to_number(value) if normalize_key(column) in numeric_summary_keys else clean_text(value)
+        row.setdefault(LAST_UPDATE_COLUMN, "")
         rows.append(row)
 
     totals = {
@@ -453,6 +461,10 @@ def worksheet_find_link_column_index(worksheet):
     return None
 
 
+def worksheet_find_last_update_column_index(worksheet):
+    return worksheet_find_column_index(worksheet, [LAST_UPDATE_COLUMN, "Ngày cập nhật", "Ngay cap nhat"])
+
+
 def worksheet_has_link_column(worksheet):
     if worksheet_find_link_column_index(worksheet):
         return True
@@ -525,7 +537,44 @@ def to_number(value):
         return 0
 
 
-def build_partner_summary_rows(workbook):
+def is_failed_channel_name(value):
+    text = clean_text(value)
+    key = normalize_key(text)
+    return key in {"loi", "l?i"} or text.casefold().startswith("error:")
+
+
+def read_existing_summary_updates(worksheet):
+    updates = {}
+    if not worksheet or (worksheet.max_row or 0) < 2:
+        return updates
+    partner_column = worksheet_find_column_index(worksheet, ["ĐỐI TÁC", "Đối tác"])
+    update_column = worksheet_find_column_index(worksheet, [LAST_UPDATE_COLUMN, "Ngày cập nhật", "Ngay cap nhat"])
+    if not partner_column or not update_column:
+        return updates
+    for row_index in range(2, (worksheet.max_row or 0) + 1):
+        partner = clean_text(worksheet.cell(row=row_index, column=partner_column).value)
+        update_value = clean_text(worksheet.cell(row=row_index, column=update_column).value)
+        if partner and update_value:
+            updates[partner.casefold()] = update_value
+    return updates
+
+
+def normalize_selected_partner_keys(selected_partner=None, selected_partners=None):
+    values = []
+    if isinstance(selected_partners, (list, tuple, set)):
+        values.extend(selected_partners)
+    elif selected_partners:
+        values.append(selected_partners)
+    if isinstance(selected_partner, (list, tuple, set)):
+        values.extend(selected_partner)
+    elif selected_partner:
+        values.append(selected_partner)
+    return {clean_text(value).casefold() for value in values if clean_text(value)}
+
+
+def build_partner_summary_rows(workbook, summary_update_time="", selected_partner=None, selected_partners=None, previous_updates=None):
+    selected_keys = normalize_selected_partner_keys(selected_partner, selected_partners)
+    previous_updates = previous_updates or {}
     summary = {}
     for sheet_name in workbook_data_sheet_names(workbook):
         worksheet = workbook[sheet_name]
@@ -541,6 +590,7 @@ def build_partner_summary_rows(workbook):
             header: worksheet_find_column_index(worksheet, [header])
             for header in METRIC_COLUMNS
         }
+        last_update_column = worksheet_find_last_update_column_index(worksheet)
 
         for row_index in range(2, (worksheet.max_row or 0) + 1):
             link = clean_text(worksheet.cell(row=row_index, column=link_column).value)
@@ -562,9 +612,14 @@ def build_partner_summary_rows(workbook):
                         "TỔNG BÌNH LUẬN": 0,
                         "TỔNG LƯỢT LƯU": 0,
                         "TỔNG CHIA SẺ": 0,
+                        LAST_UPDATE_COLUMN: previous_updates.get(partner.casefold(), ""),
                     },
                 )
                 bucket["TỔNG LINK"] += 1
+                if last_update_column:
+                    update_value = clean_text(worksheet.cell(row=row_index, column=last_update_column).value)
+                    if update_value and update_value > clean_text(bucket.get(LAST_UPDATE_COLUMN, "")):
+                        bucket[LAST_UPDATE_COLUMN] = update_value
                 for metric, column_index in metric_columns.items():
                     if not column_index:
                         continue
@@ -581,6 +636,11 @@ def build_partner_summary_rows(workbook):
                         bucket["TỔNG CHIA SẺ"] += value
 
     result = []
+    if summary_update_time:
+        for partner, row in summary.items():
+            if not selected_keys or partner.casefold() in selected_keys:
+                row[LAST_UPDATE_COLUMN] = summary_update_time
+
     for index, name in enumerate(sorted(summary, key=lambda value: value.casefold()), start=1):
         row = summary[name]
         row["Stt"] = index
@@ -588,8 +648,10 @@ def build_partner_summary_rows(workbook):
     return result
 
 
-def rebuild_summary_sheet(workbook):
+def rebuild_summary_sheet(workbook, summary_update_time="", selected_partner=None, selected_partners=None):
     summary_sheet = next((name for name in workbook.sheetnames if is_summary_sheet_name(name)), None)
+    existing_worksheet = workbook[summary_sheet] if summary_sheet else None
+    previous_updates = read_existing_summary_updates(existing_worksheet)
     if summary_sheet:
         worksheet = workbook[summary_sheet]
         worksheet.delete_rows(1, max(worksheet.max_row or 1, 1))
@@ -598,7 +660,13 @@ def rebuild_summary_sheet(workbook):
     else:
         worksheet = workbook.create_sheet(SUMMARY_SHEET_NAME)
 
-    rows = build_partner_summary_rows(workbook)
+    rows = build_partner_summary_rows(
+        workbook,
+        summary_update_time=summary_update_time,
+        selected_partner=selected_partner,
+        selected_partners=selected_partners,
+        previous_updates=previous_updates,
+    )
     header_fill = PatternFill("solid", fgColor="0B5ED7")
     for column_index, header in enumerate(SUMMARY_COLUMNS, start=1):
         cell = worksheet.cell(row=1, column=column_index, value=header)
@@ -611,13 +679,15 @@ def rebuild_summary_sheet(workbook):
             cell = worksheet.cell(row=row_index, column=column_index, value=row.get(header, ""))
             if header == "ĐỐI TÁC":
                 cell.alignment = Alignment(wrap_text=True, vertical="top")
+            elif header == LAST_UPDATE_COLUMN:
+                cell.alignment = Alignment(horizontal="center")
             else:
                 cell.number_format = "#,##0"
                 cell.alignment = Alignment(horizontal="right")
 
     worksheet.freeze_panes = "A2"
     worksheet.auto_filter.ref = f"A1:{get_column_letter(len(SUMMARY_COLUMNS))}{max(len(rows) + 1, 1)}"
-    widths = [8, 38, 12, 16, 12, 16, 16, 14]
+    widths = [8, 38, 12, 16, 12, 16, 16, 14, 20]
     for index, width in enumerate(widths, start=1):
         worksheet.column_dimensions[get_column_letter(index)].width = width
 

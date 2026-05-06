@@ -625,7 +625,7 @@
                 const rows = data.rows || [];
                 const columns = data.columns && data.columns.length
                     ? data.columns
-                    : ['Stt', 'ĐỐI TÁC', 'TỔNG LINK', 'TỔNG LƯỢT XEM', 'TỔNG TIM', 'TỔNG BÌNH LUẬN', 'TỔNG LƯỢT LƯU', 'TỔNG CHIA SẺ'];
+                    : ['Stt', 'ĐỐI TÁC', 'TỔNG LINK', 'TỔNG LƯỢT XEM', 'TỔNG TIM', 'TỔNG BÌNH LUẬN', 'TỔNG LƯỢT LƯU', 'TỔNG CHIA SẺ', 'Cập nhật lần cuối'];
                 const totals = data.totals || {};
 
                 if (rows.length === 0) {
@@ -647,6 +647,7 @@
                             const key = normalizeVietnameseKey(column);
                             const value = row[column] ?? '';
                             if (key === 'doi tac') return `<td class="partner-cell" title="${escapeHtml(value)}">${escapeHtml(value)}</td>`;
+                            if (key === 'cap nhat lan cuoi') return `<td>${escapeHtml(value)}</td>`;
                             if (key === 'stt') return `<td class="number-cell">${formatNumber(value)}</td>`;
                             if (key === 'tong link') return `<td class="number-cell total-link-cell">${formatNumber(value)}</td>`;
                             return `<td class="number-cell">${formatNumber(value)}</td>`;
@@ -702,13 +703,14 @@
             };
         }
 
-        function startScraping(partner = '') {
+        function startScraping(partners = []) {
             if (!ws || ws.readyState !== WebSocket.OPEN) {
                 addLog('Lỗi: Chưa kết nối được server. Vui lòng kiểm tra CMD.');
                 return;
             }
+            const selected = Array.isArray(partners) ? partners : (partners ? [partners] : []);
             const workers = Number(workerCountSelect.value || 5);
-            ws.send(JSON.stringify({ action: 'start', workers, partner }));
+            ws.send(JSON.stringify({ action: 'start', workers, partners: selected, partner: selected.length === 1 ? selected[0] : '' }));
             startBtn.disabled = true;
             workerCountSelect.disabled = true;
             document.getElementById('refreshPartnerBtn').disabled = true;
@@ -719,12 +721,12 @@
 
         async function refreshPartnerLinks() {
             const partners = reportPartners.filter(name => selectedPartners.has(name));
-            if (partners.length !== 1) {
-                addLog('Hãy chọn đúng 1 đối tác để cập nhật lại link.');
+            if (partners.length === 0) {
+                addLog('Hãy chọn ít nhất 1 đối tác để cập nhật lại link.');
                 return;
             }
             closeReportModal();
-            startScraping(partners[0]);
+            startScraping(partners);
         }
 
         function formatDuration(seconds) {
@@ -932,9 +934,9 @@
 
             summary.textContent = count === 0
                 ? 'Chưa chọn đối tác nào.'
-                : `Đã chọn ${count}/${total} đối tác. Cập nhật lại chỉ dùng 1 đối tác; xuất báo cáo hỗ trợ một hoặc nhiều đối tác.`;
+                : `Đã chọn ${count}/${total} đối tác. Cập nhật lại và xuất báo cáo đều hỗ trợ một hoặc nhiều đối tác.`;
             exportBtn.disabled = count === 0;
-            refreshBtn.disabled = count !== 1;
+            refreshBtn.disabled = count === 0;
         }
 
         function filenameFromDisposition(disposition, fallback) {

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import zipfile
+from datetime import datetime
 from urllib.parse import quote
 
 import pandas as pd
@@ -24,6 +25,7 @@ from workbook_utils import (
     download_google_sheet,
     ensure_data_dir,
     google_sheet_file_id,
+    is_failed_channel_name,
     list_workbook_partners,
     normalize_header,
     parse_google_spreadsheet_id,
@@ -166,10 +168,15 @@ def find_report_column(frame, header):
 
 
 def build_partner_report(partner, rows):
-    frame = pd.DataFrame(rows)
+    valid_rows = [row for row in rows if not is_failed_channel_name(row.get("TÊN KÊNH", ""))]
+    frame = pd.DataFrame(valid_rows)
     wb = Workbook()
     ws = wb.active
     ws.title = "Báo cáo"
+    updated_at = datetime.now().strftime("%d/%m/%Y %H:%M")
+    table_header_row = 5
+    data_start_row = table_header_row + 1
+    last_column = get_column_letter(len(REPORT_COLUMNS))
 
     title_fill = PatternFill("solid", fgColor="123A63")
     header_fill = PatternFill("solid", fgColor="0B5ED7")
@@ -177,26 +184,31 @@ def build_partner_report(partner, rows):
     thin = Side(style="thin", color="D8DEE9")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    ws.merge_cells("A1:H1")
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(REPORT_COLUMNS))
     ws["A1"] = f"BÁO CÁO ĐỐI TÁC: {partner}"
     ws["A1"].fill = title_fill
     ws["A1"].font = Font(color="FFFFFF", bold=True, size=14)
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
     ws.row_dimensions[1].height = 28
 
-    ws.merge_cells("A2:H2")
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(REPORT_COLUMNS))
     ws["A2"] = f"Tổng link: {len(frame)}"
     ws["A2"].font = Font(color="374151", italic=True)
     ws["A2"].alignment = Alignment(horizontal="center")
 
+    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=len(REPORT_COLUMNS))
+    ws["A3"] = f"Ngày cập nhật: {updated_at}"
+    ws["A3"].font = Font(color="374151", italic=True)
+    ws["A3"].alignment = Alignment(horizontal="center")
+
     for col_index, header in enumerate(REPORT_COLUMNS, start=1):
-        cell = ws.cell(row=4, column=col_index, value=header)
+        cell = ws.cell(row=table_header_row, column=col_index, value=header)
         cell.fill = header_fill
         cell.font = Font(color="FFFFFF", bold=True)
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = border
 
-    for row_index, (_, source_row) in enumerate(frame.iterrows(), start=5):
+    for row_index, (_, source_row) in enumerate(frame.iterrows(), start=data_start_row):
         for col_index, header in enumerate(REPORT_COLUMNS, start=1):
             value = source_row.get(header, "")
             if header == "LINK AIR":
@@ -227,7 +239,7 @@ def build_partner_report(partner, rows):
                 cell.number_format = "#,##0"
                 cell.alignment = Alignment(horizontal="right", vertical="top")
 
-    total_row = len(frame) + 5
+    total_row = len(frame) + data_start_row
     for col_index in range(1, len(REPORT_COLUMNS) + 1):
         cell = ws.cell(row=total_row, column=col_index)
         cell.fill = total_fill
@@ -237,15 +249,15 @@ def build_partner_report(partner, rows):
     if len(frame) > 0:
         for col_index in range(4, len(REPORT_COLUMNS) + 1):
             letter = get_column_letter(col_index)
-            cell = ws.cell(row=total_row, column=col_index, value=f"=SUM({letter}5:{letter}{total_row - 1})")
+            cell = ws.cell(row=total_row, column=col_index, value=f"=SUM({letter}{data_start_row}:{letter}{total_row - 1})")
             cell.fill = total_fill
             cell.font = Font(bold=True)
             cell.border = border
             cell.number_format = "#,##0"
             cell.alignment = Alignment(horizontal="right")
 
-    ws.freeze_panes = "A5"
-    ws.auto_filter.ref = f"A4:H{max(total_row, 4)}"
+    ws.freeze_panes = f"A{data_start_row}"
+    ws.auto_filter.ref = f"A{table_header_row}:{last_column}{max(total_row, table_header_row)}"
     widths = [14, 24, 72, 14, 12, 14, 14, 12]
     for index, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(index)].width = width
@@ -260,9 +272,9 @@ def content_disposition(filename):
     return f"attachment; filename*=UTF-8''{quote(filename)}"
 
 
-async def run_scraper_safely(target_path, worker_count, partner=None):
+async def run_scraper_safely(target_path, worker_count, partner=None, partners=None):
     try:
-        await run_scraper(target_path, manager, worker_count=worker_count, selected_partner=partner)
+        await run_scraper(target_path, manager, worker_count=worker_count, selected_partner=partner, selected_partners=partners)
     except asyncio.CancelledError:
         raise
     except Exception as error:
@@ -487,7 +499,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 target_path = current_excel_path()
                 worker_count = payload.get("workers", 5)
                 partner = clean_text(payload.get("partner", ""))
-                SCRAPE_TASK = asyncio.create_task(run_scraper_safely(target_path, worker_count, partner=partner or None))
+                partners_payload = payload.get("partners", [])
+                partners = []
+                if isinstance(partners_payload, list):
+                    partners = [clean_text(name) for name in partners_payload if clean_text(name)]
+                SCRAPE_TASK = asyncio.create_task(run_scraper_safely(target_path, worker_count, partner=partner or None, partners=partners))
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 
