@@ -446,11 +446,11 @@
         function setGooglePushState() {
             const button = document.getElementById('pushGoogleBtn');
             if (!button) return;
-            const enabled = Boolean(googleOAuthAuthorized && hasGoogleTargetUrl() && scanCompletedForCurrentFile);
+            const enabled = Boolean(googleOAuthAuthorized && hasGoogleTargetUrl() && currentFileId);
             button.disabled = !enabled;
             button.title = enabled
                 ? ''
-                : 'Chỉ bật sau khi đã có URL sheet đích, đăng nhập Google và quét dữ liệu xong.';
+                : 'Chỉ bật sau khi đã có file local đang chọn, URL sheet đích và đăng nhập Google.';
         }
 
         async function refreshGoogleOauthStatus() {
