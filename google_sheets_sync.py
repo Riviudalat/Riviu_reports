@@ -1,5 +1,6 @@
 import json
 import os
+import urllib.request
 from datetime import datetime
 
 from google.auth.transport.requests import Request
@@ -11,6 +12,34 @@ SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 CLIENT_SECRET_FILENAME = "google_oauth_client.json"
 TOKEN_FILENAME = "google_oauth_token.json"
 RESULT_SHEET_PREFIX = "Report Seeding Tiktok"
+
+
+def fetch_account_email(access_token):
+    token = str(access_token or "").strip()
+    if not token:
+        return ""
+    request = urllib.request.Request(
+        "https://openidconnect.googleapis.com/v1/userinfo",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception:
+        return ""
+    return str(payload.get("email") or "").strip()
+
+
+SCOPES = [
+    "https://www.googleapis.com/auth/spreadsheets",
+    "https://www.googleapis.com/auth/userinfo.email",
+    "openid",
+]
+
+
+def token_has_required_scopes(token_data):
+    token_scopes = set(token_data.get("scopes") or [])
+    return set(SCOPES).issubset(token_scopes)
 
 
 def rgb(red, green, blue):
@@ -188,9 +217,25 @@ def token_path(base_dir):
 
 
 def oauth_status(base_dir):
+    token_file = token_path(base_dir)
+    account_email = ""
+    if os.path.exists(token_file):
+        try:
+            with open(token_file, "r", encoding="utf-8") as file_obj:
+                token_data = json.load(file_obj)
+            account_email = str(token_data.get("account") or token_data.get("email") or "").strip()
+            if not account_email:
+                account_email = fetch_account_email(token_data.get("token", ""))
+                if account_email:
+                    token_data["account"] = account_email
+                    with open(token_file, "w", encoding="utf-8") as file_obj:
+                        json.dump(token_data, file_obj, ensure_ascii=False, indent=2)
+        except (OSError, json.JSONDecodeError):
+            account_email = ""
     return {
         "configured": os.path.exists(client_secret_path(base_dir)),
-        "authorized": os.path.exists(token_path(base_dir)),
+        "authorized": os.path.exists(token_file),
+        "accountEmail": account_email,
     }
 
 
@@ -208,12 +253,14 @@ def load_credentials(base_dir):
     client_file = client_secret_path(base_dir)
 
     if os.path.exists(token_file):
-        creds = Credentials.from_authorized_user_file(token_file, SCOPES)
+        token_data = json.loads(open(token_file, "r", encoding="utf-8").read())
+        if token_has_required_scopes(token_data):
+            creds = Credentials.from_authorized_user_file(token_file, SCOPES)
 
     if creds and creds.valid:
         return creds
 
-    if creds and creds.expired and creds.refresh_token:
+    if creds and creds.expired and creds.refresh_token and creds.has_scopes(SCOPES):
         creds.refresh(Request())
         with open(token_file, "w", encoding="utf-8") as file_obj:
             file_obj.write(creds.to_json())

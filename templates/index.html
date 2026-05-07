@@ -454,8 +454,12 @@
                 const loginBtn = document.getElementById('googleLoginBtn');
                 const oauthBtn = document.getElementById('googleOauthBtn');
                 if (loginBtn) {
+                    const accountEmail = String(data.accountEmail || '').trim();
                     loginBtn.disabled = !data.configured;
-                    loginBtn.title = data.configured ? '' : 'Cần chọn file JSON Google trước khi đăng nhập';
+                    loginBtn.title = data.configured ? '' : 'Cần nạp file OAuth trước khi đăng nhập';
+                    loginBtn.textContent = accountEmail
+                        ? `Đã đăng nhập: ${accountEmail}`
+                        : (data.authorized ? 'Đã đăng nhập Google' : 'Đăng nhập Google');
                 }
                 if (oauthBtn) {
                     oauthBtn.style.display = data.configured ? 'none' : '';
