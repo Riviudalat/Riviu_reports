@@ -51,6 +51,38 @@ if errorlevel 1 (
     )
 )
 
+echo [OK] Dang kiem tra cong 8000...
+set "PORT_PID="
+for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$conn = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($conn) { $conn.OwningProcess }"`) do set "PORT_PID=%%P"
+
+if defined PORT_PID (
+    echo [WARN] Cong 8000 dang duoc su dung boi PID %PORT_PID%. Dang dung process cu...
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$targetPid = %PORT_PID%; try { Stop-Process -Id $targetPid -Force -ErrorAction Stop; Start-Sleep -Seconds 1; exit 0 } catch { exit 1 }"
+    if errorlevel 1 (
+        echo [ERROR] Khong the dung process dang chiem cong 8000.
+        echo Vui long dong thu cong app dang dung cong nay roi chay lai.
+        echo.
+        pause
+        exit /b 1
+    )
+
+    set "PORT_PID="
+    for /f "usebackq delims=" %%P in (`powershell -NoProfile -ExecutionPolicy Bypass -Command "$conn = Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1; if ($conn) { $conn.OwningProcess }"`) do set "PORT_PID=%%P"
+    if defined PORT_PID (
+        echo [ERROR] Cong 8000 van dang bi chiem sau khi dung process cu.
+        echo Vui long dong thu cong process PID %PORT_PID% roi chay lai.
+        echo.
+        pause
+        exit /b 1
+    )
+
+    echo [OK] Da giai phong cong 8000.
+    echo.
+) else (
+    echo [OK] Cong 8000 dang san sang.
+    echo.
+)
+
 echo [OK] Khoi dong server...
 echo.
 echo Dashboard: http://localhost:8000
