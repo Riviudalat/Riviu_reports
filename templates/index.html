@@ -216,7 +216,7 @@
                         <div class="source-icon"><span class="material-icons-outlined">link</span></div>
                         <div>
                             <div class="source-block-title">Google Sheet chính</div>
-                            <div class="source-block-meta">Nạp thành file mới trong local.</div>
+                            <div class="source-block-meta">Nạp sheet từ link này thành file local mới. Khi bấm Tạo sheet, app sẽ đẩy file đang chọn lên đúng link này.</div>
                         </div>
                     </div>
                     <div class="field-stack">
@@ -396,6 +396,7 @@
         let currentFileId = '';
         let googlePushReady = false;
         let scanCompletedForCurrentFile = false;
+        let googleOAuthAuthorized = false;
         const startBtn = document.getElementById('startBtn');
         const cancelBtn = document.getElementById('cancelBtn');
         const workerCountSelect = document.getElementById('workerCountSelect');
@@ -438,14 +439,18 @@
             return typeof file === 'string' ? file : (file?.label || file?.id || '');
         }
 
+        function hasGoogleTargetUrl() {
+            return Boolean(googleSheetUrlInput.value.trim());
+        }
+
         function setGooglePushState() {
             const button = document.getElementById('pushGoogleBtn');
             if (!button) return;
-            const enabled = Boolean(googlePushReady && scanCompletedForCurrentFile);
+            const enabled = Boolean(googleOAuthAuthorized && hasGoogleTargetUrl() && scanCompletedForCurrentFile);
             button.disabled = !enabled;
             button.title = enabled
                 ? ''
-                : 'Chỉ bật sau khi sheet này đã nạp từ Google, đăng nhập Google và quét dữ liệu xong.';
+                : 'Chỉ bật sau khi đã có URL sheet đích, đăng nhập Google và quét dữ liệu xong.';
         }
 
         async function refreshGoogleOauthStatus() {
@@ -454,6 +459,7 @@
                 const data = await res.json();
                 const loginBtn = document.getElementById('googleLoginBtn');
                 const oauthBtn = document.getElementById('googleOauthBtn');
+                googleOAuthAuthorized = Boolean(data.authorized);
                 if (loginBtn) {
                     const accountEmail = String(data.accountEmail || '').trim();
                     loginBtn.disabled = !data.configured;
@@ -508,7 +514,7 @@
 
                 if (data.googleSheetUrl) googleSheetUrlInput.value = data.googleSheetUrl;
                 currentFileId = data.current || '';
-                googlePushReady = Boolean(data.googlePushReady);
+                googleOAuthAuthorized = Boolean(data.googleOAuthAuthorized);
                 await refreshGoogleOauthStatus();
                 setGooglePushState();
 
@@ -580,7 +586,7 @@
                 currentSheetName = data.currentSheet || '';
                 await updateFileList();
                 await loadPreview();
-                addLog(`Đã đồng bộ Google Sheet với ${data.sheets.length} sheet.`);
+                addLog(`Đã nạp Google Sheet thành file local mới: ${fileDisplayLabel({ id: data.file, label: data.label })}.`);
             } catch (error) {
                 addLog(`Lỗi đồng bộ Google Sheet: ${error.message}`);
             } finally {
@@ -649,9 +655,14 @@
         }
 
         async function pushCurrentSheetToGoogle(event) {
-            const button = event?.currentTarget;
+                const button = event?.currentTarget;
             if (button && button.disabled) {
                 addLog('Nút Tạo sheet chỉ bật sau khi nạp đúng Google Sheet, đăng nhập Google và quét dữ liệu xong.');
+                return;
+            }
+            const url = googleSheetUrlInput.value.trim();
+            if (!url) {
+                addLog('Vui lòng nhập URL Google Sheet đích trước khi tạo sheet.');
                 return;
             }
             const originalHtml = button ? button.innerHTML : '';
@@ -660,7 +671,11 @@
                 button.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> Đang tạo...';
             }
             try {
-                const res = await fetch('/push-google-sheet', { method: 'POST' });
+                const res = await fetch('/push-google-sheet', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url })
+                });
                 const data = await res.json();
                 if (!res.ok || !data.success) throw new Error(data.error || 'Không tạo được sheet trên Google');
                 addLog(`Đã tạo sheet mới trên Google: ${data.sheetTitle}`);
@@ -1194,6 +1209,10 @@
             if (event.key === 'Escape' && document.getElementById('reportModal').classList.contains('active')) {
                 closeReportModal();
             }
+        });
+
+        googleSheetUrlInput.addEventListener('input', () => {
+            setGooglePushState();
         });
 
         window.onload = async () => {

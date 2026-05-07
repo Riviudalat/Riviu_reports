@@ -180,8 +180,14 @@ def google_sheet_source_for_file(base_dir, file_id):
             return registered_source
 
     existing_sources = [item for item in registry.values() if isinstance(item, dict) and item.get("spreadsheetId")]
-    if len(existing_sources) == 1 and str(file_id or "").startswith(f"{DATA_DIR_NAME}/"):
-        return existing_sources[0]
+    unique_sources = {}
+    for item in existing_sources:
+        key = clean_text(item.get("spreadsheetId", "")) or clean_text(item.get("url", ""))
+        if key and key not in unique_sources:
+            unique_sources[key] = item
+
+    if len(unique_sources) == 1 and str(file_id or "").startswith(f"{DATA_DIR_NAME}/"):
+        return next(iter(unique_sources.values()))
     return {}
 
 

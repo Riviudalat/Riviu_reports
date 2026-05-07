@@ -440,13 +440,20 @@ async def list_files():
     ensure_selected_file()
     oauth = oauth_status(EXCEL_DIR)
     google_source = current_google_sheet_source()
+    target_sheet_url = GOOGLE_SHEET_SOURCE_URL or google_source.get("url", "")
+    target_spreadsheet_id = ""
+    if target_sheet_url:
+        try:
+            target_spreadsheet_id = parse_google_spreadsheet_id(target_sheet_url)
+        except Exception:
+            target_spreadsheet_id = ""
     return {
         "files": file_entries(),
         "current": CURRENT_SELECTED_FILE,
         "currentLabel": current_display_label(),
         "currentSheet": CURRENT_SELECTED_SHEET,
-        "googleSheetUrl": GOOGLE_SHEET_SOURCE_URL,
-        "googlePushReady": bool(google_source.get("spreadsheetId")) and oauth.get("authorized"),
+        "googleSheetUrl": target_sheet_url,
+        "googlePushReady": bool(target_spreadsheet_id) and oauth.get("authorized"),
         "googleOAuthConfigured": oauth.get("configured"),
         "googleOAuthAuthorized": oauth.get("authorized"),
     }
@@ -499,11 +506,18 @@ async def sync_google_sheet(data: dict):
 @app.get("/google-oauth-status")
 async def google_oauth_status():
     source = current_google_sheet_source()
+    target_url = GOOGLE_SHEET_SOURCE_URL or source.get("url", "")
+    target_id = ""
+    if target_url:
+        try:
+            target_id = parse_google_spreadsheet_id(target_url)
+        except Exception:
+            target_id = ""
     status = oauth_status(EXCEL_DIR)
     return {
         **status,
-        "connectedSheetUrl": source.get("url", ""),
-        "connectedSpreadsheetId": source.get("spreadsheetId", ""),
+        "connectedSheetUrl": target_url,
+        "connectedSpreadsheetId": target_id,
     }
 
 
@@ -522,9 +536,6 @@ async def upload_google_oauth_client(file: UploadFile = File(...)):
 @app.post("/google-oauth-login")
 async def google_oauth_login():
     try:
-        source = current_google_sheet_source()
-        if not source.get("spreadsheetId"):
-            return JSONResponse(content={"error": "File hiện tại chưa gắn với Google Sheet nào."}, status_code=400)
         authorize_google(EXCEL_DIR)
         return {"success": True}
     except Exception as error:
@@ -532,17 +543,25 @@ async def google_oauth_login():
 
 
 @app.post("/push-google-sheet")
-async def push_google_sheet():
+async def push_google_sheet(data: dict | None = None):
+    global GOOGLE_SHEET_SOURCE_URL
     target_path = current_excel_path()
     if not os.path.exists(target_path):
         return JSONResponse(content={"error": "File không tồn tại"}, status_code=404)
 
-    source = current_google_sheet_source()
-    spreadsheet_id = source.get("spreadsheetId", "")
+    request_url = clean_text((data or {}).get("url", ""))
+    source_url = request_url or GOOGLE_SHEET_SOURCE_URL or current_google_sheet_source().get("url", "")
+    spreadsheet_id = ""
+    try:
+        spreadsheet_id = parse_google_spreadsheet_id(source_url)
+    except Exception:
+        spreadsheet_id = ""
     if not spreadsheet_id:
-        return JSONResponse(content={"error": "File hiện tại chưa gắn với Google Sheet gốc."}, status_code=400)
+        return JSONResponse(content={"error": "Vui lòng nhập đúng URL Google Sheet đích trước khi tạo sheet."}, status_code=400)
 
     try:
+        GOOGLE_SHEET_SOURCE_URL = source_url
+        register_google_sheet_source(EXCEL_DIR, ensure_selected_file(), source_url)
         rows = build_workbook_rows(target_path)
         values = build_google_push_rows(rows)
         sheet_title = push_rows_to_new_sheet(EXCEL_DIR, spreadsheet_id, values)
