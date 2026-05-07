@@ -8,7 +8,6 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
 CLIENT_SECRET_FILENAME = "google_oauth_client.json"
 TOKEN_FILENAME = "google_oauth_token.json"
 RESULT_SHEET_PREFIX = "Report Seeding Tiktok"

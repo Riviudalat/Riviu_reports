@@ -58,8 +58,9 @@
         .source-inline { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; }
         .source-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
         .source-actions .btn { justify-content: center; }
-        .google-action-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-        .google-action-row .btn { justify-content: center; white-space: nowrap; }
+        .google-action-row { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
+        .google-action-row .btn { justify-content: center; white-space: nowrap; flex: 0 1 auto; min-width: 128px; }
+        .google-login-btn { min-width: 220px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 
         .upload-zone { border: 2px dashed #3b82f6; border-radius: 12px; padding: 16px; text-align: center; cursor: pointer; transition: 0.2s; height: auto; min-height: 110px; display: flex; flex-direction: column; justify-content: center; align-items: center; background: #fcfdff; }
         .upload-zone:hover { background: #eff6ff; border-color: #2563eb; }
@@ -230,7 +231,7 @@
                                 <span class="material-icons-outlined">note_add</span> Tạo sheet
                             </button>
                             <button class="btn btn-outline btn-compact" id="googleOauthBtn" onclick="document.getElementById('googleOauthFileInput').click()">Nạp OAuth</button>
-                            <button class="btn btn-soft btn-compact" id="googleLoginBtn" onclick="connectGoogleOAuth()">Đăng nhập Google</button>
+                            <button class="btn btn-soft btn-compact google-login-btn" id="googleLoginBtn" onclick="connectGoogleOAuth()">Đăng nhập Google</button>
                             <input type="file" id="googleOauthFileInput" hidden accept=".json" onchange="uploadGoogleOauthClient(this)">
                         </div>
                     </div>
@@ -456,10 +457,13 @@
                 if (loginBtn) {
                     const accountEmail = String(data.accountEmail || '').trim();
                     loginBtn.disabled = !data.configured;
-                    loginBtn.title = data.configured ? '' : 'Cần nạp file OAuth trước khi đăng nhập';
-                    loginBtn.textContent = accountEmail
+                    const loginLabel = accountEmail
                         ? `Đã đăng nhập: ${accountEmail}`
                         : (data.authorized ? 'Đã đăng nhập Google' : 'Đăng nhập Google');
+                    loginBtn.title = data.configured
+                        ? loginLabel
+                        : 'Cần nạp file OAuth trước khi đăng nhập';
+                    loginBtn.textContent = loginLabel;
                 }
                 if (oauthBtn) {
                     oauthBtn.style.display = data.configured ? 'none' : '';
