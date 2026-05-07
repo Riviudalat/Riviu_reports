@@ -17,6 +17,16 @@
         .scan-setting { display: inline-flex; align-items: center; gap: 8px; padding: 8px 10px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb; }
         .scan-setting span { font-size: 12px; color: #4b5563; font-weight: 700; text-transform: uppercase; }
         .scan-setting select { width: 78px; margin-top: 0; padding: 8px; font-size: 14px; background: #fff; }
+        .scan-toggle { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb; font-size: 12px; color: #374151; font-weight: 700; }
+        .scan-toggle input { width: 16px; height: 16px; accent-color: #004ac6; }
+        .oauth-panel { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+        .google-setup-card { margin-top: 10px; padding: 12px; border: 1px solid #e5edf9; border-radius: 10px; background: #fbfdff; }
+        .google-setup-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+        .google-setup-title { font-size: 13px; font-weight: 800; color: #1f2937; }
+        .google-setup-desc { margin-top: 2px; font-size: 11px; color: #6b7280; line-height: 1.45; }
+        .text-link { border: 0; background: transparent; color: #004ac6; font-size: 12px; font-weight: 800; cursor: pointer; padding: 0; white-space: nowrap; }
+        .text-link:hover { text-decoration: underline; }
+        .oauth-pill { padding: 8px 10px; border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-size: 12px; font-weight: 700; border: 1px solid #bfdbfe; }
 
         .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 24px; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; border: none; transition: 0.2s; }
         .btn-primary { background: #004ac6; color: #fff; }
@@ -117,6 +127,9 @@
         .modal-header { padding: 20px 24px; border-bottom: 1px solid #e5e7eb; display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
         .modal-title { font-size: 18px; font-weight: 800; color: #111827; }
         .modal-subtitle { margin-top: 4px; color: #6b7280; font-size: 13px; font-weight: 500; }
+        .guide-list { margin: 0; padding-left: 20px; color: #374151; font-size: 14px; line-height: 1.75; }
+        .guide-list strong { color: #111827; }
+        .guide-note { margin-top: 14px; padding: 12px 14px; border-radius: 8px; background: #eff6ff; color: #1e3a8a; font-size: 13px; line-height: 1.6; }
         .icon-btn { width: 38px; height: 38px; border: 1px solid #e5e7eb; background: #fff; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; color: #4b5563; }
         .icon-btn:hover { background: #f3f4f6; color: #111827; }
         .modal-body { padding: 20px 24px; overflow: auto; }
@@ -254,6 +267,23 @@
                         <div style="margin-top:6px; font-weight:700; font-size:14px">Kéo thả hoặc click để tải file</div>
                         <input type="file" id="fileInput" hidden accept=".xlsx,.xls" onchange="uploadFile(this)">
                     </div>
+                    <div class="google-setup-card">
+                        <div class="google-setup-head">
+                            <div>
+                                <div class="google-setup-title">Kết nối Google</div>
+                                <div class="google-setup-desc">Cài 1 file JSON của app, sau đó mỗi máy chỉ cần đăng nhập Google.</div>
+                            </div>
+                            <button class="text-link" type="button" onclick="showGoogleSetupGuide()">File này lấy ở đâu?</button>
+                        </div>
+                        <div class="oauth-panel">
+                            <button class="btn btn-outline btn-compact" onclick="document.getElementById('googleOauthFileInput').click()">Chọn file JSON Google</button>
+                            <button class="btn btn-soft btn-compact" id="googleLoginBtn" onclick="connectGoogleOAuth()">Đăng nhập Google</button>
+                        </div>
+                        <div class="oauth-panel">
+                            <span class="oauth-pill" id="googleOauthStatusPill">Chưa cấu hình Google</span>
+                        </div>
+                        <input type="file" id="googleOauthFileInput" hidden accept=".json" onchange="uploadGoogleOauthClient(this)">
+                    </div>
                 </div>
             </div>
         </div>
@@ -264,6 +294,9 @@
                     <span>NỘI DUNG SHEET HIỆN TẠI</span>
                 </div>
                 <div class="card-header-actions">
+                    <button class="btn btn-soft btn-compact" onclick="pushCurrentSheetToGoogle(event)">
+                        <span class="material-icons-outlined">note_add</span> Tạo sheet
+                    </button>
                     <button class="btn btn-soft btn-compact" onclick="openReportModal()">
                         <span class="material-icons-outlined">summarize</span> Đối tác & báo cáo
                     </button>
@@ -372,6 +405,38 @@
         </div>
     </div>
 
+    <div class="modal-backdrop" id="googleGuideModal" aria-hidden="true">
+        <div class="report-modal" role="dialog" aria-modal="true" aria-labelledby="googleGuideTitle">
+            <div class="modal-header">
+                <div>
+                    <div class="modal-title" id="googleGuideTitle">File JSON Google là gì?</div>
+                    <div class="modal-subtitle">Đây là file cấu hình OAuth Client của ứng dụng, không phải file sheet và không phải API key.</div>
+                </div>
+                <button class="icon-btn" onclick="closeGoogleSetupGuide()" aria-label="Đóng">
+                    <span class="material-icons-outlined">close</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <ol class="guide-list">
+                    <li>Vào <strong>Google Cloud Console</strong> và chọn project test của bạn.</li>
+                    <li>Bật <strong>Google Sheets API</strong>.</li>
+                    <li>Vào <strong>APIs & Services</strong> → <strong>Credentials</strong>.</li>
+                    <li>Tạo <strong>OAuth client ID</strong>, chọn loại <strong>Desktop app</strong>.</li>
+                    <li>Bấm tải xuống file <strong>.json</strong>, rồi chọn file đó ở nút <strong>Chọn file JSON Google</strong>.</li>
+                </ol>
+                <div class="guide-note">
+                    Làm bước này một lần cho bộ app. Sau đó mỗi máy chỉ cần bấm <strong>Đăng nhập Google</strong>. Khi app đã đăng nhập, nút <strong>Tạo sheet</strong> sẽ ghi kết quả ngược lên đúng Google Sheet bạn đã nạp.
+                </div>
+            </div>
+            <div class="modal-footer">
+                <a class="btn btn-soft" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">
+                    <span class="material-icons-outlined">open_in_new</span> Mở Google Cloud
+                </a>
+                <button class="btn btn-outline" onclick="closeGoogleSetupGuide()">Đóng</button>
+            </div>
+        </div>
+    </div>
+
     <script>
         let ws;
         let reportPartners = [];
@@ -409,6 +474,27 @@
             return typeof file === 'string' ? file : (file?.label || file?.id || '');
         }
 
+        async function refreshGoogleOauthStatus() {
+            try {
+                const res = await fetch('/google-oauth-status');
+                const data = await res.json();
+                const pill = document.getElementById('googleOauthStatusPill');
+                const loginBtn = document.getElementById('googleLoginBtn');
+                const ready = Boolean(data.authorized && data.connectedSpreadsheetId);
+                if (pill) {
+                    pill.textContent = ready
+                        ? 'Đã kết nối Google Sheet gốc'
+                        : (data.configured ? 'Chưa đăng nhập Google trên máy này' : 'Cần chọn file JSON Google trước');
+                }
+                if (loginBtn) {
+                    loginBtn.disabled = !data.configured;
+                    loginBtn.title = data.configured ? '' : 'Cần chọn file JSON Google trước khi đăng nhập';
+                }
+            } catch (error) {
+                console.error(error);
+            }
+        }
+
         function normalizeVietnameseKey(value) {
             return String(value || '')
                 .normalize('NFD')
@@ -443,6 +529,7 @@
 
                 if (data.googleSheetUrl) googleSheetUrlInput.value = data.googleSheetUrl;
                 currentFileId = data.current || '';
+                await refreshGoogleOauthStatus();
 
                 if (!data.files || data.files.length === 0) {
                     select.innerHTML = '<option value="">(Không có file nào)</option>';
@@ -536,6 +623,78 @@
                 addLog(`Lỗi tải file: ${error.message}`);
             }
             input.value = '';
+        }
+
+        async function uploadGoogleOauthClient(input) {
+            const file = input.files[0];
+            if (!file) return;
+            const formData = new FormData();
+            formData.append('file', file);
+            try {
+                const res = await fetch('/google-oauth-client', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (!res.ok || !data.success) throw new Error(data.error || 'Không nạp được OAuth client');
+                addLog('Đã cài cấu hình Google cho ứng dụng. Từ giờ trên máy này chỉ cần bấm "Đăng nhập Google".');
+                await refreshGoogleOauthStatus();
+            } catch (error) {
+                addLog(`Lỗi OAuth client: ${error.message}`);
+            }
+            input.value = '';
+        }
+
+        function showGoogleSetupGuide() {
+            const modal = document.getElementById('googleGuideModal');
+            modal.classList.add('active');
+            modal.setAttribute('aria-hidden', 'false');
+            document.body.style.overflow = 'hidden';
+        }
+
+        function closeGoogleSetupGuide() {
+            const modal = document.getElementById('googleGuideModal');
+            modal.classList.remove('active');
+            modal.setAttribute('aria-hidden', 'true');
+            document.body.style.overflow = '';
+        }
+
+        async function connectGoogleOAuth() {
+            const btn = document.getElementById('googleLoginBtn');
+            const originalHtml = btn.innerHTML;
+            btn.disabled = true;
+            btn.innerHTML = 'Đang mở đăng nhập...';
+            try {
+                const res = await fetch('/google-oauth-login', { method: 'POST' });
+                const data = await res.json();
+                if (!res.ok || !data.success) throw new Error(data.error || 'Đăng nhập Google thất bại');
+                addLog('Đăng nhập Google thành công.');
+                await refreshGoogleOauthStatus();
+            } catch (error) {
+                addLog(`Lỗi đăng nhập Google: ${error.message}`);
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalHtml;
+            }
+        }
+
+        async function pushCurrentSheetToGoogle(event) {
+            const button = event?.currentTarget;
+            const originalHtml = button ? button.innerHTML : '';
+            if (button) {
+                button.disabled = true;
+                button.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> Đang tạo...';
+            }
+            try {
+                const res = await fetch('/push-google-sheet', { method: 'POST' });
+                const data = await res.json();
+                if (!res.ok || !data.success) throw new Error(data.error || 'Không tạo được sheet trên Google');
+                addLog(`Đã tạo sheet mới trên Google: ${data.sheetTitle}`);
+            } catch (error) {
+                addLog(`Lỗi tạo sheet Google: ${error.message}`);
+            } finally {
+                if (button) {
+                    button.disabled = false;
+                    button.innerHTML = originalHtml;
+                }
+            }
         }
 
         async function downloadCurrentWorkbook() {
@@ -716,7 +875,12 @@
             }
             const selected = Array.isArray(partners) ? partners : (partners ? [partners] : []);
             const workers = Number(workerCountSelect.value || 5);
-            ws.send(JSON.stringify({ action: 'start', workers, partners: selected, partner: selected.length === 1 ? selected[0] : '' }));
+            ws.send(JSON.stringify({
+                action: 'start',
+                workers,
+                partners: selected,
+                partner: selected.length === 1 ? selected[0] : ''
+            }));
             startBtn.disabled = true;
             workerCountSelect.disabled = true;
             document.getElementById('refreshPartnerBtn').disabled = true;
@@ -776,6 +940,7 @@
                 workerCountSelect.disabled = false;
                 startBtn.innerHTML = '<span class="material-icons-outlined">play_circle</span> BẮT ĐẦU QUÉT';
                 addLog('--- QUÉT HOÀN TẤT ---');
+                updateFileList();
                 loadPreview();
             }
         }
@@ -1029,9 +1194,16 @@
             if (event.target.id === 'reportModal') closeReportModal();
         });
 
+        document.getElementById('googleGuideModal').addEventListener('click', (event) => {
+            if (event.target.id === 'googleGuideModal') closeGoogleSetupGuide();
+        });
+
         document.addEventListener('keydown', (event) => {
             if (event.key === 'Escape' && document.getElementById('reportModal').classList.contains('active')) {
                 closeReportModal();
+            }
+            if (event.key === 'Escape' && document.getElementById('googleGuideModal').classList.contains('active')) {
+                closeGoogleSetupGuide();
             }
         });
 

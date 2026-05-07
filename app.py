@@ -16,6 +16,7 @@ from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
 from scraper import run_scraper
+from google_sheets_sync import authorize_google, oauth_status, push_rows_to_new_sheet, save_oauth_client
 from workbook_utils import (
     GOOGLE_SHEET_LABEL,
     LEGACY_GOOGLE_SHEET_FILE_ID,
@@ -24,12 +25,14 @@ from workbook_utils import (
     clean_text,
     download_google_sheet,
     ensure_data_dir,
+    google_sheet_source_for_file,
     is_failed_channel_name,
     list_workbook_partners,
     normalize_header,
     parse_google_spreadsheet_id,
     read_summary_dashboard,
     read_sheet_preview,
+    register_google_sheet_source,
     timestamped_google_sheet_file_id,
     workbook_file_entries,
 )
@@ -120,6 +123,11 @@ def current_excel_path():
     return resolve_file_path(selected) if selected else ""
 
 
+def current_google_sheet_source():
+    current_id = ensure_selected_file()
+    return google_sheet_source_for_file(EXCEL_DIR, current_id)
+
+
 def current_display_label():
     current_id = ensure_selected_file()
     for entry in file_entries():
@@ -148,6 +156,26 @@ def format_metric(value):
         return value
 
 
+def metric_number(value):
+    if pd.isna(value) or value == "":
+        return 0
+    if isinstance(value, (int, float)):
+        return int(float(value))
+    raw_text = str(value).strip()
+    if re.fullmatch(r"\d{1,3}([.,]\d{3})+", raw_text):
+        return int(re.sub(r"[.,]", "", raw_text))
+    if re.fullmatch(r"\d+\.0+", raw_text):
+        return int(float(raw_text))
+    text = str(value).replace(",", "").replace(".", "").strip()
+    try:
+        return int(float(text))
+    except (TypeError, ValueError):
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return 0
+
+
 def find_report_column(frame, header):
     target = normalize_header(header)
     for column in frame.columns:
@@ -172,7 +200,12 @@ def find_report_column(frame, header):
 
 
 def build_partner_report(partner, rows):
-    valid_rows = [row for row in rows if not is_failed_channel_name(row.get("TÊN KÊNH", ""))]
+    valid_rows = [
+        row
+        for row in rows
+        if not is_failed_channel_name(row.get("TÊN KÊNH", ""))
+        and metric_number(row.get("LƯỢT XEM", 0)) >= 100
+    ]
     frame = pd.DataFrame(valid_rows)
     wb = Workbook()
     ws = wb.active
@@ -276,14 +309,65 @@ def content_disposition(filename):
     return f"attachment; filename*=UTF-8''{quote(filename)}"
 
 
-async def run_scraper_safely(target_path, worker_count, partner=None, partners=None):
+async def run_scraper_safely(target_path, worker_count, partner=None, partners=None, create_result_sheet=False, push_to_google=False):
     try:
-        await run_scraper(target_path, manager, worker_count=worker_count, selected_partner=partner, selected_partners=partners)
+        await run_scraper(
+            target_path,
+            manager,
+            worker_count=worker_count,
+            selected_partner=partner,
+            selected_partners=partners,
+            create_result_sheet=create_result_sheet,
+        )
+        if push_to_google:
+            source = current_google_sheet_source()
+            spreadsheet_id = source.get("spreadsheetId", "")
+            if spreadsheet_id:
+                rows = build_workbook_rows(target_path)
+                values = build_google_push_rows(rows)
+                sheet_title = push_rows_to_new_sheet(EXCEL_DIR, spreadsheet_id, values)
+                await manager.broadcast_log(f"Đã đẩy kết quả lên Google Sheet: {sheet_title}.")
+            else:
+                await manager.broadcast_log("BỎ QUA đẩy Google: file hiện tại chưa gắn với Google Sheet gốc.")
     except asyncio.CancelledError:
         raise
     except Exception as error:
         await manager.broadcast_log(f"Lỗi quét: {str(error)}")
         await manager.broadcast_status({"total": 0, "processed": 0, "success": 0, "error": 1, "done": True})
+
+
+def build_google_push_rows(rows):
+    normalized_rows = []
+    max_partner_columns = 1
+    for row in rows:
+        partner_names = row.get("partners", [])
+        if not isinstance(partner_names, list):
+            partner_names = []
+        partner_names = [clean_text(name) for name in partner_names if clean_text(name)]
+        max_partner_columns = max(max_partner_columns, len(partner_names))
+        normalized_rows.append((row, partner_names))
+
+    headers = ["Stt", "Ngày", "Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"]
+    headers.extend(["Đối tác" if index == 0 else f"Đối tác {index + 1}" for index in range(max_partner_columns)])
+    headers.append("Cập nhật lần cuối")
+
+    values = [headers]
+    for index, (row, partner_names) in enumerate(normalized_rows, start=1):
+        padded_partners = partner_names + [""] * (max_partner_columns - len(partner_names))
+        values.append([
+            index,
+            clean_text(row.get("NGÀY AIR", "")),
+            clean_text(row.get("LINK AIR", "")),
+            clean_text(row.get("TÊN KÊNH", "")),
+            metric_number(row.get("LƯỢT XEM", 0)),
+            metric_number(row.get("TIM", 0)),
+            metric_number(row.get("BÌNH LUẬN", 0)),
+            metric_number(row.get("LƯỢT LƯU", 0)),
+            metric_number(row.get("CHIA SẺ", 0)),
+            *padded_partners,
+            datetime.now().strftime("%d/%m/%Y %H:%M"),
+        ])
+    return values
 
 
 @app.get("/", response_class=HTMLResponse)
@@ -299,12 +383,17 @@ async def favicon():
 @app.get("/list-files")
 async def list_files():
     ensure_selected_file()
+    oauth = oauth_status(EXCEL_DIR)
+    google_source = current_google_sheet_source()
     return {
         "files": file_entries(),
         "current": CURRENT_SELECTED_FILE,
         "currentLabel": current_display_label(),
         "currentSheet": CURRENT_SELECTED_SHEET,
         "googleSheetUrl": GOOGLE_SHEET_SOURCE_URL,
+        "googlePushReady": bool(google_source.get("spreadsheetId")) and oauth.get("authorized"),
+        "googleOAuthConfigured": oauth.get("configured"),
+        "googleOAuthAuthorized": oauth.get("authorized"),
     }
 
 
@@ -338,6 +427,7 @@ async def sync_google_sheet(data: dict):
         GOOGLE_SHEET_SOURCE_URL = source_url
         CURRENT_SELECTED_FILE = file_id
         CURRENT_SELECTED_SHEET = preview.get("currentSheet", "")
+        register_google_sheet_source(EXCEL_DIR, file_id, source_url)
         await manager.broadcast_log(f"Đã nạp Google Sheet thành file mới: {os.path.basename(file_id)}.")
         return {
             "success": True,
@@ -349,6 +439,61 @@ async def sync_google_sheet(data: dict):
         }
     except Exception as error:
         return JSONResponse(content={"error": f"Lỗi đồng bộ Google Sheet: {str(error)}"}, status_code=500)
+
+
+@app.get("/google-oauth-status")
+async def google_oauth_status():
+    source = current_google_sheet_source()
+    status = oauth_status(EXCEL_DIR)
+    return {
+        **status,
+        "connectedSheetUrl": source.get("url", ""),
+        "connectedSpreadsheetId": source.get("spreadsheetId", ""),
+    }
+
+
+@app.post("/google-oauth-client")
+async def upload_google_oauth_client(file: UploadFile = File(...)):
+    try:
+        if not file.filename.lower().endswith(".json"):
+            return JSONResponse(content={"error": "Chỉ nhận file JSON OAuth client."}, status_code=400)
+        payload = json.loads((await file.read()).decode("utf-8"))
+        save_oauth_client(EXCEL_DIR, payload)
+        return {"success": True}
+    except Exception as error:
+        return JSONResponse(content={"error": f"Không lưu được OAuth client: {str(error)}"}, status_code=500)
+
+
+@app.post("/google-oauth-login")
+async def google_oauth_login():
+    try:
+        source = current_google_sheet_source()
+        if not source.get("spreadsheetId"):
+            return JSONResponse(content={"error": "File hiện tại chưa gắn với Google Sheet nào."}, status_code=400)
+        authorize_google(EXCEL_DIR)
+        return {"success": True}
+    except Exception as error:
+        return JSONResponse(content={"error": f"Đăng nhập Google thất bại: {str(error)}"}, status_code=500)
+
+
+@app.post("/push-google-sheet")
+async def push_google_sheet():
+    target_path = current_excel_path()
+    if not os.path.exists(target_path):
+        return JSONResponse(content={"error": "File không tồn tại"}, status_code=404)
+
+    source = current_google_sheet_source()
+    spreadsheet_id = source.get("spreadsheetId", "")
+    if not spreadsheet_id:
+        return JSONResponse(content={"error": "File hiện tại chưa gắn với Google Sheet gốc."}, status_code=400)
+
+    try:
+        rows = build_workbook_rows(target_path)
+        values = build_google_push_rows(rows)
+        sheet_title = push_rows_to_new_sheet(EXCEL_DIR, spreadsheet_id, values)
+        return {"success": True, "sheetTitle": sheet_title}
+    except Exception as error:
+        return JSONResponse(content={"error": f"Đẩy dữ liệu lên Google Sheet thất bại: {str(error)}"}, status_code=500)
 
 
 @app.get("/preview-excel")
@@ -504,12 +649,23 @@ async def websocket_endpoint(websocket: WebSocket):
 
                 target_path = current_excel_path()
                 worker_count = payload.get("workers", 5)
+                create_result_sheet = bool(payload.get("create_result_sheet", False))
+                push_to_google = bool(payload.get("push_to_google", False))
                 partner = clean_text(payload.get("partner", ""))
                 partners_payload = payload.get("partners", [])
                 partners = []
                 if isinstance(partners_payload, list):
                     partners = [clean_text(name) for name in partners_payload if clean_text(name)]
-                SCRAPE_TASK = asyncio.create_task(run_scraper_safely(target_path, worker_count, partner=partner or None, partners=partners))
+                SCRAPE_TASK = asyncio.create_task(
+                    run_scraper_safely(
+                        target_path,
+                        worker_count,
+                        partner=partner or None,
+                        partners=partners,
+                        create_result_sheet=create_result_sheet,
+                        push_to_google=push_to_google,
+                    )
+                )
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 

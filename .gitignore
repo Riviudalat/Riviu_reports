@@ -17,6 +17,8 @@ Thumbs.db
 
 # File dữ liệu/kết quả cào nghiệm
 data/
+google_oauth_client.json
+google_oauth_token.json
 *.xlsx
 *.xls
 *.csv

@@ -15,6 +15,7 @@ DATA_DIR_NAME = "data"
 GOOGLE_SHEET_FILENAME_PREFIX = "google_sheet_"
 LEGACY_GOOGLE_SHEET_FILE_ID = "data/google_sheet_main.xlsx"
 GOOGLE_SHEET_LABEL = "Google Sheet chính"
+GOOGLE_SHEET_REGISTRY_FILENAME = "google_sheet_sources.json"
 REPORT_COLUMNS = ["NGÀY AIR", "TÊN KÊNH", "LINK AIR", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"]
 SUMMARY_SHEET_NAME = "Tổng kết"
 LAST_UPDATE_COLUMN = "Cập nhật lần cuối"
@@ -24,25 +25,8 @@ SUMMARY_METRIC_COLUMNS = ["TỔNG LƯỢT XEM", "TỔNG TIM", "TỔNG BÌNH LU�
 PREFERRED_DATA_SHEET_KEYS = {"thang 5", "thang5"}
 PARTNER_HEADING_MARKERS = ("DANH SÁCH", "DANH SACH", "BỘ ẢNH", "BO ANH")
 CHANNEL_OVERRIDE_FILENAME = "channel_name_overrides.json"
-DEFAULT_CHANNEL_OVERRIDES = {
-    "baoquyen.dalat": "Bảo Quyên",
-    "baothuy.dalat": "Bảo Thúy",
-    "benhi.dalat": "Bé Nhi",
-    "diemhanh.dalat": "Diễm Hạnh",
-    "hoangyen.dalat": "Hoàng Yến",
-    "huongthao.dalat": "Hương Thảo",
-    "huyennhi.dalat": "Huyền Nhi",
-    "kimmai.dalat": "Kim Mai",
-    "lienhoa.dalat": "Liên Hoa",
-    "mailien.dalat": "Mai Liên",
-    "mongquynh.dalat": "Mộng Quỳnh",
-    "mongvi.dalat": "Mộng Vi",
-    "ngocthy.dalat": "Ngọc Thy",
-    "nhatha.dalat": "Nhật Hạ",
-    "thucdoan.dalat": "Thục Đoan",
-    "thuyngan.dalat": "Thùy Ngân",
-    "xuanhoa.dalat": "Xuân Hoa",
-}
+DEFAULT_CHANNEL_OVERRIDES = {}
+RESULT_SHEET_PREFIX = "report seeding tiktok"
 
 
 def ensure_data_dir(base_dir):
@@ -77,27 +61,32 @@ def normalize_channel_display(value):
     return channel_fixes.get(text, text)
 
 
-def prettify_channel_username(username):
-    text = clean_text(username).lstrip("@")
+def is_generated_username_channel(value, link=""):
+    text = clean_text(value)
     if not text:
-        return ""
-    text = re.sub(r"\.dalat$", "", text, flags=re.IGNORECASE)
-    text = re.sub(r"[._-]+", " ", text)
-    text = re.sub(r"\s+", " ", text).strip()
-    return " ".join(part[:1].upper() + part[1:] for part in text.split() if part)
+        return False
+    compact = re.sub(r"\s+", "", text.lstrip("@"))
+    if re.fullmatch(r"user\d{4,}.*", compact, flags=re.IGNORECASE):
+        return True
+    username = extract_tiktok_username(link)
+    return bool(username and normalize_key(text.lstrip("@")) == normalize_key(username))
+
+
+def display_channel_name_from_file(link, raw_channel):
+    normalized_channel = normalize_channel_display(raw_channel)
+    return "" if is_generated_username_channel(normalized_channel, link) else normalized_channel
 
 
 def resolve_channel_name(link, raw_channel, channel_overrides=None):
     username = extract_tiktok_username(link)
-    if username:
-        override_name = (channel_overrides or {}).get(username.casefold())
+    normalized_channel = display_channel_name_from_file(link, raw_channel)
+    if normalized_channel:
+        return normalized_channel
+    if username and channel_overrides:
+        override_name = channel_overrides.get(username.casefold())
         if override_name:
             return override_name
-        if username.casefold().endswith(".dalat"):
-            fallback_name = prettify_channel_username(username)
-            if fallback_name:
-                return fallback_name
-    return normalize_channel_display(raw_channel)
+    return ""
 
 
 def clean_preview_value(value):
@@ -133,6 +122,55 @@ def google_sheet_file_id(spreadsheet_id):
 
 def timestamped_google_sheet_file_id(timestamp):
     return f"{DATA_DIR_NAME}/Report Seeding Tiktok-{timestamp}.xlsx"
+
+
+def google_sheet_registry_path(base_dir):
+    return os.path.join(ensure_data_dir(base_dir), GOOGLE_SHEET_REGISTRY_FILENAME)
+
+
+def load_google_sheet_registry(base_dir):
+    path = google_sheet_registry_path(base_dir)
+    if not os.path.exists(path):
+        return {}
+    try:
+        with open(path, "r", encoding="utf-8") as file_obj:
+            data = json.load(file_obj)
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def save_google_sheet_registry(base_dir, registry):
+    path = google_sheet_registry_path(base_dir)
+    with open(path, "w", encoding="utf-8") as file_obj:
+        json.dump(registry, file_obj, ensure_ascii=False, indent=2)
+
+
+def register_google_sheet_source(base_dir, file_id, source_url):
+    registry = load_google_sheet_registry(base_dir)
+    registry[file_id] = {
+        "url": clean_text(source_url),
+        "spreadsheetId": parse_google_spreadsheet_id(source_url),
+    }
+    save_google_sheet_registry(base_dir, registry)
+    return registry[file_id]
+
+
+def google_sheet_source_for_file(base_dir, file_id):
+    registry = load_google_sheet_registry(base_dir)
+    source = registry.get(file_id)
+    if isinstance(source, dict):
+        return source
+
+    normalized_file_id = str(file_id or "").replace("\\", "/")
+    for registered_file_id, registered_source in registry.items():
+        if str(registered_file_id).replace("\\", "/") == normalized_file_id and isinstance(registered_source, dict):
+            return registered_source
+
+    existing_sources = [item for item in registry.values() if isinstance(item, dict) and item.get("spreadsheetId")]
+    if len(existing_sources) == 1 and str(file_id or "").startswith(f"{DATA_DIR_NAME}/"):
+        return existing_sources[0]
+    return {}
 
 
 def base_dir_for_file(file_path):
@@ -188,7 +226,10 @@ def load_excel_file(file_path):
 
 def workbook_sheet_names(file_path):
     workbook = load_excel_file(file_path)
-    return workbook.sheet_names
+    try:
+        return list(workbook.sheet_names)
+    finally:
+        workbook.close()
 
 
 def read_sheet_frame(file_path, sheet_name):
@@ -201,6 +242,10 @@ def is_summary_sheet_name(sheet_name):
 
 def is_preferred_data_sheet_name(sheet_name):
     return normalize_key(sheet_name) in PREFERRED_DATA_SHEET_KEYS
+
+
+def is_result_sheet_name(sheet_name):
+    return normalize_key(sheet_name).startswith(RESULT_SHEET_PREFIX)
 
 
 def is_total_label(value):
@@ -232,82 +277,105 @@ def fill_preview_total_row(frame, link_column, metric_columns):
     return frame
 
 
+def fill_missing_dates_from_previous(frame, date_column, link_column):
+    if not date_column or date_column not in frame.columns:
+        return frame
+
+    last_date = ""
+    for index, row in frame.iterrows():
+        raw_date = row.get(date_column, "")
+        cleaned_date = clean_text(raw_date)
+        link = clean_text(row.get(link_column, "")) if link_column else ""
+
+        if cleaned_date:
+            last_date = raw_date
+            continue
+        if last_date and ("tiktok.com" in link or "vt.tiktok.com" in link):
+            frame.at[index, date_column] = last_date
+    return frame
+
+
 def read_sheet_preview(file_path, sheet_name=None, limit=100):
     workbook = load_excel_file(file_path)
-    sheets = workbook.sheet_names
-    current_sheet = sheet_name if sheet_name in sheets else (sheets[0] if sheets else "")
-    if not current_sheet:
-        return {"sheets": [], "currentSheet": "", "columns": [], "data": [], "message": "Workbook không có sheet nào."}
+    try:
+        sheets = list(workbook.sheet_names)
+        current_sheet = sheet_name if sheet_name in sheets else (sheets[0] if sheets else "")
+        if not current_sheet:
+            return {"sheets": [], "currentSheet": "", "columns": [], "data": [], "message": "Workbook không có sheet nào."}
 
-    frame = workbook.parse(current_sheet)
-    channel_overrides = load_channel_overrides(file_path)
-    link_column = find_link_column_name(frame)
-    channel_column = find_column_name(frame, ["TÊN KÊNH", "Tên Kênh"])
-    metric_columns = [
-        find_column_name(frame, ["LƯỢT XEM"]),
-        find_column_name(frame, ["TIM"]),
-        find_column_name(frame, ["BÌNH LUẬN"]),
-        find_column_name(frame, ["LƯỢT LƯU"]),
-        find_column_name(frame, ["CHIA SẺ"]),
-    ]
-    for column in frame.select_dtypes(include=["datetime"]).columns:
-        frame[column] = frame[column].dt.strftime("%Y-%m-%d %H:%M:%S")
-    frame = fill_preview_total_row(frame, link_column, metric_columns)
-
-    preview_frame = frame
-    if link_column and len(frame.index) > limit:
-        total_positions = [
-            index
-            for index, value in enumerate(frame[link_column].tolist())
-            if is_total_label(value)
+        frame = workbook.parse(current_sheet)
+        link_column = find_link_column_name(frame)
+        channel_column = find_column_name(frame, ["TÊN KÊNH", "Tên Kênh"])
+        date_column = find_column_name(frame, ["NGÀY AIR", "Ngày"])
+        metric_columns = [
+            find_column_name(frame, ["LƯỢT XEM"]),
+            find_column_name(frame, ["TIM"]),
+            find_column_name(frame, ["BÌNH LUẬN"]),
+            find_column_name(frame, ["LƯỢT LƯU"]),
+            find_column_name(frame, ["CHIA SẺ"]),
         ]
-        if total_positions and total_positions[-1] >= limit:
-            preview_frame = pd.concat(
-                [frame.head(max(limit - 1, 0)), frame.iloc[[total_positions[-1]]]],
-                ignore_index=True,
-            )
+        frame = fill_missing_dates_from_previous(frame, date_column, link_column)
+        for column in frame.select_dtypes(include=["datetime"]).columns:
+            frame[column] = frame[column].dt.strftime("%Y-%m-%d %H:%M:%S")
+        frame = fill_preview_total_row(frame, link_column, metric_columns)
+
+        preview_frame = frame
+        if link_column and len(frame.index) > limit:
+            total_positions = [
+                index
+                for index, value in enumerate(frame[link_column].tolist())
+                if is_total_label(value)
+            ]
+            if total_positions and total_positions[-1] >= limit:
+                preview_frame = pd.concat(
+                    [frame.head(max(limit - 1, 0)), frame.iloc[[total_positions[-1]]]],
+                    ignore_index=True,
+                )
+            else:
+                preview_frame = frame.head(limit)
         else:
             preview_frame = frame.head(limit)
-    else:
-        preview_frame = frame.head(limit)
 
-    data = []
-    for record in preview_frame.to_dict(orient="records"):
-        preview_row = {}
-        for column, value in record.items():
-            cleaned = clean_preview_value(value)
-            preview_row[column] = cleaned
-        if link_column and channel_column:
-            preview_row[channel_column] = clean_preview_value(
-                resolve_channel_name(
+        data = []
+        for record in preview_frame.to_dict(orient="records"):
+            preview_row = {}
+            for column, value in record.items():
+                cleaned = clean_preview_value(value)
+                preview_row[column] = cleaned
+            if link_column and channel_column:
+                preview_row[channel_column] = display_channel_name_from_file(
                     record.get(link_column, ""),
                     preview_row.get(channel_column, ""),
-                    channel_overrides=channel_overrides,
                 )
-            )
-        data.append(preview_row)
+            data.append(preview_row)
 
-    return {
-        "sheets": sheets,
-        "currentSheet": current_sheet,
-        "columns": frame.columns.tolist(),
-        "data": data,
-    }
+        return {
+            "sheets": sheets,
+            "currentSheet": current_sheet,
+            "columns": frame.columns.tolist(),
+            "data": data,
+        }
+    finally:
+        workbook.close()
 
 
 def read_summary_dashboard(file_path):
     workbook = load_excel_file(file_path)
-    summary_sheet = next((sheet for sheet in workbook.sheet_names if is_summary_sheet_name(sheet)), "")
-    if not summary_sheet:
-        return {
-            "sheet": "",
-            "columns": SUMMARY_COLUMNS,
-            "rows": [],
-            "totals": {},
-            "message": "Workbook chưa có sheet Tổng kết.",
-        }
+    try:
+        summary_sheet = next((sheet for sheet in workbook.sheet_names if is_summary_sheet_name(sheet)), "")
+        if not summary_sheet:
+            return {
+                "sheet": "",
+                "columns": SUMMARY_COLUMNS,
+                "rows": [],
+                "totals": {},
+                "message": "Workbook chưa có sheet Tổng kết.",
+            }
 
-    frame = workbook.parse(summary_sheet).fillna("")
+        frame = workbook.parse(summary_sheet).fillna("")
+    finally:
+        workbook.close()
+
     columns = frame.columns.tolist()
     if LAST_UPDATE_COLUMN not in columns:
         columns.append(LAST_UPDATE_COLUMN)
@@ -455,8 +523,15 @@ def find_link_column_name(frame):
 
 def find_data_sheet_names(file_path):
     workbook = load_excel_file(file_path)
+    try:
+        return find_data_sheet_names_in_workbook(workbook)
+    finally:
+        workbook.close()
+
+
+def find_data_sheet_names_in_workbook(workbook):
     sheets = workbook.sheet_names
-    data_sheets = [sheet for sheet in sheets if not is_summary_sheet_name(sheet)]
+    data_sheets = [sheet for sheet in sheets if not is_summary_sheet_name(sheet) and not is_result_sheet_name(sheet)]
     if not data_sheets:
         return []
 
@@ -478,69 +553,74 @@ def find_data_sheet_names(file_path):
 
 def build_workbook_rows(file_path, selected_partner=None):
     workbook = load_excel_file(file_path)
-    selected_key = selected_partner.casefold() if selected_partner else None
-    channel_overrides = load_channel_overrides(file_path)
-    rows = []
+    try:
+        selected_key = selected_partner.casefold() if selected_partner else None
+        rows = []
 
-    for sheet_name in find_data_sheet_names(file_path):
-        frame = workbook.parse(sheet_name)
-        partner_columns = dataframe_partner_columns(frame)
-        date_column = find_column_name(frame, ["NGÀY AIR", "Ngày"])
-        channel_column = find_column_name(frame, ["TÊN KÊNH", "Tên Kênh"])
-        link_column = find_link_column_name(frame)
-        metric_columns = {
-            "LƯỢT XEM": find_column_name(frame, ["LƯỢT XEM"]),
-            "TIM": find_column_name(frame, ["TIM"]),
-            "BÌNH LUẬN": find_column_name(frame, ["BÌNH LUẬN"]),
-            "LƯỢT LƯU": find_column_name(frame, ["LƯỢT LƯU"]),
-            "CHIA SẺ": find_column_name(frame, ["CHIA SẺ"]),
-        }
+        for sheet_name in find_data_sheet_names_in_workbook(workbook):
+            frame = workbook.parse(sheet_name)
+            partner_columns = dataframe_partner_columns(frame)
+            date_column = find_column_name(frame, ["NGÀY AIR", "Ngày"])
+            channel_column = find_column_name(frame, ["TÊN KÊNH", "Tên Kênh"])
+            link_column = find_link_column_name(frame)
+            metric_columns = {
+                "LƯỢT XEM": find_column_name(frame, ["LƯỢT XEM"]),
+                "TIM": find_column_name(frame, ["TIM"]),
+                "BÌNH LUẬN": find_column_name(frame, ["BÌNH LUẬN"]),
+                "LƯỢT LƯU": find_column_name(frame, ["LƯỢT LƯU"]),
+                "CHIA SẺ": find_column_name(frame, ["CHIA SẺ"]),
+            }
 
-        if not link_column:
-            continue
-
-        for _, row in frame.iterrows():
-            partners = extract_row_partners(row, partner_columns) if partner_columns else []
-            if selected_key and selected_key not in {partner.casefold() for partner in partners}:
+            if not link_column:
                 continue
-            if selected_key and not partners:
-                continue
+            frame = fill_missing_dates_from_previous(frame, date_column, link_column)
 
-            link = clean_text(row.get(link_column, ""))
-            if not link:
-                continue
+            for _, row in frame.iterrows():
+                partners = extract_row_partners(row, partner_columns) if partner_columns else []
+                if selected_key and selected_key not in {partner.casefold() for partner in partners}:
+                    continue
+                if selected_key and not partners:
+                    continue
 
-            rows.append({
-                "sheet_name": sheet_name,
-                "NGÀY AIR": row.get(date_column, "") if date_column else "",
-                "TÊN KÊNH": resolve_channel_name(
-                    link,
-                    clean_text(row.get(channel_column, "")) if channel_column else "",
-                    channel_overrides=channel_overrides,
-                ),
-                "LINK AIR": link,
-                "LƯỢT XEM": row.get(metric_columns["LƯỢT XEM"], "") if metric_columns["LƯỢT XEM"] else "",
-                "TIM": row.get(metric_columns["TIM"], "") if metric_columns["TIM"] else "",
-                "BÌNH LUẬN": row.get(metric_columns["BÌNH LUẬN"], "") if metric_columns["BÌNH LUẬN"] else "",
-                "LƯỢT LƯU": row.get(metric_columns["LƯỢT LƯU"], "") if metric_columns["LƯỢT LƯU"] else "",
-                "CHIA SẺ": row.get(metric_columns["CHIA SẺ"], "") if metric_columns["CHIA SẺ"] else "",
-                "partners": partners,
-            })
+                link = clean_text(row.get(link_column, ""))
+                if not link:
+                    continue
 
-    return rows
+                rows.append({
+                    "sheet_name": sheet_name,
+                    "NGÀY AIR": row.get(date_column, "") if date_column else "",
+                    "TÊN KÊNH": display_channel_name_from_file(
+                        link,
+                        clean_text(row.get(channel_column, "")) if channel_column else "",
+                    ),
+                    "LINK AIR": link,
+                    "LƯỢT XEM": row.get(metric_columns["LƯỢT XEM"], "") if metric_columns["LƯỢT XEM"] else "",
+                    "TIM": row.get(metric_columns["TIM"], "") if metric_columns["TIM"] else "",
+                    "BÌNH LUẬN": row.get(metric_columns["BÌNH LUẬN"], "") if metric_columns["BÌNH LUẬN"] else "",
+                    "LƯỢT LƯU": row.get(metric_columns["LƯỢT LƯU"], "") if metric_columns["LƯỢT LƯU"] else "",
+                    "CHIA SẺ": row.get(metric_columns["CHIA SẺ"], "") if metric_columns["CHIA SẺ"] else "",
+                    "partners": partners,
+                })
+
+        return rows
+    finally:
+        workbook.close()
 
 
 def list_workbook_partners(file_path):
     workbook = load_excel_file(file_path)
-    partners = []
-    for sheet_name in find_data_sheet_names(file_path):
-        frame = workbook.parse(sheet_name)
-        partner_columns = dataframe_partner_columns(frame)
-        if not partner_columns:
-            continue
-        for _, row in frame.iterrows():
-            partners.extend(extract_row_partners(row, partner_columns))
-    return sorted(unique_preserve_order(partners), key=lambda value: value.casefold())
+    try:
+        partners = []
+        for sheet_name in find_data_sheet_names_in_workbook(workbook):
+            frame = workbook.parse(sheet_name)
+            partner_columns = dataframe_partner_columns(frame)
+            if not partner_columns:
+                continue
+            for _, row in frame.iterrows():
+                partners.extend(extract_row_partners(row, partner_columns))
+        return sorted(unique_preserve_order(partners), key=lambda value: value.casefold())
+    finally:
+        workbook.close()
 
 
 def worksheet_headers(worksheet):
@@ -589,7 +669,7 @@ def worksheet_has_link_column(worksheet):
 
 
 def workbook_data_sheet_names(workbook):
-    sheet_names = [sheet for sheet in workbook.sheetnames if not is_summary_sheet_name(sheet)]
+    sheet_names = [sheet for sheet in workbook.sheetnames if not is_summary_sheet_name(sheet) and not is_result_sheet_name(sheet)]
     if not sheet_names:
         return []
 
@@ -599,6 +679,10 @@ def workbook_data_sheet_names(workbook):
 
     matching_sheets = [sheet_name for sheet_name in sheet_names if worksheet_has_link_column(workbook[sheet_name])]
     return matching_sheets or [sheet_names[0]]
+
+
+def result_sheet_display_name(timestamp_text):
+    return f"Report Seeding Tiktok {timestamp_text}"
 
 
 def worksheet_partner_column_indexes(worksheet):
@@ -649,7 +733,7 @@ def to_number(value):
 def is_failed_channel_name(value):
     text = clean_text(value)
     key = normalize_key(text)
-    return key in {"loi", "l?i"} or text.casefold().startswith("error:")
+    return not text or key in {"loi", "l?i"} or text.casefold().startswith("error:") or is_generated_username_channel(text)
 
 
 def read_existing_summary_updates(worksheet):

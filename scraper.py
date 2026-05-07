@@ -1,4 +1,6 @@
 import asyncio
+import html
+import json
 import os
 import random
 import re
@@ -11,9 +13,9 @@ from playwright.async_api import async_playwright
 
 from workbook_utils import (
     clean_text,
-    load_channel_overrides,
-    resolve_channel_name,
+    is_generated_username_channel,
     rebuild_summary_sheet,
+    result_sheet_display_name,
     workbook_data_sheet_names,
     worksheet_partner_column_indexes,
     worksheet_row_partners,
@@ -54,16 +56,23 @@ COUNT_PATTERNS = {
     "Shares": r'"shareCount"\s*:\s*"?(\d+)"?',
 }
 
-CHANNEL_PATTERNS = [
-    r'"authorName"\s*:\s*"([^"]+)"',
-    r'"uniqueId"\s*:\s*"([^"]+)"',
-    r'"nickname"\s*:\s*"([^"]+)"',
-]
-
 MAX_WORKERS = 50
 DEFAULT_WORKERS = 5
 DEFAULT_RETRIES = 2
 DEFAULT_SAVE_EVERY = 25
+RESULT_SHEET_HEADERS = [
+    "Stt",
+    "Ngày",
+    "Link",
+    "Tên Kênh",
+    "LƯỢT XEM",
+    "TIM",
+    "BÌNH LUẬN",
+    "LƯỢT LƯU",
+    "CHIA SẺ",
+    "Đối tác",
+    LAST_UPDATE_HEADER,
+]
 
 
 def normalize_selected_partners(selected_partner=None, selected_partners=None):
@@ -122,7 +131,7 @@ def build_sheet_contexts(workbook):
 
 
 def username_override_map(file_path):
-    return load_channel_overrides(file_path)
+    return {}
 
 
 def find_columns(sheet):
@@ -262,6 +271,73 @@ def append_sheet_total_rows(workbook):
                 sheet.cell(row=total_row, column=column_index).value = f"=SUM({col_letter}2:{col_letter}{last_link_row})"
 
 
+def build_result_sheet(workbook, rows_to_process, summary_update_time):
+    timestamp_label = datetime.now().strftime("%d-%m-%Y-%H-%M")
+    sheet_name = result_sheet_display_name(timestamp_label)[:31]
+    if sheet_name in workbook.sheetnames:
+        base_name = sheet_name[:28]
+        suffix = 2
+        while f"{base_name}-{suffix}" in workbook.sheetnames:
+            suffix += 1
+        sheet_name = f"{base_name}-{suffix}"
+
+    worksheet = workbook.create_sheet(title=sheet_name)
+    for column_index, header in enumerate(RESULT_SHEET_HEADERS, start=1):
+        worksheet.cell(row=1, column=column_index).value = header
+
+    row_lookup = {}
+    for item in rows_to_process:
+        row_lookup[(item["sheet_name"], item["row"])] = item
+
+    output_row = 2
+    sequence = 1
+    for source_sheet_name in workbook_data_sheet_names(workbook):
+        source_sheet = workbook[source_sheet_name]
+        columns = find_columns(source_sheet)
+        url_column = columns.get("url")
+        if not url_column:
+            continue
+
+        partner_columns = worksheet_partner_column_indexes(source_sheet)
+        for source_row_index in range(2, source_sheet.max_row + 1):
+            item = row_lookup.get((source_sheet_name, source_row_index))
+            if not item:
+                continue
+
+            url = clean_text(source_sheet.cell(row=source_row_index, column=url_column).value)
+            if not url or is_total_row(source_sheet, source_row_index, url_column):
+                continue
+
+            partner_names = worksheet_row_partners(source_sheet, source_row_index, partner_columns) if partner_columns else []
+            worksheet.cell(row=output_row, column=1).value = sequence
+            worksheet.cell(row=output_row, column=2).value = source_sheet.cell(row=source_row_index, column=columns.get("date") or 1).value if columns.get("date") else ""
+            worksheet.cell(row=output_row, column=3).value = url
+            worksheet.cell(row=output_row, column=4).value = clean_text(source_sheet.cell(row=source_row_index, column=columns.get("channel")).value) if columns.get("channel") else ""
+            worksheet.cell(row=output_row, column=5).value = int(source_sheet.cell(row=source_row_index, column=columns.get("views")).value or 0) if columns.get("views") else 0
+            worksheet.cell(row=output_row, column=6).value = int(source_sheet.cell(row=source_row_index, column=columns.get("likes")).value or 0) if columns.get("likes") else 0
+            worksheet.cell(row=output_row, column=7).value = int(source_sheet.cell(row=source_row_index, column=columns.get("comments")).value or 0) if columns.get("comments") else 0
+            worksheet.cell(row=output_row, column=8).value = int(source_sheet.cell(row=source_row_index, column=columns.get("saves")).value or 0) if columns.get("saves") else 0
+            worksheet.cell(row=output_row, column=9).value = int(source_sheet.cell(row=source_row_index, column=columns.get("shares")).value or 0) if columns.get("shares") else 0
+            worksheet.cell(row=output_row, column=10).value = "\n".join(partner_names)
+            worksheet.cell(row=output_row, column=11).value = clean_text(source_sheet.cell(row=source_row_index, column=columns.get("last_update")).value) if columns.get("last_update") else summary_update_time
+            output_row += 1
+            sequence += 1
+
+    widths = [10, 16, 72, 24, 14, 12, 14, 14, 12, 28, 20]
+    for index, width in enumerate(widths, start=1):
+        worksheet.column_dimensions[openpyxl.utils.get_column_letter(index)].width = width
+
+    if output_row > 2:
+        total_row = output_row
+        worksheet.cell(row=total_row, column=3).value = "TỔNG"
+        for column_index in range(5, 10):
+            letter = openpyxl.utils.get_column_letter(column_index)
+            worksheet.cell(row=total_row, column=column_index).value = f"=SUM({letter}2:{letter}{total_row - 1})"
+
+    worksheet.freeze_panes = "A2"
+    return sheet_name
+
+
 def parse_counts(content):
     data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
     found = False
@@ -273,13 +349,147 @@ def parse_counts(content):
     return data, found
 
 
-def parse_channel_name(content):
-    for pattern in CHANNEL_PATTERNS:
-        match = re.search(pattern, content)
-        if match:
-            value = clean_text(match.group(1))
-            if value:
-                return value
+def json_loads_safe(raw_value):
+    try:
+        return json.loads(html.unescape(raw_value))
+    except (TypeError, json.JSONDecodeError):
+        return None
+
+
+def iter_nested_dicts(value):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from iter_nested_dicts(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from iter_nested_dicts(child)
+
+
+def author_name_from_object(obj, profile_username):
+    if not isinstance(obj, dict) or not profile_username:
+        return ""
+
+    unique_id = clean_text(obj.get("uniqueId") or obj.get("unique_id") or obj.get("uniqueID"))
+    if normalize_text(unique_id.lstrip("@")) != normalize_text(profile_username.lstrip("@")):
+        return ""
+
+    for key in ("nickname", "authorName", "name", "displayName"):
+        candidate = clean_text(obj.get(key))
+        if candidate and not is_generated_username_channel(candidate, f"https://www.tiktok.com/@{profile_username}"):
+            return candidate
+    return ""
+
+
+def valid_channel_candidate(value, profile_username):
+    candidate = clean_text(value)
+    if not candidate:
+        return ""
+
+    profile_url = f"https://www.tiktok.com/@{profile_username}"
+    normalized_candidate = normalize_text(candidate.lstrip("@"))
+    normalized_username = normalize_text(profile_username.lstrip("@"))
+    blocked_labels = {
+        "FOLLOW",
+        "MESSAGE",
+        "FOLLOWING",
+        "FOLLOWERS",
+        "LIKES",
+    }
+    if (
+        candidate.startswith("@")
+        or normalized_candidate == normalized_username
+        or normalized_candidate in blocked_labels
+        or "FOLLOWERS" in normalized_candidate
+        or "FOLLOWING" in normalized_candidate
+        or is_generated_username_channel(candidate, profile_url)
+    ):
+        return ""
+    return candidate
+
+
+def parse_channel_name(content, profile_username):
+    if not profile_username:
+        return ""
+
+    script_patterns = [
+        r'<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
+        r'<script[^>]+id="SIGI_STATE"[^>]*>(.*?)</script>',
+    ]
+    for pattern in script_patterns:
+        match = re.search(pattern, content, flags=re.DOTALL)
+        if not match:
+            continue
+        data = json_loads_safe(match.group(1))
+        for obj in iter_nested_dicts(data):
+            candidate = author_name_from_object(obj, profile_username)
+            if candidate:
+                return candidate
+
+    author_blocks = re.finditer(r'\{[^{}]*"uniqueId"\s*:\s*"([^"]+)"[^{}]*\}', content)
+    for block_match in author_blocks:
+        if normalize_text(block_match.group(1).lstrip("@")) != normalize_text(profile_username.lstrip("@")):
+            continue
+        data = json_loads_safe(block_match.group(0))
+        candidate = author_name_from_object(data, profile_username)
+        if candidate:
+            return candidate
+    return ""
+
+
+def strip_html_text(value):
+    text = html.unescape(str(value or ""))
+    text = re.sub(r"<[^>]+>", " ", text)
+    return clean_text(re.sub(r"\s+", " ", text))
+
+
+def profile_title_candidate(raw_title, profile_username):
+    title = strip_html_text(raw_title)
+    if not title:
+        return ""
+
+    candidate = re.split(
+        r"\s+\|\s+TikTok|\s+-\s+TikTok|\s+on\s+TikTok",
+        title,
+        maxsplit=1,
+        flags=re.IGNORECASE,
+    )[0]
+    candidate = re.sub(
+        rf"\s*\(@?{re.escape(profile_username)}\)\s*$",
+        "",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+    candidate = re.sub(
+        rf"\s*@{re.escape(profile_username)}\s*$",
+        "",
+        candidate,
+        flags=re.IGNORECASE,
+    )
+    candidate = clean_text(candidate.strip(" -|"))
+    return valid_channel_candidate(candidate, profile_username)
+
+
+def parse_profile_channel_name(content, profile_username):
+    candidate = parse_channel_name(content, profile_username)
+    if candidate:
+        return candidate
+
+    for tag in re.findall(r"<meta\b[^>]*>", content or "", flags=re.IGNORECASE):
+        if not re.search(r'(?:property|name)=["\'](?:og:)?title["\']', tag, flags=re.IGNORECASE):
+            continue
+        match = re.search(r'content=["\']([^"\']+)["\']', tag, flags=re.IGNORECASE)
+        if not match:
+            continue
+        candidate = profile_title_candidate(match.group(1), profile_username)
+        if candidate:
+            return candidate
+
+    match = re.search(r"<title[^>]*>(.*?)</title>", content or "", flags=re.DOTALL | re.IGNORECASE)
+    if match:
+        candidate = profile_title_candidate(match.group(1), profile_username)
+        if candidate:
+            return candidate
     return ""
 
 
@@ -313,9 +523,72 @@ async def read_channel_name_from_dom(page, profile_username):
                 if normalize_text(normalized) == normalize_text(profile_username):
                     continue
                 if text.startswith("@"):
-                    return normalized
+                    continue
+                candidate = valid_channel_candidate(text, profile_username)
+                if candidate:
+                    return candidate
         except Exception:
             continue
+    return ""
+
+
+def profile_text_candidates(text):
+    for line in str(text or "").splitlines():
+        line = clean_text(line)
+        if line:
+            yield line
+
+
+async def read_profile_channel_name_from_dom(page, profile_username):
+    selectors = [
+        '[data-e2e="user-title"]',
+        'h1[data-e2e="user-title"]',
+        "main h1",
+        "h1",
+    ]
+    for selector in selectors:
+        try:
+            locator = page.locator(selector)
+            count = await locator.count()
+            for index in range(min(count, 5)):
+                try:
+                    text = await locator.nth(index).inner_text(timeout=1200)
+                except Exception:
+                    continue
+                for line in profile_text_candidates(text):
+                    candidate = valid_channel_candidate(line, profile_username)
+                    if candidate:
+                        return candidate
+        except Exception:
+            continue
+    return ""
+
+
+async def read_profile_channel_name(page, profile_username, channel_cache=None, timeout_ms=18000):
+    if not profile_username:
+        return ""
+
+    cache_key = profile_username.casefold()
+    if isinstance(channel_cache, dict):
+        cached = clean_text(channel_cache.get(cache_key))
+        if cached and not is_generated_username_channel(cached, f"https://www.tiktok.com/@{profile_username}"):
+            return cached
+
+    profile_url = f"https://www.tiktok.com/@{profile_username}"
+    try:
+        await page.goto(profile_url, wait_until="domcontentloaded", timeout=timeout_ms)
+        for _ in range(20):
+            content = await page.content()
+            candidate = parse_profile_channel_name(content, profile_username)
+            if not candidate:
+                candidate = await read_profile_channel_name_from_dom(page, profile_username)
+            if candidate:
+                if isinstance(channel_cache, dict):
+                    channel_cache[cache_key] = candidate
+                return candidate
+            await page.wait_for_timeout(500)
+    except Exception:
+        return ""
     return ""
 
 
@@ -326,12 +599,10 @@ async def block_heavy_resources(route):
         await route.continue_()
 
 
-async def scrape_single_link(page, url, channel_overrides=None, timeout_ms=45000):
+async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
     data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
     channel_name = ""
     profile_username = extract_profile_username(url)
-    override_name = (channel_overrides or {}).get(profile_username.casefold()) if profile_username else ""
-    trust_username_fallback = bool(profile_username and profile_username.casefold().endswith(".dalat"))
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
         content = ""
@@ -340,34 +611,31 @@ async def scrape_single_link(page, url, channel_overrides=None, timeout_ms=45000
             content = await page.content()
             data, found = parse_counts(content)
             dom_channel = ""
-            if override_name:
-                channel_name = override_name
-                dom_channel = override_name
-            elif profile_username and not trust_username_fallback:
+            parsed_channel = parse_channel_name(content, profile_username)
+            if parsed_channel:
+                channel_name = parsed_channel
+            if profile_username and not channel_name:
                 dom_channel = await read_channel_name_from_dom(page, profile_username)
-                if dom_channel:
+                if dom_channel and not is_generated_username_channel(dom_channel, url):
                     channel_name = dom_channel
-            if not channel_name and not profile_username:
-                channel_name = parse_channel_name(content)
-            if found and (dom_channel or trust_username_fallback or not profile_username):
+            if found and channel_name:
                 break
             await page.wait_for_timeout(500)
 
+        if profile_username:
+            profile_channel = await read_profile_channel_name(page, profile_username, channel_cache=channel_cache)
+            if profile_channel:
+                channel_name = profile_channel
+
         if not found:
-            if not channel_name and profile_username:
-                channel_name = resolve_channel_name(url, "", channel_overrides=channel_overrides)
             return data, channel_name, "Error: Không đọc được số liệu"
 
-        if not channel_name and profile_username:
-            channel_name = resolve_channel_name(url, "", channel_overrides=channel_overrides)
         return data, channel_name, "Success"
     except Exception as error:
-        if not channel_name and profile_username:
-            channel_name = resolve_channel_name(url, "", channel_overrides=channel_overrides)
         return data, channel_name, f"Error: {str(error)}"
 
 
-async def scrape_with_retries(page, url, retries, channel_overrides=None):
+async def scrape_with_retries(page, url, retries, channel_cache=None):
     last_data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
     last_status = "Error: Chưa chạy"
     last_channel = ""
@@ -375,7 +643,7 @@ async def scrape_with_retries(page, url, retries, channel_overrides=None):
     for attempt in range(retries + 1):
         if attempt > 0:
             await asyncio.sleep(random.uniform(1.5, 3.5))
-        data, channel_name, status = await scrape_single_link(page, url, channel_overrides=channel_overrides)
+        data, channel_name, status = await scrape_single_link(page, url, channel_cache=channel_cache)
         last_data, last_channel, last_status = data, channel_name, status
         if status == "Success":
             return data, channel_name, status, attempt + 1
@@ -383,7 +651,7 @@ async def scrape_with_retries(page, url, retries, channel_overrides=None):
     return last_data, last_channel, last_status, retries + 1
 
 
-async def worker_loop(worker_id, browser, work_queue, result_queue, retries, channel_overrides=None):
+async def worker_loop(worker_id, browser, work_queue, result_queue, retries, channel_cache=None):
     context = await browser.new_context(
         user_agent=random.choice(USER_AGENTS),
         viewport={"width": 390, "height": 844},
@@ -399,7 +667,7 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries, cha
                 break
 
             started_at = time.perf_counter()
-            data, channel_name, status, attempts = await scrape_with_retries(page, item["url"], retries, channel_overrides=channel_overrides)
+            data, channel_name, status, attempts = await scrape_with_retries(page, item["url"], retries, channel_cache=channel_cache)
             elapsed = time.perf_counter() - started_at
             await result_queue.put({
                 **item,
@@ -430,9 +698,9 @@ def write_result(sheet_contexts, item, data, channel_name, status):
                 sheet.cell(row=row_index, column=column_index).value = int(data.get(data_key) or 0)
 
     if columns.get("channel"):
-        if channel_name:
+        if channel_name and not is_generated_username_channel(channel_name, item["url"]):
             sheet.cell(row=row_index, column=columns["channel"]).value = channel_name
-        elif status != "Success":
+        else:
             sheet.cell(row=row_index, column=columns["channel"]).value = "Lỗi"
 
     if columns.get("last_update"):
@@ -472,7 +740,7 @@ def progress_payload(total, processed, success_count, error_count, worker_count,
     }
 
 
-async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None):
+async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None, create_result_sheet=False):
     if not os.path.exists(file_path):
         if websocket_manager:
             await websocket_manager.broadcast_log(f"Lỗi: Không tìm thấy file {file_path}")
@@ -488,7 +756,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     clear_existing_total_rows(workbook)
     sheet_contexts = build_sheet_contexts(workbook)
     rows_to_process = collect_rows(workbook, selected_partners=selected_names)
-    channel_overrides = username_override_map(file_path)
+    channel_cache = {}
     total = len(rows_to_process)
     started_at = time.perf_counter()
     mode = "partner" if selected_names else "full"
@@ -533,7 +801,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             await websocket_manager.broadcast_log(f"Đang khởi tạo trình duyệt và {worker_count} luồng...")
         browser = await playwright.chromium.launch(headless=True)
         workers = [
-            asyncio.create_task(worker_loop(index + 1, browser, work_queue, result_queue, retries, channel_overrides=channel_overrides))
+            asyncio.create_task(worker_loop(index + 1, browser, work_queue, result_queue, retries, channel_cache=channel_cache))
             for index in range(worker_count)
         ]
         if websocket_manager:
@@ -602,6 +870,11 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     try:
         append_sheet_total_rows(workbook)
         summary_update_time = datetime.now().strftime("%d/%m/%Y %H:%M")
+        created_sheet_name = ""
+        if create_result_sheet:
+            created_sheet_name = build_result_sheet(workbook, rows_to_process, summary_update_time)
+            if websocket_manager and created_sheet_name:
+                await websocket_manager.broadcast_log(f"Đã tạo sheet kết quả mới: {created_sheet_name}.")
         summary_count = rebuild_summary_sheet(
             workbook,
             summary_update_time=summary_update_time,
