@@ -197,6 +197,44 @@ def format_result_sheet(service, spreadsheet_id, sheet_id, row_count, column_cou
     ).execute()
 
 
+def apply_link_formatting(service, spreadsheet_id, sheet_id, rows):
+    if not rows or len(rows) < 2:
+        return
+
+    requests = []
+    for row_index, row in enumerate(rows[1:], start=1):
+        url = str(row[2] or "").strip() if len(row) > 2 else ""
+        if not url.lower().startswith("http"):
+            continue
+        requests.append({
+            "repeatCell": {
+                "range": {
+                    "sheetId": sheet_id,
+                    "startRowIndex": row_index,
+                    "endRowIndex": row_index + 1,
+                    "startColumnIndex": 2,
+                    "endColumnIndex": 3,
+                },
+                "cell": {
+                    "userEnteredFormat": {
+                        "textFormat": {
+                            "foregroundColor": rgb(0, 74, 198),
+                            "underline": True,
+                            "link": {"uri": url},
+                        }
+                    }
+                },
+                "fields": "userEnteredFormat.textFormat",
+            }
+        })
+
+    if requests:
+        service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": requests},
+        ).execute()
+
+
 def client_secret_candidates(base_dir):
     return [
         os.path.join(base_dir, CLIENT_SECRET_FILENAME),
@@ -322,4 +360,5 @@ def push_rows_to_new_sheet(base_dir, spreadsheet_id, rows):
         body={"values": rows},
     ).execute()
     format_result_sheet(service, spreadsheet_id, sheet_id, len(rows), max(len(row) for row in rows))
+    apply_link_formatting(service, spreadsheet_id, sheet_id, rows)
     return title

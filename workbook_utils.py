@@ -22,7 +22,6 @@ LAST_UPDATE_COLUMN = "Cập nhật lần cuối"
 SUMMARY_COLUMNS = ["Stt", "ĐỐI TÁC", "TỔNG LINK", "TỔNG LƯỢT XEM", "TỔNG TIM", "TỔNG BÌNH LUẬN", "TỔNG LƯỢT LƯU", "TỔNG CHIA SẺ", LAST_UPDATE_COLUMN]
 METRIC_COLUMNS = ["LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"]
 SUMMARY_METRIC_COLUMNS = ["TỔNG LƯỢT XEM", "TỔNG TIM", "TỔNG BÌNH LUẬN", "TỔNG LƯỢT LƯU", "TỔNG CHIA SẺ"]
-PREFERRED_DATA_SHEET_KEYS = {"thang 5", "thang5"}
 PARTNER_HEADING_MARKERS = ("DANH SÁCH", "DANH SACH", "BỘ ẢNH", "BO ANH")
 CHANNEL_OVERRIDE_FILENAME = "channel_name_overrides.json"
 DEFAULT_CHANNEL_OVERRIDES = {}
@@ -258,16 +257,16 @@ def is_summary_sheet_name(sheet_name):
     return normalize_key(sheet_name) == normalize_key(SUMMARY_SHEET_NAME)
 
 
-def is_preferred_data_sheet_name(sheet_name):
-    return normalize_key(sheet_name) in PREFERRED_DATA_SHEET_KEYS
-
-
 def is_result_sheet_name(sheet_name):
     return normalize_key(sheet_name).startswith(RESULT_SHEET_PREFIX)
 
 
 def is_total_label(value):
     return normalize_key(clean_text(value)) == "tong"
+
+
+def is_tiktok_link(value):
+    return "tiktok.com" in clean_text(value).casefold()
 
 
 def fill_preview_total_row(frame, link_column, metric_columns):
@@ -552,21 +551,7 @@ def find_data_sheet_names_in_workbook(workbook):
     data_sheets = [sheet for sheet in sheets if not is_summary_sheet_name(sheet) and not is_result_sheet_name(sheet)]
     if not data_sheets:
         return []
-
-    for sheet_name in data_sheets:
-        if is_preferred_data_sheet_name(sheet_name):
-            return [sheet_name]
-
-    matching_sheets = []
-    for sheet_name in data_sheets:
-        try:
-            frame = workbook.parse(sheet_name)
-        except Exception:
-            continue
-        if find_link_column_name(frame):
-            matching_sheets.append(sheet_name)
-
-    return matching_sheets or [data_sheets[0]]
+    return [data_sheets[0]]
 
 
 def build_workbook_rows(file_path, selected_partner=None):
@@ -601,7 +586,7 @@ def build_workbook_rows(file_path, selected_partner=None):
                     continue
 
                 link = clean_text(row.get(link_column, ""))
-                if not link:
+                if not link or is_total_label(link) or not is_tiktok_link(link):
                     continue
 
                 rows.append({
@@ -690,13 +675,7 @@ def workbook_data_sheet_names(workbook):
     sheet_names = [sheet for sheet in workbook.sheetnames if not is_summary_sheet_name(sheet) and not is_result_sheet_name(sheet)]
     if not sheet_names:
         return []
-
-    for sheet_name in sheet_names:
-        if is_preferred_data_sheet_name(sheet_name):
-            return [sheet_name]
-
-    matching_sheets = [sheet_name for sheet_name in sheet_names if worksheet_has_link_column(workbook[sheet_name])]
-    return matching_sheets or [sheet_names[0]]
+    return [sheet_names[0]]
 
 
 def result_sheet_display_name(timestamp_text):

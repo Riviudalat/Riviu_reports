@@ -202,11 +202,7 @@ def spreadsheet_formula_text(value):
 
 
 def spreadsheet_hyperlink(value):
-    url = clean_text(value)
-    if not url:
-        return ""
-    escaped = spreadsheet_formula_text(url)
-    return f'=HYPERLINK("{escaped}","{escaped}")'
+    return clean_text(value)
 
 
 def excel_column_name(index):
