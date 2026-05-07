@@ -61,18 +61,48 @@ if not exist ".venv" (
 ) else (
     echo [OK] Moi truong ao da ton tai.
 )
+set "VENV_PY=%~dp0.venv\Scripts\python.exe"
+
+if not exist "%VENV_PY%" (
+    echo [!] Khong tim thay Python trong .venv sau khi tao moi truong ao.
+    pause
+    exit /b 1
+)
 
 :: 3. CÀI ĐẶT THƯ VIỆN CỐ ĐỊNH TỪ REQUIREMENTS.TXT
 echo.
 echo Dang cai dat thu vien...
 call .venv\Scripts\activate.bat
-python -m pip install --upgrade pip >nul 2>&1
-python -m pip install -r requirements.txt
+"%VENV_PY%" -m pip install --upgrade pip >nul 2>&1
+"%VENV_PY%" -m pip install -r requirements.txt
+if errorlevel 1 (
+    echo.
+    echo [!] Loi cai dat thu vien tu requirements.txt
+    pause
+    exit /b 1
+)
 
 :: 4. CÀI ĐẶT TRÌNH DUYỆT CHROME/CHROMIUM
 echo.
 echo Dang tai trinh duyet phu cho Playwright...
-python -m playwright install chromium
+"%VENV_PY%" -m playwright install chromium
+if errorlevel 1 (
+    echo.
+    echo [!] Loi cai dat Chromium cho Playwright
+    pause
+    exit /b 1
+)
+
+echo.
+echo Dang kiem tra lai moi truong...
+"%VENV_PY%" -c "import fastapi, uvicorn, pandas, openpyxl, playwright"
+if errorlevel 1 (
+    echo.
+    echo [!] Moi truong da cai xong nhung van import loi.
+    echo Vui long chay lai setup.bat hoac kiem tra Python tren may.
+    pause
+    exit /b 1
+)
 
 echo.
 echo ============================================
