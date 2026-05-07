@@ -112,6 +112,11 @@ def ensure_selected_file():
         for entry in entries
         if entry.get("source") == "google" and entry["id"] != LEGACY_GOOGLE_SHEET_FILE_ID
     ]
+    google_ids = sorted(
+        google_ids,
+        key=lambda file_id: os.path.getmtime(resolve_file_path(file_id)) if os.path.exists(resolve_file_path(file_id)) else 0,
+        reverse=True,
+    )
     preferred_ids = google_ids + [LEGACY_GOOGLE_SHEET_FILE_ID, "Report_v1.xlsx", "Report_v1_with_partners.xlsx"]
     available_ids = {entry["id"] for entry in entries}
     CURRENT_SELECTED_FILE = next((file_id for file_id in preferred_ids if file_id in available_ids), entries[0]["id"])
@@ -421,6 +426,15 @@ def build_google_push_rows(rows):
     return values
 
 
+def has_scraped_google_push_data(rows):
+    for row in rows:
+        if not is_failed_channel_name(row.get("TÊN KÊNH", "")):
+            return True
+        if any(metric_number(row.get(column, 0)) > 0 for column in ["LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"]):
+            return True
+    return False
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse(request=request, name="index.html")
@@ -559,6 +573,10 @@ async def push_google_sheet(data: dict | None = None):
         GOOGLE_SHEET_SOURCE_URL = source_url
         register_google_sheet_source(EXCEL_DIR, ensure_selected_file(), source_url)
         rows = build_workbook_rows(target_path)
+        if not rows:
+            return JSONResponse(content={"error": "File đang chọn không có link TikTok để tạo sheet."}, status_code=400)
+        if not has_scraped_google_push_data(rows):
+            return JSONResponse(content={"error": "File đang chọn mới nạp nhưng chưa quét dữ liệu. Hãy bấm BẮT ĐẦU QUÉT trước rồi tạo sheet."}, status_code=400)
         values = build_google_push_rows(rows)
         sheet_title = push_rows_to_new_sheet(EXCEL_DIR, spreadsheet_id, values)
         return {"success": True, "sheetTitle": sheet_title}
