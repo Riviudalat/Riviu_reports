@@ -14,6 +14,7 @@ from playwright.async_api import async_playwright
 from workbook_utils import (
     clean_text,
     is_generated_username_channel,
+    is_generic_tiktok_channel_name,
     rebuild_summary_sheet,
     result_sheet_display_name,
     workbook_data_sheet_names,
@@ -376,7 +377,11 @@ def author_name_from_object(obj, profile_username):
 
     for key in ("nickname", "authorName", "name", "displayName"):
         candidate = clean_text(obj.get(key))
-        if candidate and not is_generated_username_channel(candidate, f"https://www.tiktok.com/@{profile_username}"):
+        if (
+            candidate
+            and not is_generated_username_channel(candidate, f"https://www.tiktok.com/@{profile_username}")
+            and not is_generic_tiktok_channel_name(candidate)
+        ):
             return candidate
     return ""
 
@@ -403,6 +408,7 @@ def valid_channel_candidate(value, profile_username):
         or "FOLLOWERS" in normalized_candidate
         or "FOLLOWING" in normalized_candidate
         or is_generated_username_channel(candidate, profile_url)
+        or is_generic_tiktok_channel_name(candidate)
     ):
         return ""
     return candidate
@@ -571,7 +577,11 @@ async def read_profile_channel_name(page, profile_username, channel_cache=None, 
     cache_key = profile_username.casefold()
     if isinstance(channel_cache, dict):
         cached = clean_text(channel_cache.get(cache_key))
-        if cached and not is_generated_username_channel(cached, f"https://www.tiktok.com/@{profile_username}"):
+        if (
+            cached
+            and not is_generated_username_channel(cached, f"https://www.tiktok.com/@{profile_username}")
+            and not is_generic_tiktok_channel_name(cached)
+        ):
             return cached
 
     profile_url = f"https://www.tiktok.com/@{profile_username}"
@@ -616,7 +626,7 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
                 channel_name = parsed_channel
             if profile_username and not channel_name:
                 dom_channel = await read_channel_name_from_dom(page, profile_username)
-                if dom_channel and not is_generated_username_channel(dom_channel, url):
+                if dom_channel and not is_generated_username_channel(dom_channel, url) and not is_generic_tiktok_channel_name(dom_channel):
                     channel_name = dom_channel
             if found and channel_name:
                 break
@@ -698,7 +708,11 @@ def write_result(sheet_contexts, item, data, channel_name, status):
                 sheet.cell(row=row_index, column=column_index).value = int(data.get(data_key) or 0)
 
     if columns.get("channel"):
-        if channel_name and not is_generated_username_channel(channel_name, item["url"]):
+        if (
+            channel_name
+            and not is_generated_username_channel(channel_name, item["url"])
+            and not is_generic_tiktok_channel_name(channel_name)
+        ):
             sheet.cell(row=row_index, column=columns["channel"]).value = channel_name
         else:
             sheet.cell(row=row_index, column=columns["channel"]).value = "Lỗi"

@@ -176,6 +176,47 @@ def metric_number(value):
             return 0
 
 
+def spreadsheet_text(value):
+    text = clean_text(value)
+    return f"'{text}" if text else ""
+
+
+def spreadsheet_date_text(value):
+    if pd.isna(value):
+        return ""
+    if hasattr(value, "to_pydatetime"):
+        return spreadsheet_text(value.to_pydatetime().strftime("%d/%m/%Y"))
+    if isinstance(value, datetime):
+        return spreadsheet_text(value.strftime("%d/%m/%Y"))
+    parsed = pd.to_datetime(value, errors="coerce")
+    if not pd.isna(parsed):
+        return spreadsheet_text(parsed.to_pydatetime().strftime("%d/%m/%Y"))
+    text = clean_text(value)
+    if text.endswith(" 00:00:00"):
+        text = text[:10]
+    return spreadsheet_text(text)
+
+
+def spreadsheet_formula_text(value):
+    return clean_text(value).replace('"', '""')
+
+
+def spreadsheet_hyperlink(value):
+    url = clean_text(value)
+    if not url:
+        return ""
+    escaped = spreadsheet_formula_text(url)
+    return f'=HYPERLINK("{escaped}","{escaped}")'
+
+
+def excel_column_name(index):
+    name = ""
+    while index > 0:
+        index, remainder = divmod(index - 1, 26)
+        name = chr(65 + remainder) + name
+    return name
+
+
 def find_report_column(frame, header):
     target = normalize_header(header)
     for column in frame.columns:
@@ -330,6 +371,8 @@ async def run_scraper_safely(target_path, worker_count, partner=None, partners=N
             else:
                 await manager.broadcast_log("BỎ QUA đẩy Google: file hiện tại chưa gắn với Google Sheet gốc.")
     except asyncio.CancelledError:
+        await manager.broadcast_log("Đã hủy phiên quét.")
+        await manager.broadcast_status({"total": 0, "processed": 0, "success": 0, "error": 0, "done": True, "cancelled": True})
         raise
     except Exception as error:
         await manager.broadcast_log(f"Lỗi quét: {str(error)}")
@@ -354,11 +397,14 @@ def build_google_push_rows(rows):
     values = [headers]
     for index, (row, partner_names) in enumerate(normalized_rows, start=1):
         padded_partners = partner_names + [""] * (max_partner_columns - len(partner_names))
+        channel_name = clean_text(row.get("TÊN KÊNH", ""))
+        if is_failed_channel_name(channel_name):
+            channel_name = "Lỗi"
         values.append([
             index,
-            clean_text(row.get("NGÀY AIR", "")),
-            clean_text(row.get("LINK AIR", "")),
-            clean_text(row.get("TÊN KÊNH", "")),
+            spreadsheet_date_text(row.get("NGÀY AIR", "")),
+            spreadsheet_hyperlink(row.get("LINK AIR", "")),
+            channel_name,
             metric_number(row.get("LƯỢT XEM", 0)),
             metric_number(row.get("TIM", 0)),
             metric_number(row.get("BÌNH LUẬN", 0)),
@@ -367,6 +413,15 @@ def build_google_push_rows(rows):
             *padded_partners,
             datetime.now().strftime("%d/%m/%Y %H:%M"),
         ])
+    if len(values) > 1:
+        total_row_number = len(values) + 1
+        data_last_row = total_row_number - 1
+        total_row = ["", "", "TỔNG", ""]
+        for column_index in range(5, 10):
+            column_name = excel_column_name(column_index)
+            total_row.append(f"=SUM({column_name}2:{column_name}{data_last_row})")
+        total_row.extend([""] * (max_partner_columns + 1))
+        values.append(total_row)
     return values
 
 
@@ -666,6 +721,12 @@ async def websocket_endpoint(websocket: WebSocket):
                         push_to_google=push_to_google,
                     )
                 )
+            elif action == "cancel":
+                if SCRAPE_TASK and not SCRAPE_TASK.done():
+                    SCRAPE_TASK.cancel()
+                    await manager.broadcast_log("Đang hủy phiên quét hiện tại...")
+                else:
+                    await manager.broadcast_log("Không có phiên quét nào đang chạy.")
     except WebSocketDisconnect:
         manager.disconnect(websocket)
 

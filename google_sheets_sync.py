@@ -113,6 +113,47 @@ def format_result_sheet(service, spreadsheet_id, sheet_id, row_count, column_cou
         },
     ]
 
+    if row_count > 2:
+        requests.extend([
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": row_count - 1,
+                        "endRowIndex": row_count,
+                        "startColumnIndex": 0,
+                        "endColumnIndex": column_count,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "backgroundColor": rgb(232, 240, 254),
+                            "textFormat": {"fontFamily": "Arial", "fontSize": 10, "bold": True},
+                            "verticalAlignment": "MIDDLE",
+                        }
+                    },
+                    "fields": "userEnteredFormat(backgroundColor,textFormat,verticalAlignment)",
+                }
+            },
+            {
+                "repeatCell": {
+                    "range": {
+                        "sheetId": sheet_id,
+                        "startRowIndex": row_count - 1,
+                        "endRowIndex": row_count,
+                        "startColumnIndex": 4,
+                        "endColumnIndex": 9,
+                    },
+                    "cell": {
+                        "userEnteredFormat": {
+                            "horizontalAlignment": "RIGHT",
+                            "numberFormat": {"type": "NUMBER", "pattern": "#,##0"},
+                        }
+                    },
+                    "fields": "userEnteredFormat(horizontalAlignment,numberFormat)",
+                }
+            },
+        ])
+
     for index, width in enumerate(widths):
         requests.append({
             "updateDimensionProperties": {

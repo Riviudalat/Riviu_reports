@@ -72,9 +72,21 @@ def is_generated_username_channel(value, link=""):
     return bool(username and normalize_key(text.lstrip("@")) == normalize_key(username))
 
 
+def is_generic_tiktok_channel_name(value):
+    key = normalize_key(value)
+    return key in {
+        "tiktok",
+        "make your day",
+        "tiktok make your day",
+        "tiktok - make your day",
+    } or ("tiktok" in key and "make your day" in key)
+
+
 def display_channel_name_from_file(link, raw_channel):
     normalized_channel = normalize_channel_display(raw_channel)
-    return "" if is_generated_username_channel(normalized_channel, link) else normalized_channel
+    if is_generated_username_channel(normalized_channel, link) or is_generic_tiktok_channel_name(normalized_channel):
+        return "Lỗi"
+    return normalized_channel
 
 
 def resolve_channel_name(link, raw_channel, channel_overrides=None):
@@ -733,7 +745,13 @@ def to_number(value):
 def is_failed_channel_name(value):
     text = clean_text(value)
     key = normalize_key(text)
-    return not text or key in {"loi", "l?i"} or text.casefold().startswith("error:") or is_generated_username_channel(text)
+    return (
+        not text
+        or key in {"loi", "l?i"}
+        or text.casefold().startswith("error:")
+        or is_generated_username_channel(text)
+        or is_generic_tiktok_channel_name(text)
+    )
 
 
 def read_existing_summary_updates(worksheet):

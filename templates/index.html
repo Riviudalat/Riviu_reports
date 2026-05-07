@@ -19,15 +19,6 @@
         .scan-setting select { width: 78px; margin-top: 0; padding: 8px; font-size: 14px; background: #fff; }
         .scan-toggle { display: inline-flex; align-items: center; gap: 8px; padding: 8px 12px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb; font-size: 12px; color: #374151; font-weight: 700; }
         .scan-toggle input { width: 16px; height: 16px; accent-color: #004ac6; }
-        .oauth-panel { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-        .google-setup-card { margin-top: 10px; padding: 12px; border: 1px solid #e5edf9; border-radius: 10px; background: #fbfdff; }
-        .google-setup-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
-        .google-setup-title { font-size: 13px; font-weight: 800; color: #1f2937; }
-        .google-setup-desc { margin-top: 2px; font-size: 11px; color: #6b7280; line-height: 1.45; }
-        .text-link { border: 0; background: transparent; color: #004ac6; font-size: 12px; font-weight: 800; cursor: pointer; padding: 0; white-space: nowrap; }
-        .text-link:hover { text-decoration: underline; }
-        .oauth-pill { padding: 8px 10px; border-radius: 999px; background: #eff6ff; color: #1d4ed8; font-size: 12px; font-weight: 700; border: 1px solid #bfdbfe; }
-
         .btn { display: inline-flex; align-items: center; gap: 8px; padding: 12px 24px; border-radius: 8px; font-size: 15px; font-weight: 600; cursor: pointer; border: none; transition: 0.2s; }
         .btn-primary { background: #004ac6; color: #fff; }
         .btn-primary:hover { background: #003ea8; transform: translateY(-1px); }
@@ -67,7 +58,8 @@
         .source-inline { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: start; }
         .source-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
         .source-actions .btn { justify-content: center; }
-        .sheet-chip { margin-top: 8px; padding: 9px 11px; border-radius: 9px; background: #f8fafc; border: 1px solid #e5e7eb; color: #4b5563; font-size: 11px; line-height: 1.45; }
+        .google-action-row { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+        .google-action-row .btn { justify-content: center; white-space: nowrap; }
 
         .upload-zone { border: 2px dashed #3b82f6; border-radius: 12px; padding: 16px; text-align: center; cursor: pointer; transition: 0.2s; height: auto; min-height: 110px; display: flex; flex-direction: column; justify-content: center; align-items: center; background: #fcfdff; }
         .upload-zone:hover { background: #eff6ff; border-color: #2563eb; }
@@ -117,7 +109,9 @@
         .error-badge { display: inline-flex; align-items: center; justify-content: center; min-width: 28px; height: 22px; padding: 0 8px; border-radius: 999px; background: #fee2e2; color: #b91c1c; font-size: 12px; font-weight: 800; margin-left: 8px; }
         .failed-reason { color: #b91c1c; font-weight: 600; max-width: 360px; }
 
-        .log-box { height: 300px; overflow-y: auto; padding: 20px; background: #0f172a; color: #38bdf8; font-family: 'Fira Code', 'Courier New', monospace; font-size: 12px; line-height: 1.7; }
+        .log-box { height: 300px; overflow-y: auto; padding: 18px 20px; background: #050505; color: #d4d4d4; font-family: Consolas, 'Courier New', monospace; font-size: 13px; line-height: 1.55; }
+        .log-line { white-space: pre-wrap; }
+        .log-time { color: #9ca3af; }
         .log-line { margin-bottom: 6px; border-bottom: 1px solid #1e293b; padding-bottom: 4px; }
         .log-time { color: #64748b; margin-right: 12px; }
 
@@ -127,9 +121,6 @@
         .modal-header { padding: 20px 24px; border-bottom: 1px solid #e5e7eb; display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
         .modal-title { font-size: 18px; font-weight: 800; color: #111827; }
         .modal-subtitle { margin-top: 4px; color: #6b7280; font-size: 13px; font-weight: 500; }
-        .guide-list { margin: 0; padding-left: 20px; color: #374151; font-size: 14px; line-height: 1.75; }
-        .guide-list strong { color: #111827; }
-        .guide-note { margin-top: 14px; padding: 12px 14px; border-radius: 8px; background: #eff6ff; color: #1e3a8a; font-size: 13px; line-height: 1.6; }
         .icon-btn { width: 38px; height: 38px; border: 1px solid #e5e7eb; background: #fff; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; cursor: pointer; color: #4b5563; }
         .icon-btn:hover { background: #f3f4f6; color: #111827; }
         .modal-body { padding: 20px 24px; overflow: auto; }
@@ -174,7 +165,7 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1><span class="material-icons-outlined" style="font-size:32px">insights</span> TIKTOK BOT DATA PRO</h1>
+            <h1><span class="material-icons-outlined" style="font-size:32px">insights</span> TIKTOK REPORTS DATA</h1>
             <div class="header-actions">
                 <label class="scan-setting">
                     <span>Luồng</span>
@@ -188,6 +179,9 @@
                         <option value="50">50</option>
                     </select>
                 </label>
+                <button class="btn btn-outline" id="cancelBtn" onclick="cancelScraping()" disabled>
+                    <span class="material-icons-outlined">stop_circle</span> HỦY QUÉT
+                </button>
                 <button class="btn btn-primary" id="startBtn" onclick="startScraping()">
                     <span class="material-icons-outlined">play_circle</span> BẮT ĐẦU QUÉT
                 </button>
@@ -231,7 +225,14 @@
                                 <span class="material-icons-outlined">sync</span> Nạp sheet
                             </button>
                         </div>
-                        <div class="sheet-chip">Lưu vào `data/` theo thời gian nhập.</div>
+                        <div class="google-action-row">
+                            <button class="btn btn-soft btn-compact" id="pushGoogleBtn" onclick="pushCurrentSheetToGoogle(event)" disabled>
+                                <span class="material-icons-outlined">note_add</span> Tạo sheet
+                            </button>
+                            <button class="btn btn-outline btn-compact" id="googleOauthBtn" onclick="document.getElementById('googleOauthFileInput').click()">Nạp OAuth</button>
+                            <button class="btn btn-soft btn-compact" id="googleLoginBtn" onclick="connectGoogleOAuth()">Đăng nhập Google</button>
+                            <input type="file" id="googleOauthFileInput" hidden accept=".json" onchange="uploadGoogleOauthClient(this)">
+                        </div>
                     </div>
                 </div>
 
@@ -267,23 +268,6 @@
                         <div style="margin-top:6px; font-weight:700; font-size:14px">Kéo thả hoặc click để tải file</div>
                         <input type="file" id="fileInput" hidden accept=".xlsx,.xls" onchange="uploadFile(this)">
                     </div>
-                    <div class="google-setup-card">
-                        <div class="google-setup-head">
-                            <div>
-                                <div class="google-setup-title">Kết nối Google</div>
-                                <div class="google-setup-desc">Cài 1 file JSON của app, sau đó mỗi máy chỉ cần đăng nhập Google.</div>
-                            </div>
-                            <button class="text-link" type="button" onclick="showGoogleSetupGuide()">File này lấy ở đâu?</button>
-                        </div>
-                        <div class="oauth-panel">
-                            <button class="btn btn-outline btn-compact" onclick="document.getElementById('googleOauthFileInput').click()">Chọn file JSON Google</button>
-                            <button class="btn btn-soft btn-compact" id="googleLoginBtn" onclick="connectGoogleOAuth()">Đăng nhập Google</button>
-                        </div>
-                        <div class="oauth-panel">
-                            <span class="oauth-pill" id="googleOauthStatusPill">Chưa cấu hình Google</span>
-                        </div>
-                        <input type="file" id="googleOauthFileInput" hidden accept=".json" onchange="uploadGoogleOauthClient(this)">
-                    </div>
                 </div>
             </div>
         </div>
@@ -294,9 +278,6 @@
                     <span>NỘI DUNG SHEET HIỆN TẠI</span>
                 </div>
                 <div class="card-header-actions">
-                    <button class="btn btn-soft btn-compact" onclick="pushCurrentSheetToGoogle(event)">
-                        <span class="material-icons-outlined">note_add</span> Tạo sheet
-                    </button>
                     <button class="btn btn-soft btn-compact" onclick="openReportModal()">
                         <span class="material-icons-outlined">summarize</span> Đối tác & báo cáo
                     </button>
@@ -405,38 +386,6 @@
         </div>
     </div>
 
-    <div class="modal-backdrop" id="googleGuideModal" aria-hidden="true">
-        <div class="report-modal" role="dialog" aria-modal="true" aria-labelledby="googleGuideTitle">
-            <div class="modal-header">
-                <div>
-                    <div class="modal-title" id="googleGuideTitle">File JSON Google là gì?</div>
-                    <div class="modal-subtitle">Đây là file cấu hình OAuth Client của ứng dụng, không phải file sheet và không phải API key.</div>
-                </div>
-                <button class="icon-btn" onclick="closeGoogleSetupGuide()" aria-label="Đóng">
-                    <span class="material-icons-outlined">close</span>
-                </button>
-            </div>
-            <div class="modal-body">
-                <ol class="guide-list">
-                    <li>Vào <strong>Google Cloud Console</strong> và chọn project test của bạn.</li>
-                    <li>Bật <strong>Google Sheets API</strong>.</li>
-                    <li>Vào <strong>APIs & Services</strong> → <strong>Credentials</strong>.</li>
-                    <li>Tạo <strong>OAuth client ID</strong>, chọn loại <strong>Desktop app</strong>.</li>
-                    <li>Bấm tải xuống file <strong>.json</strong>, rồi chọn file đó ở nút <strong>Chọn file JSON Google</strong>.</li>
-                </ol>
-                <div class="guide-note">
-                    Làm bước này một lần cho bộ app. Sau đó mỗi máy chỉ cần bấm <strong>Đăng nhập Google</strong>. Khi app đã đăng nhập, nút <strong>Tạo sheet</strong> sẽ ghi kết quả ngược lên đúng Google Sheet bạn đã nạp.
-                </div>
-            </div>
-            <div class="modal-footer">
-                <a class="btn btn-soft" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noopener">
-                    <span class="material-icons-outlined">open_in_new</span> Mở Google Cloud
-                </a>
-                <button class="btn btn-outline" onclick="closeGoogleSetupGuide()">Đóng</button>
-            </div>
-        </div>
-    </div>
-
     <script>
         let ws;
         let reportPartners = [];
@@ -444,19 +393,33 @@
         let failedLinks = [];
         let currentSheetName = '';
         let currentFileId = '';
+        let googlePushReady = false;
+        let scanCompletedForCurrentFile = false;
         const startBtn = document.getElementById('startBtn');
+        const cancelBtn = document.getElementById('cancelBtn');
         const workerCountSelect = document.getElementById('workerCountSelect');
         const googleSheetUrlInput = document.getElementById('googleSheetUrlInput');
+
+        function cmdLine(type, message) {
+            const prefix = type ? `[${type}] ` : '';
+            return `${prefix}${message}`;
+        }
 
         function addLog(msg) {
             const logs = document.getElementById('logs');
             const div = document.createElement('div');
             div.className = 'log-line';
             const time = new Date().toLocaleTimeString();
-            let color = '#38bdf8';
-            if (msg.includes('Lỗi') || msg.includes('CẢNH BÁO') || msg.includes('Mất kết nối')) color = '#f87171';
-            if (msg.includes('thành công') || msg.includes('HOÀN THÀNH') || msg.includes('Đã đồng bộ')) color = '#4ade80';
-            div.innerHTML = `<span class="log-time">[${time}]</span> <span style="color:${color}">${escapeHtml(msg)}</span>`;
+            let type = 'INFO';
+            let color = '#d4d4d4';
+            if (msg.includes('Lỗi') || msg.includes('CẢNH BÁO') || msg.includes('Mất kết nối') || msg.includes('thất bại')) {
+                type = 'ERROR';
+                color = '#ff6b6b';
+            } else if (msg.includes('thành công') || msg.includes('HOÀN THÀNH') || msg.includes('Đã ') || msg.includes('--- QUÉT HOÀN TẤT ---')) {
+                type = 'OK';
+                color = '#7ddc83';
+            }
+            div.innerHTML = `<span class="log-time">[${time}]</span> <span style="color:${color}">${escapeHtml(cmdLine(type, msg))}</span>`;
             logs.appendChild(div);
             logs.scrollTop = logs.scrollHeight;
         }
@@ -474,22 +437,30 @@
             return typeof file === 'string' ? file : (file?.label || file?.id || '');
         }
 
+        function setGooglePushState() {
+            const button = document.getElementById('pushGoogleBtn');
+            if (!button) return;
+            const enabled = Boolean(googlePushReady && scanCompletedForCurrentFile);
+            button.disabled = !enabled;
+            button.title = enabled
+                ? ''
+                : 'Chỉ bật sau khi sheet này đã nạp từ Google, đăng nhập Google và quét dữ liệu xong.';
+        }
+
         async function refreshGoogleOauthStatus() {
             try {
                 const res = await fetch('/google-oauth-status');
                 const data = await res.json();
-                const pill = document.getElementById('googleOauthStatusPill');
                 const loginBtn = document.getElementById('googleLoginBtn');
-                const ready = Boolean(data.authorized && data.connectedSpreadsheetId);
-                if (pill) {
-                    pill.textContent = ready
-                        ? 'Đã kết nối Google Sheet gốc'
-                        : (data.configured ? 'Chưa đăng nhập Google trên máy này' : 'Cần chọn file JSON Google trước');
-                }
+                const oauthBtn = document.getElementById('googleOauthBtn');
                 if (loginBtn) {
                     loginBtn.disabled = !data.configured;
                     loginBtn.title = data.configured ? '' : 'Cần chọn file JSON Google trước khi đăng nhập';
                 }
+                if (oauthBtn) {
+                    oauthBtn.style.display = data.configured ? 'none' : '';
+                }
+                setGooglePushState();
             } catch (error) {
                 console.error(error);
             }
@@ -529,7 +500,9 @@
 
                 if (data.googleSheetUrl) googleSheetUrlInput.value = data.googleSheetUrl;
                 currentFileId = data.current || '';
+                googlePushReady = Boolean(data.googlePushReady);
                 await refreshGoogleOauthStatus();
+                setGooglePushState();
 
                 if (!data.files || data.files.length === 0) {
                     select.innerHTML = '<option value="">(Không có file nào)</option>';
@@ -553,6 +526,8 @@
         async function selectFile(fileId) {
             if (!fileId) return;
             try {
+                scanCompletedForCurrentFile = false;
+                setGooglePushState();
                 const res = await fetch('/select-file', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -581,6 +556,8 @@
             const originalHtml = btn.innerHTML;
             btn.disabled = true;
             btn.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> Đang đồng bộ...';
+            scanCompletedForCurrentFile = false;
+            setGooglePushState();
 
             try {
                 const res = await fetch('/sync-google-sheet', {
@@ -608,6 +585,8 @@
             const file = input.files[0];
             if (!file) return;
             addLog(`Đang tải lên: ${file.name}...`);
+            scanCompletedForCurrentFile = false;
+            setGooglePushState();
             const formData = new FormData();
             formData.append('file', file);
             try {
@@ -642,20 +621,6 @@
             input.value = '';
         }
 
-        function showGoogleSetupGuide() {
-            const modal = document.getElementById('googleGuideModal');
-            modal.classList.add('active');
-            modal.setAttribute('aria-hidden', 'false');
-            document.body.style.overflow = 'hidden';
-        }
-
-        function closeGoogleSetupGuide() {
-            const modal = document.getElementById('googleGuideModal');
-            modal.classList.remove('active');
-            modal.setAttribute('aria-hidden', 'true');
-            document.body.style.overflow = '';
-        }
-
         async function connectGoogleOAuth() {
             const btn = document.getElementById('googleLoginBtn');
             const originalHtml = btn.innerHTML;
@@ -670,13 +635,17 @@
             } catch (error) {
                 addLog(`Lỗi đăng nhập Google: ${error.message}`);
             } finally {
-                btn.disabled = false;
                 btn.innerHTML = originalHtml;
+                await refreshGoogleOauthStatus();
             }
         }
 
         async function pushCurrentSheetToGoogle(event) {
             const button = event?.currentTarget;
+            if (button && button.disabled) {
+                addLog('Nút Tạo sheet chỉ bật sau khi nạp đúng Google Sheet, đăng nhập Google và quét dữ liệu xong.');
+                return;
+            }
             const originalHtml = button ? button.innerHTML : '';
             if (button) {
                 button.disabled = true;
@@ -691,8 +660,8 @@
                 addLog(`Lỗi tạo sheet Google: ${error.message}`);
             } finally {
                 if (button) {
-                    button.disabled = false;
                     button.innerHTML = originalHtml;
+                    setGooglePushState();
                 }
             }
         }
@@ -873,6 +842,8 @@
                 addLog('Lỗi: Chưa kết nối được server. Vui lòng kiểm tra CMD.');
                 return;
             }
+            scanCompletedForCurrentFile = false;
+            setGooglePushState();
             const selected = Array.isArray(partners) ? partners : (partners ? [partners] : []);
             const workers = Number(workerCountSelect.value || 5);
             ws.send(JSON.stringify({
@@ -882,11 +853,24 @@
                 partner: selected.length === 1 ? selected[0] : ''
             }));
             startBtn.disabled = true;
+            cancelBtn.disabled = false;
+            cancelBtn.innerHTML = '<span class="material-icons-outlined">stop_circle</span> HỦY QUÉT';
             workerCountSelect.disabled = true;
             document.getElementById('refreshPartnerBtn').disabled = true;
             startBtn.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> ĐANG QUÉT...';
             document.getElementById('dataFeed').innerHTML = '';
             clearFailedLinks(false);
+        }
+
+        function cancelScraping() {
+            if (!ws || ws.readyState !== WebSocket.OPEN) {
+                addLog('Lỗi: Chưa kết nối được server. Vui lòng kiểm tra CMD.');
+                return;
+            }
+            ws.send(JSON.stringify({ action: 'cancel' }));
+            cancelBtn.disabled = true;
+            cancelBtn.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> ĐANG HỦY...';
+            addLog('Đã gửi lệnh hủy quét.');
         }
 
         async function refreshPartnerLinks() {
@@ -937,9 +921,13 @@
 
             if (data.done || (data.processed === data.total && data.total > 0)) {
                 startBtn.disabled = false;
+                cancelBtn.disabled = true;
+                cancelBtn.innerHTML = '<span class="material-icons-outlined">stop_circle</span> HỦY QUÉT';
                 workerCountSelect.disabled = false;
                 startBtn.innerHTML = '<span class="material-icons-outlined">play_circle</span> BẮT ĐẦU QUÉT';
-                addLog('--- QUÉT HOÀN TẤT ---');
+                addLog(data.cancelled ? '--- ĐÃ HỦY QUÉT ---' : '--- QUÉT HOÀN TẤT ---');
+                scanCompletedForCurrentFile = true;
+                setGooglePushState();
                 updateFileList();
                 loadPreview();
             }
@@ -1194,16 +1182,9 @@
             if (event.target.id === 'reportModal') closeReportModal();
         });
 
-        document.getElementById('googleGuideModal').addEventListener('click', (event) => {
-            if (event.target.id === 'googleGuideModal') closeGoogleSetupGuide();
-        });
-
         document.addEventListener('keydown', (event) => {
             if (event.key === 'Escape' && document.getElementById('reportModal').classList.contains('active')) {
                 closeReportModal();
-            }
-            if (event.key === 'Escape' && document.getElementById('googleGuideModal').classList.contains('active')) {
-                closeGoogleSetupGuide();
             }
         });
 
