@@ -312,7 +312,7 @@ def fill_missing_dates_from_previous(frame, date_column, link_column):
     return frame
 
 
-def read_sheet_preview(file_path, sheet_name=None, limit=100):
+def read_sheet_preview(file_path, sheet_name=None, limit=None):
     workbook = load_excel_file(file_path)
     try:
         sheets = list(workbook.sheet_names)
@@ -337,7 +337,7 @@ def read_sheet_preview(file_path, sheet_name=None, limit=100):
         frame = fill_preview_total_row(frame, link_column, metric_columns)
 
         preview_frame = frame
-        if link_column and len(frame.index) > limit:
+        if limit and link_column and len(frame.index) > limit:
             total_positions = [
                 index
                 for index, value in enumerate(frame[link_column].tolist())
@@ -350,7 +350,7 @@ def read_sheet_preview(file_path, sheet_name=None, limit=100):
                 )
             else:
                 preview_frame = frame.head(limit)
-        else:
+        elif limit:
             preview_frame = frame.head(limit)
 
         data = []
@@ -371,6 +371,8 @@ def read_sheet_preview(file_path, sheet_name=None, limit=100):
             "currentSheet": current_sheet,
             "columns": frame.columns.tolist(),
             "data": data,
+            "totalRows": int(len(frame.index)),
+            "shownRows": int(len(preview_frame.index)),
         }
     finally:
         workbook.close()

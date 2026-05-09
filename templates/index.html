@@ -541,11 +541,12 @@
             if (!fileId) return;
             try {
                 scanCompletedForCurrentFile = false;
+                currentSheetName = '';
                 setGooglePushState();
                 const res = await fetch('/select-file', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ filename: fileId, sheet_name: currentSheetName })
+                    body: JSON.stringify({ filename: fileId })
                 });
                 const data = await res.json();
                 if (!data.success) throw new Error(data.error || 'Không chọn được file');

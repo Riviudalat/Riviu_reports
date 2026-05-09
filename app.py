@@ -25,6 +25,7 @@ from workbook_utils import (
     clean_text,
     download_google_sheet,
     ensure_data_dir,
+    find_data_sheet_names,
     google_sheet_source_for_file,
     is_failed_channel_name,
     list_workbook_partners,
@@ -139,6 +140,16 @@ def current_display_label():
         if entry["id"] == current_id:
             return entry["label"]
     return current_id
+
+
+def default_sheet_for_file(file_id):
+    if not file_id:
+        return ""
+    try:
+        sheets = find_data_sheet_names(resolve_file_path(file_id))
+        return sheets[0] if sheets else ""
+    except Exception:
+        return ""
 
 
 def safe_report_name(name):
@@ -473,10 +484,9 @@ async def list_files():
 async def select_file(data: dict):
     global CURRENT_SELECTED_FILE, CURRENT_SELECTED_SHEET
     file_id = data.get("filename")
-    sheet_name = data.get("sheet_name", "")
     if file_id and os.path.exists(resolve_file_path(file_id)):
         CURRENT_SELECTED_FILE = file_id
-        CURRENT_SELECTED_SHEET = sheet_name or ""
+        CURRENT_SELECTED_SHEET = default_sheet_for_file(file_id)
         return {"success": True, "selected": CURRENT_SELECTED_FILE, "sheet": CURRENT_SELECTED_SHEET}
     return {"success": False, "error": "File không tồn tại"}
 
@@ -591,7 +601,8 @@ async def preview_excel(sheet_name: str = Query(default="")):
     if not os.path.exists(target_path):
         return {"sheets": [], "currentSheet": "", "columns": [], "data": [], "message": f"Không tìm thấy file {CURRENT_SELECTED_FILE}."}
     try:
-        preview = read_sheet_preview(target_path, sheet_name=sheet_name or CURRENT_SELECTED_SHEET)
+        requested_sheet = sheet_name or CURRENT_SELECTED_SHEET or default_sheet_for_file(CURRENT_SELECTED_FILE)
+        preview = read_sheet_preview(target_path, sheet_name=requested_sheet)
         CURRENT_SELECTED_SHEET = preview.get("currentSheet", CURRENT_SELECTED_SHEET)
         preview["file"] = CURRENT_SELECTED_FILE
         preview["fileLabel"] = current_display_label()
