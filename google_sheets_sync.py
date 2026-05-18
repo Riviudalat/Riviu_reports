@@ -324,7 +324,7 @@ def sheets_service(base_dir):
 
 
 def create_result_sheet_title():
-    return f"{RESULT_SHEET_PREFIX} {datetime.now().strftime('%d-%m-%Y-%H-%M')}"
+    return datetime.now().strftime('%d-%m-%Y-%H-%M')
 
 
 def ensure_unique_sheet_title(existing_titles, desired_title):

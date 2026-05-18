@@ -253,21 +253,30 @@ def find_report_column(frame, header):
     return None
 
 
-def build_partner_report(partner, rows):
+def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
+    threshold = max(int(min_views or 0), 0) if apply_min_views else 0
     total_rows = len(rows)
     failed_rows = sum(1 for row in rows if is_failed_channel_name(row.get("TÊN KÊNH", "")))
-    under_100_rows = sum(
-        1
-        for row in rows
-        if not is_failed_channel_name(row.get("TÊN KÊNH", ""))
-        and metric_number(row.get("LƯỢT XEM", 0)) < 100
-    )
-    valid_rows = [
-        row
-        for row in rows
-        if not is_failed_channel_name(row.get("TÊN KÊNH", ""))
-        and metric_number(row.get("LƯỢT XEM", 0)) >= 100
-    ]
+    if apply_min_views:
+        under_threshold_rows = sum(
+            1
+            for row in rows
+            if not is_failed_channel_name(row.get("TÊN KÊNH", ""))
+            and metric_number(row.get("LƯỢT XEM", 0)) < threshold
+        )
+        valid_rows = [
+            row
+            for row in rows
+            if not is_failed_channel_name(row.get("TÊN KÊNH", ""))
+            and metric_number(row.get("LƯỢT XEM", 0)) >= threshold
+        ]
+    else:
+        under_threshold_rows = 0
+        valid_rows = [
+            row
+            for row in rows
+            if not is_failed_channel_name(row.get("TÊN KÊNH", ""))
+        ]
     frame = pd.DataFrame(valid_rows)
     wb = Workbook()
     ws = wb.active
@@ -296,10 +305,16 @@ def build_partner_report(partner, rows):
     ws["A2"].alignment = Alignment(horizontal="center")
 
     ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=len(REPORT_COLUMNS))
-    ws["A3"] = (
-        f"Tổng dòng đối tác: {total_rows} | Đạt chuẩn (≥100 view): {len(frame)} "
-        f"| Loại kênh \"Lỗi\": {failed_rows} | Loại <100 view: {under_100_rows}"
-    )
+    if apply_min_views:
+        ws["A3"] = (
+            f"Tổng dòng đối tác: {total_rows} | Đạt chuẩn (≥{threshold} view): {len(frame)} "
+            f"| Loại kênh \"Lỗi\": {failed_rows} | Loại <{threshold} view: {under_threshold_rows}"
+        )
+    else:
+        ws["A3"] = (
+            f"Tổng dòng đối tác: {total_rows} | Đạt chuẩn: {len(frame)} "
+            f"| Loại kênh \"Lỗi\": {failed_rows} | Lọc view: tắt"
+        )
     ws["A3"].font = Font(color="374151", italic=True)
     ws["A3"].alignment = Alignment(horizontal="center")
 
@@ -687,6 +702,13 @@ async def export_report(data: dict):
     if not isinstance(selected_partners, list) or not selected_partners:
         return JSONResponse(content={"error": "Vui lòng chọn ít nhất một đối tác"}, status_code=400)
 
+    apply_min_views = bool(data.get("applyMinViews", True))
+    try:
+        min_views = int(data.get("minViews", 100))
+    except (TypeError, ValueError):
+        min_views = 100
+    min_views = max(min_views, 0)
+
     try:
         available_partners = set(list_workbook_partners(target_path))
         partners = [clean_text(name) for name in selected_partners if clean_text(name) in available_partners]
@@ -697,7 +719,12 @@ async def export_report(data: dict):
         if len(partners) == 1:
             partner = partners[0]
             report_rows = build_workbook_rows(target_path, selected_partner=partner)
-            report_bytes = build_partner_report(partner, report_rows)
+            report_bytes = build_partner_report(
+                partner,
+                report_rows,
+                apply_min_views=apply_min_views,
+                min_views=min_views,
+            )
             filename = f"{safe_report_name(partner)}-{export_timestamp}.xlsx"
             return Response(
                 content=report_bytes,
@@ -710,7 +737,12 @@ async def export_report(data: dict):
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zip_file:
             for partner in partners:
                 report_rows = build_workbook_rows(target_path, selected_partner=partner)
-                report_bytes = build_partner_report(partner, report_rows)
+                report_bytes = build_partner_report(
+                    partner,
+                    report_rows,
+                    apply_min_views=apply_min_views,
+                    min_views=min_views,
+                )
                 base_name = f"{safe_report_name(partner)}-{export_timestamp}"
                 filename = f"{base_name}.xlsx"
                 counter = 2
