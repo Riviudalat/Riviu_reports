@@ -279,6 +279,9 @@
                     <span>NỘI DUNG SHEET HIỆN TẠI</span>
                 </div>
                 <div class="card-header-actions">
+                    <button class="btn btn-soft btn-compact" onclick="openHistoryModal()">
+                        <span class="material-icons-outlined">history</span> Lịch sử quét
+                    </button>
                     <button class="btn btn-soft btn-compact" onclick="openReportModal()">
                         <span class="material-icons-outlined">summarize</span> Đối tác & báo cáo
                     </button>
@@ -391,6 +394,48 @@
                 </button>
                 <button class="btn btn-primary" id="exportReportBtn" onclick="exportPartnerReport()" disabled>
                     <span class="material-icons-outlined">download</span> Xuất báo cáo
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-backdrop" id="historyModal" aria-hidden="true">
+        <div class="report-modal" role="dialog" aria-modal="true" aria-labelledby="historyModalTitle" style="max-width: 1200px;">
+            <div class="modal-header">
+                <div>
+                    <div class="modal-title" id="historyModalTitle">Lịch sử quét</div>
+                    <div class="modal-subtitle" id="historyModalSubtitle">Tổng số liệu sau mỗi lần cập nhật.</div>
+                </div>
+                <button class="icon-btn" onclick="closeHistoryModal()" aria-label="Đóng">
+                    <span class="material-icons-outlined">close</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="table-wrap" style="max-height: 480px; overflow:auto;">
+                    <table id="historyTable" style="width:100%; font-size: 13px;">
+                        <thead>
+                            <tr>
+                                <th style="text-align:left">Thời gian</th>
+                                <th style="text-align:left">File</th>
+                                <th style="text-align:right">Tổng link</th>
+                                <th style="text-align:right">Tổng view</th>
+                                <th style="text-align:right">Tim</th>
+                                <th style="text-align:right">Bình luận</th>
+                                <th style="text-align:right">Lưu</th>
+                                <th style="text-align:right">Chia sẻ</th>
+                                <th style="text-align:right">Thời lượng</th>
+                            </tr>
+                        </thead>
+                        <tbody id="historyBody">
+                            <tr><td colspan="9" style="text-align:center; padding:32px; color:#9ca3af">Đang tải lịch sử...</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeHistoryModal()">Đóng</button>
+                <button class="btn btn-soft" onclick="loadScrapeHistory()">
+                    <span class="material-icons-outlined">refresh</span> Làm mới
                 </button>
             </div>
         </div>
@@ -1100,6 +1145,68 @@
             document.body.style.overflow = '';
         }
 
+        function formatDuration(seconds) {
+            const sec = Math.max(parseInt(seconds, 10) || 0, 0);
+            if (sec < 60) return `${sec}s`;
+            const minutes = Math.floor(sec / 60);
+            const remain = sec % 60;
+            if (minutes < 60) return `${minutes}m ${remain}s`;
+            const hours = Math.floor(minutes / 60);
+            const remainMin = minutes % 60;
+            return `${hours}h ${remainMin}m`;
+        }
+
+        async function openHistoryModal() {
+            const modal = document.getElementById('historyModal');
+            modal.classList.add('active');
+            modal.setAttribute('aria-hidden', 'false');
+            document.body.style.overflow = 'hidden';
+            await loadScrapeHistory();
+        }
+
+        function closeHistoryModal() {
+            const modal = document.getElementById('historyModal');
+            modal.classList.remove('active');
+            modal.setAttribute('aria-hidden', 'true');
+            document.body.style.overflow = '';
+        }
+
+        async function loadScrapeHistory() {
+            const body = document.getElementById('historyBody');
+            const subtitle = document.getElementById('historyModalSubtitle');
+            body.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:32px; color:#9ca3af">Đang tải lịch sử...</td></tr>';
+            try {
+                const res = await fetch('/scrape-history?limit=50');
+                const data = await res.json();
+                if (!res.ok) throw new Error(data.error || 'Không tải được lịch sử');
+                const history = Array.isArray(data.history) ? data.history : [];
+                if (history.length === 0) {
+                    body.innerHTML = '<tr><td colspan="9" style="text-align:center; padding:32px; color:#9ca3af">Chưa có phiên quét nào.</td></tr>';
+                    subtitle.textContent = 'Chưa có phiên quét nào.';
+                    return;
+                }
+                subtitle.textContent = `${history.length} phiên gần nhất`;
+                body.innerHTML = history.map(entry => {
+                    return `
+                        <tr>
+                            <td>${escapeHtml(entry.timestamp || '')}</td>
+                            <td>${escapeHtml(entry.fileLabel || '')}</td>
+                            <td style="text-align:right">${formatNumber(entry.totalLinks || 0)}</td>
+                            <td style="text-align:right">${formatNumber(entry.totalViews || 0)}</td>
+                            <td style="text-align:right">${formatNumber(entry.totalLikes || 0)}</td>
+                            <td style="text-align:right">${formatNumber(entry.totalComments || 0)}</td>
+                            <td style="text-align:right">${formatNumber(entry.totalSaves || 0)}</td>
+                            <td style="text-align:right">${formatNumber(entry.totalShares || 0)}</td>
+                            <td style="text-align:right">${escapeHtml(formatDuration(entry.durationSeconds || 0))}</td>
+                        </tr>
+                    `;
+                }).join('');
+            } catch (error) {
+                body.innerHTML = `<tr><td colspan="9" style="text-align:center; padding:32px; color:#dc2626">${escapeHtml(error.message)}</td></tr>`;
+                subtitle.textContent = 'Không tải được lịch sử.';
+            }
+        }
+
         function renderPartnerList() {
             const list = document.getElementById('partnerList');
             const searchValue = document.getElementById('partnerSearch').value.trim().toLowerCase();
@@ -1239,9 +1346,16 @@
             if (event.target.id === 'reportModal') closeReportModal();
         });
 
+        document.getElementById('historyModal').addEventListener('click', (event) => {
+            if (event.target.id === 'historyModal') closeHistoryModal();
+        });
+
         document.addEventListener('keydown', (event) => {
-            if (event.key === 'Escape' && document.getElementById('reportModal').classList.contains('active')) {
+            if (event.key !== 'Escape') return;
+            if (document.getElementById('reportModal').classList.contains('active')) {
                 closeReportModal();
+            } else if (document.getElementById('historyModal').classList.contains('active')) {
+                closeHistoryModal();
             }
         });
 

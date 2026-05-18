@@ -75,6 +75,97 @@ RESULT_SHEET_HEADERS = [
     LAST_UPDATE_HEADER,
 ]
 
+SCRAPE_HISTORY_FILENAME = "scrape_history.json"
+SCRAPE_HISTORY_LIMIT = 200
+
+
+def _compute_workbook_totals(workbook):
+    totals = {
+        "totalLinks": 0,
+        "totalViews": 0,
+        "totalLikes": 0,
+        "totalComments": 0,
+        "totalSaves": 0,
+        "totalShares": 0,
+    }
+    for sheet_name in workbook_data_sheet_names(workbook):
+        sheet = workbook[sheet_name]
+        columns = find_columns(sheet)
+        url_column = columns.get("url")
+        if not url_column:
+            continue
+        for row_index in range(2, (sheet.max_row or 1) + 1):
+            url = clean_text(sheet.cell(row=row_index, column=url_column).value)
+            if not url or ("tiktok.com" not in url and "vt.tiktok.com" not in url):
+                continue
+            totals["totalLinks"] += 1
+            for metric_key, total_key in (
+                ("views", "totalViews"),
+                ("likes", "totalLikes"),
+                ("comments", "totalComments"),
+                ("saves", "totalSaves"),
+                ("shares", "totalShares"),
+            ):
+                col = columns.get(metric_key)
+                if not col:
+                    continue
+                value = sheet.cell(row=row_index, column=col).value
+                if value is None or value == "":
+                    continue
+                if isinstance(value, (int, float)):
+                    totals[total_key] += int(value)
+                    continue
+                text = str(value).strip()
+                cleaned = re.sub(r"[,\s]", "", text)
+                try:
+                    totals[total_key] += int(float(cleaned))
+                except ValueError:
+                    pass
+    return totals
+
+
+def scrape_history_path(base_dir):
+    data_dir = os.path.join(base_dir, "data")
+    os.makedirs(data_dir, exist_ok=True)
+    return os.path.join(data_dir, SCRAPE_HISTORY_FILENAME)
+
+
+def append_scrape_history(base_dir, entry):
+    if not base_dir:
+        return
+    path = scrape_history_path(base_dir)
+    history = []
+    if os.path.exists(path):
+        try:
+            with open(path, "r", encoding="utf-8") as file_obj:
+                payload = json.load(file_obj)
+            if isinstance(payload, dict):
+                history = list(payload.get("history") or [])
+        except (OSError, json.JSONDecodeError):
+            history = []
+    history.insert(0, entry)
+    history = history[:SCRAPE_HISTORY_LIMIT]
+    try:
+        with open(path, "w", encoding="utf-8") as file_obj:
+            json.dump({"history": history}, file_obj, ensure_ascii=False, indent=2)
+    except OSError:
+        pass
+
+
+def read_scrape_history(base_dir, limit=50):
+    path = scrape_history_path(base_dir)
+    if not os.path.exists(path):
+        return []
+    try:
+        with open(path, "r", encoding="utf-8") as file_obj:
+            payload = json.load(file_obj)
+    except (OSError, json.JSONDecodeError):
+        return []
+    history = payload.get("history") if isinstance(payload, dict) else None
+    if not isinstance(history, list):
+        return []
+    return history[:limit]
+
 
 def normalize_selected_partners(selected_partner=None, selected_partners=None):
     values = []
@@ -615,6 +706,13 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
     profile_username = extract_profile_username(url)
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        # Resolve final URL after redirect (vt.tiktok.com/... -> www.tiktok.com/@user/...)
+        if not profile_username:
+            try:
+                final_url = page.url
+                profile_username = extract_profile_username(final_url)
+            except Exception:
+                pass
         content = ""
         found = False
         for _ in range(24):
@@ -832,7 +930,7 @@ def progress_payload(total, processed, success_count, error_count, worker_count,
     }
 
 
-async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None, create_result_sheet=False):
+async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None, create_result_sheet=False, base_dir=None, file_label=""):
     if not os.path.exists(file_path):
         if websocket_manager:
             await websocket_manager.broadcast_log(f"Lỗi: Không tìm thấy file {file_path}")
@@ -1088,6 +1186,20 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             await websocket_manager.broadcast_log(f"CẢNH BÁO: Không cập nhật được sheet Tổng kết ({str(error)})")
 
     await save_workbook(workbook, file_path, websocket_manager)
+    duration_seconds = max(int(time.perf_counter() - started_at), 0)
+    workbook_totals = _compute_workbook_totals(workbook)
+    history_entry = {
+        "timestamp": datetime.now().strftime("%d/%m/%Y %H:%M"),
+        "fileLabel": file_label or os.path.basename(file_path),
+        "scrapedUrls": total,
+        "scrapedRows": total_rows,
+        "success": success_count,
+        "error": error_count,
+        "workers": worker_count,
+        "durationSeconds": duration_seconds,
+        **workbook_totals,
+    }
+    append_scrape_history(base_dir or os.path.dirname(os.path.abspath(file_path)), history_entry)
     if websocket_manager:
         await websocket_manager.broadcast_status(
             progress_payload(

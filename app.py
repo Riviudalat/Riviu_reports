@@ -15,7 +15,7 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
-from scraper import run_scraper
+from scraper import run_scraper, read_scrape_history
 from google_sheets_sync import authorize_google, oauth_status, push_rows_to_new_sheet, save_oauth_client
 from workbook_utils import (
     GOOGLE_SHEET_LABEL,
@@ -282,7 +282,7 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
     ws = wb.active
     ws.title = "Báo cáo"
     updated_at = datetime.now().strftime("%d/%m/%Y %H:%M")
-    table_header_row = 6
+    table_header_row = 5
     data_start_row = table_header_row + 1
     last_column = get_column_letter(len(REPORT_COLUMNS))
 
@@ -305,23 +305,9 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
     ws["A2"].alignment = Alignment(horizontal="center")
 
     ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=len(REPORT_COLUMNS))
-    if apply_min_views:
-        ws["A3"] = (
-            f"Tổng dòng đối tác: {total_rows} | Đạt chuẩn (≥{threshold} view): {len(frame)} "
-            f"| Loại kênh \"Lỗi\": {failed_rows} | Loại <{threshold} view: {under_threshold_rows}"
-        )
-    else:
-        ws["A3"] = (
-            f"Tổng dòng đối tác: {total_rows} | Đạt chuẩn: {len(frame)} "
-            f"| Loại kênh \"Lỗi\": {failed_rows} | Lọc view: tắt"
-        )
+    ws["A3"] = f"Ngày cập nhật: {updated_at}"
     ws["A3"].font = Font(color="374151", italic=True)
     ws["A3"].alignment = Alignment(horizontal="center")
-
-    ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=len(REPORT_COLUMNS))
-    ws["A4"] = f"Ngày cập nhật: {updated_at}"
-    ws["A4"].font = Font(color="374151", italic=True)
-    ws["A4"].alignment = Alignment(horizontal="center")
 
     for col_index, header in enumerate(REPORT_COLUMNS, start=1):
         cell = ws.cell(row=table_header_row, column=col_index, value=header)
@@ -403,6 +389,8 @@ async def run_scraper_safely(target_path, worker_count, partner=None, partners=N
             selected_partner=partner,
             selected_partners=partners,
             create_result_sheet=create_result_sheet,
+            base_dir=EXCEL_DIR,
+            file_label=current_display_label(),
         )
         if push_to_google:
             source = current_google_sheet_source()
@@ -668,6 +656,12 @@ async def download_excel():
         filename=download_name,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     )
+
+
+@app.get("/scrape-history")
+async def scrape_history(limit: int = Query(default=50)):
+    safe_limit = max(1, min(int(limit or 50), 200))
+    return {"history": read_scrape_history(EXCEL_DIR, limit=safe_limit)}
 
 
 @app.get("/report-partners")
