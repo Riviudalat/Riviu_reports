@@ -477,6 +477,49 @@ def author_name_from_object(obj, profile_username):
     return ""
 
 
+TIKTOK_NOT_FOUND_PHRASES = (
+    "couldn't find this account",
+    "couldnt find this account",
+    "couldn't find this video",
+    "video currently unavailable",
+    "this video is currently unavailable",
+    "page not available",
+    "page unavailable",
+    "video unavailable",
+    "không tìm thấy",
+    "khong tim thay",
+    "unable to find",
+)
+
+TIKTOK_ERROR_HINT_WORDS = (
+    "couldn't",
+    "couldnt",
+    "unavailable",
+    "trending creators",
+    "discover more",
+    "try searching",
+    "log in",
+    "back to home",
+    "go home",
+)
+
+
+def is_tiktok_error_page(content):
+    text = (content or "").lower().replace("\u2019", "'").replace("\u2018", "'")
+    return any(phrase in text for phrase in TIKTOK_NOT_FOUND_PHRASES)
+
+
+def looks_like_error_text(value):
+    text = str(value or "").lower().replace("\u2019", "'").replace("\u2018", "'")
+    if not text:
+        return False
+    if any(phrase in text for phrase in TIKTOK_NOT_FOUND_PHRASES):
+        return True
+    if any(word in text for word in TIKTOK_ERROR_HINT_WORDS):
+        return True
+    return False
+
+
 def valid_channel_candidate(value, profile_username):
     candidate = clean_text(value)
     if not candidate:
@@ -498,6 +541,8 @@ def valid_channel_candidate(value, profile_username):
         or normalized_candidate in blocked_labels
         or "FOLLOWERS" in normalized_candidate
         or "FOLLOWING" in normalized_candidate
+        or len(candidate) > 80
+        or looks_like_error_text(candidate)
         or is_generated_username_channel(candidate, profile_url)
         or is_generic_tiktok_channel_name(candidate)
     ):
@@ -718,6 +763,9 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
         for _ in range(24):
             content = await page.content()
             data, found = parse_counts(content)
+            if is_tiktok_error_page(content):
+                # Account/video unavailable - never claim a channel name
+                return data, "", "Error: Trang TikTok không khả dụng"
             dom_channel = ""
             parsed_channel = parse_channel_name(content, profile_username)
             if parsed_channel:
@@ -734,6 +782,10 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
             profile_channel = await read_profile_channel_name(page, profile_username, channel_cache=channel_cache)
             if profile_channel:
                 channel_name = profile_channel
+
+        # Final guard against accidentally captured error text
+        if looks_like_error_text(channel_name):
+            channel_name = ""
 
         if not found:
             return data, channel_name, "Error: Không đọc được số liệu"
