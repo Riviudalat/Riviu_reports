@@ -494,10 +494,19 @@ def split_partner_value(value):
 
 def _normalize_partner_token(text):
     cleaned = clean_text(text)
+    cleaned = unicodedata.normalize("NFC", cleaned)
+    cleaned = re.sub(r"[\u200B-\u200D\uFEFF\u00AD]", "", cleaned)
     cleaned = re.sub(r"^[\-\*\u2022]+\s*", "", cleaned)
     cleaned = re.sub(r"^\d+[\.\)]\s*", "", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" -:\t")
     return cleaned
+
+
+def partner_dedup_key(value):
+    text = unicodedata.normalize("NFC", str(value or ""))
+    text = re.sub(r"[\u200B-\u200D\uFEFF\u00AD]", "", text)
+    text = re.sub(r"\s+", " ", text).strip()
+    return text.casefold()
 
 
 def extract_row_partners(row, partner_columns: Iterable):
@@ -512,8 +521,8 @@ def unique_preserve_order(values):
     seen = set()
     result = []
     for value in values:
-        key = value.casefold()
-        if key in seen:
+        key = partner_dedup_key(value)
+        if not key or key in seen:
             continue
         seen.add(key)
         result.append(value)

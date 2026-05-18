@@ -370,6 +370,7 @@
                     <button class="btn btn-outline btn-compact" onclick="selectAllPartners()">Chọn tất cả</button>
                     <button class="btn btn-outline btn-compact" onclick="clearAllPartners()">Bỏ chọn</button>
                 </div>
+                <div class="report-sheet-info" id="reportSheetInfo" style="display:none; padding: 8px 12px; background:#f8fafc; border:1px solid #e5e7eb; border-radius:8px; font-size: 12.5px; color:#374151; margin-bottom: 8px;"></div>
                 <div class="partner-list" id="partnerList">
                     <div class="empty-state">Đang tải danh sách đối tác...</div>
                 </div>
@@ -1047,6 +1048,7 @@
         async function openReportModal() {
             const modal = document.getElementById('reportModal');
             const list = document.getElementById('partnerList');
+            const sheetInfo = document.getElementById('reportSheetInfo');
             modal.classList.add('active');
             modal.setAttribute('aria-hidden', 'false');
             document.body.style.overflow = 'hidden';
@@ -1054,6 +1056,8 @@
             reportPartners = [];
             selectedPartners = new Set();
             list.innerHTML = '<div class="empty-state">Đang tải danh sách đối tác...</div>';
+            sheetInfo.style.display = 'none';
+            sheetInfo.textContent = '';
             updateReportSummary();
 
             try {
@@ -1062,6 +1066,18 @@
                 if (!res.ok) throw new Error(data.error || 'Không tải được danh sách đối tác');
                 reportPartners = data.partners || [];
                 document.getElementById('reportModalSubtitle').textContent = `${data.fileLabel || data.file} • ${reportPartners.length} đối tác`;
+
+                const dataSheet = data.dataSheet || '';
+                const allSheets = Array.isArray(data.allSheets) ? data.allSheets : [];
+                const otherSheets = allSheets.filter(name => name && name !== dataSheet);
+                if (dataSheet) {
+                    let info = `Đang đọc sheet: <strong>${escapeHtml(dataSheet)}</strong>.`;
+                    if (otherSheets.length > 0) {
+                        info += ` Các sheet khác bị bỏ qua: ${otherSheets.map(escapeHtml).join(', ')}.`;
+                    }
+                    sheetInfo.innerHTML = info;
+                    sheetInfo.style.display = 'block';
+                }
                 renderPartnerList();
             } catch (error) {
                 list.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;

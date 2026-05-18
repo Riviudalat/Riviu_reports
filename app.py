@@ -36,6 +36,7 @@ from workbook_utils import (
     register_google_sheet_source,
     timestamped_google_sheet_file_id,
     workbook_file_entries,
+    workbook_sheet_names,
 )
 
 
@@ -253,6 +254,14 @@ def find_report_column(frame, header):
 
 
 def build_partner_report(partner, rows):
+    total_rows = len(rows)
+    failed_rows = sum(1 for row in rows if is_failed_channel_name(row.get("TÊN KÊNH", "")))
+    under_100_rows = sum(
+        1
+        for row in rows
+        if not is_failed_channel_name(row.get("TÊN KÊNH", ""))
+        and metric_number(row.get("LƯỢT XEM", 0)) < 100
+    )
     valid_rows = [
         row
         for row in rows
@@ -264,7 +273,7 @@ def build_partner_report(partner, rows):
     ws = wb.active
     ws.title = "Báo cáo"
     updated_at = datetime.now().strftime("%d/%m/%Y %H:%M")
-    table_header_row = 5
+    table_header_row = 6
     data_start_row = table_header_row + 1
     last_column = get_column_letter(len(REPORT_COLUMNS))
 
@@ -287,9 +296,17 @@ def build_partner_report(partner, rows):
     ws["A2"].alignment = Alignment(horizontal="center")
 
     ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=len(REPORT_COLUMNS))
-    ws["A3"] = f"Ngày cập nhật: {updated_at}"
+    ws["A3"] = (
+        f"Tổng dòng đối tác: {total_rows} | Đạt chuẩn (≥100 view): {len(frame)} "
+        f"| Loại kênh \"Lỗi\": {failed_rows} | Loại <100 view: {under_100_rows}"
+    )
     ws["A3"].font = Font(color="374151", italic=True)
     ws["A3"].alignment = Alignment(horizontal="center")
+
+    ws.merge_cells(start_row=4, start_column=1, end_row=4, end_column=len(REPORT_COLUMNS))
+    ws["A4"] = f"Ngày cập nhật: {updated_at}"
+    ws["A4"].font = Font(color="374151", italic=True)
+    ws["A4"].alignment = Alignment(horizontal="center")
 
     for col_index, header in enumerate(REPORT_COLUMNS, start=1):
         cell = ws.cell(row=table_header_row, column=col_index, value=header)
@@ -646,11 +663,15 @@ async def report_partners():
 
     try:
         partners = list_workbook_partners(target_path)
+        data_sheets = find_data_sheet_names(target_path)
+        all_sheets = workbook_sheet_names(target_path)
         return {
             "partners": partners,
             "total": len(partners),
             "file": CURRENT_SELECTED_FILE,
             "fileLabel": current_display_label(),
+            "dataSheet": data_sheets[0] if data_sheets else "",
+            "allSheets": all_sheets,
         }
     except Exception as error:
         return JSONResponse(content={"error": f"Không đọc được danh sách đối tác: {str(error)}"}, status_code=500)

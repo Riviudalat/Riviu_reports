@@ -661,13 +661,53 @@ async def scrape_with_retries(page, url, retries, channel_cache=None):
     return last_data, last_channel, last_status, retries + 1
 
 
-async def worker_loop(worker_id, browser, work_queue, result_queue, retries, channel_cache=None):
-    context = await browser.new_context(
-        user_agent=random.choice(USER_AGENTS),
-        viewport={"width": 390, "height": 844},
-    )
-    await context.route("**/*", block_heavy_resources)
-    page = await context.new_page()
+async def worker_loop(worker_id, browser, work_queue, result_queue, retries, channel_cache=None, startup_semaphore=None, websocket_manager=None):
+    RECYCLE_AFTER = 100
+
+    async def make_context():
+        ctx = await browser.new_context(
+            user_agent=random.choice(USER_AGENTS),
+            viewport={"width": 390, "height": 844},
+        )
+        await ctx.route("**/*", block_heavy_resources)
+        return ctx
+
+    async def drain_with_error(reason):
+        while True:
+            try:
+                pending = work_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
+            if pending is None:
+                work_queue.task_done()
+                break
+            await result_queue.put({
+                **pending,
+                "worker": worker_id,
+                "data": {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"},
+                "channel_name": "",
+                "status": reason,
+                "attempts": 0,
+                "elapsed": 0.0,
+            })
+            work_queue.task_done()
+
+    if startup_semaphore is not None:
+        async with startup_semaphore:
+            await asyncio.sleep(min(worker_id - 1, 10) * 0.25)
+            try:
+                context = await make_context()
+                page = await context.new_page()
+            except Exception as error:
+                if websocket_manager:
+                    await websocket_manager.broadcast_log(f"Worker {worker_id} không khởi tạo được context: {str(error)}")
+                await drain_with_error(f"Error: Worker {worker_id} không khởi tạo được")
+                return
+    else:
+        context = await make_context()
+        page = await context.new_page()
+
+    links_in_current_context = 0
 
     try:
         while True:
@@ -677,7 +717,19 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries, cha
                 break
 
             started_at = time.perf_counter()
-            data, channel_name, status, attempts = await scrape_with_retries(page, item["url"], retries, channel_cache=channel_cache)
+            try:
+                data, channel_name, status, attempts = await scrape_with_retries(page, item["url"], retries, channel_cache=channel_cache)
+            except Exception as error:
+                data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
+                channel_name = ""
+                status = f"Error: Worker {worker_id} crash ({str(error)})"
+                attempts = 0
+                # Try to recover the page so the worker keeps running
+                try:
+                    if page.is_closed():
+                        page = await context.new_page()
+                except Exception:
+                    pass
             elapsed = time.perf_counter() - started_at
             await result_queue.put({
                 **item,
@@ -689,9 +741,34 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries, cha
                 "elapsed": elapsed,
             })
             work_queue.task_done()
+            links_in_current_context += 1
+
+            # Recycle context periodically to keep RAM in check on long runs
+            if links_in_current_context >= RECYCLE_AFTER:
+                try:
+                    await context.close()
+                except Exception:
+                    pass
+                try:
+                    context = await make_context()
+                    page = await context.new_page()
+                    links_in_current_context = 0
+                except Exception as error:
+                    if websocket_manager:
+                        await websocket_manager.broadcast_log(f"Worker {worker_id} không khởi tạo lại được context: {str(error)}")
+                    await drain_with_error(f"Error: Worker {worker_id} mất context")
+                    return
+
             await asyncio.sleep(random.uniform(0.3, 1.1))
+    except Exception as error:
+        if websocket_manager:
+            await websocket_manager.broadcast_log(f"Worker {worker_id} dừng do lỗi: {str(error)}")
+        await drain_with_error(f"Error: Worker {worker_id} đã dừng")
     finally:
-        await context.close()
+        try:
+            await context.close()
+        except Exception:
+            pass
 
 
 def write_result(sheet_contexts, item, data, channel_name, status):
@@ -724,14 +801,15 @@ def write_result(sheet_contexts, item, data, channel_name, status):
 async def save_workbook(workbook, file_path, websocket_manager=None):
     try:
         await asyncio.to_thread(workbook.save, file_path)
-        return True
+        return True, None
     except PermissionError:
         if websocket_manager:
             await websocket_manager.broadcast_log("CẢNH BÁO: File Excel đang mở, không thể ghi đè. Vui lòng đóng file rồi quét lại hoặc chờ lần lưu tiếp theo.")
+        return False, "permission"
     except Exception as error:
         if websocket_manager:
             await websocket_manager.broadcast_log(f"CẢNH BÁO: Lỗi lưu file ({str(error)})")
-    return False
+        return False, "other"
 
 
 def progress_payload(total, processed, success_count, error_count, worker_count, started_at, done=False, mode="full", partner="", phase="scanning"):
@@ -770,10 +848,37 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     clear_existing_total_rows(workbook)
     sheet_contexts = build_sheet_contexts(workbook)
     rows_to_process = collect_rows(workbook, selected_partners=selected_names)
+
+    # Dedup URL: nhiều dòng cùng URL chỉ scrape 1 lần, ghi kết quả về tất cả các dòng
+    unique_buckets = {}
+    bucket_order = []
+    for item in rows_to_process:
+        key = item["url"].strip().casefold()
+        bucket = unique_buckets.get(key)
+        if bucket is None:
+            bucket = {
+                "sequence": len(bucket_order) + 1,
+                "url": item["url"],
+                "rows": [],
+            }
+            unique_buckets[key] = bucket
+            bucket_order.append(bucket)
+        bucket["rows"].append({
+            "sheet_name": item["sheet_name"],
+            "row": item["row"],
+            "partners": item["partners"],
+        })
+
+    duplicate_count = len(rows_to_process) - len(bucket_order)
     channel_cache = {}
-    total = len(rows_to_process)
+    total_rows = len(rows_to_process)
+    total = len(bucket_order)
     started_at = time.perf_counter()
     mode = "partner" if selected_names else "full"
+
+    # Adaptive save_every: file lớn save thưa hơn để giảm I/O
+    if total > 500:
+        save_every = max(50, min(100, total // 30))
 
     if total == 0:
         if websocket_manager:
@@ -786,13 +891,17 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
 
     worker_count = min(worker_count, total)
     if websocket_manager:
+        if duplicate_count > 0:
+            await websocket_manager.broadcast_log(
+                f"Tổng {total_rows} dòng, sau dedup còn {total} URL cần quét (tiết kiệm {duplicate_count} lượt)."
+            )
         if selected_names:
             await websocket_manager.broadcast_log(
-                f"Bắt đầu cập nhật {partner_label}: {total} links, {worker_count} luồng, retry {retries} lần."
+                f"Bắt đầu cập nhật {partner_label}: {total} URL, {worker_count} luồng, retry {retries} lần."
             )
         else:
             await websocket_manager.broadcast_log(
-                f"Bắt đầu quét nhanh {total} links bằng {worker_count} luồng, retry {retries} lần, lưu mỗi {save_every} kết quả."
+                f"Bắt đầu quét nhanh {total} URL bằng {worker_count} luồng, retry {retries} lần, lưu mỗi {save_every} kết quả."
             )
         await websocket_manager.broadcast_status(
             progress_payload(total, 0, 0, 0, worker_count, started_at, mode=mode, partner=partner_label, phase="starting")
@@ -800,8 +909,8 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
 
     work_queue = asyncio.Queue()
     result_queue = asyncio.Queue()
-    for item in rows_to_process:
-        await work_queue.put(item)
+    for bucket in bucket_order:
+        await work_queue.put(bucket)
     for _ in range(worker_count):
         await work_queue.put(None)
 
@@ -809,13 +918,36 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     success_count = 0
     error_count = 0
     pending_save_count = 0
+    save_skip_until_processed = 0
+    last_status_broadcast = 0.0
 
     async with async_playwright() as playwright:
         if websocket_manager:
             await websocket_manager.broadcast_log(f"Đang khởi tạo trình duyệt và {worker_count} luồng...")
-        browser = await playwright.chromium.launch(headless=True)
+        browser = await playwright.chromium.launch(
+            headless=True,
+            args=[
+                "--disable-dev-shm-usage",
+                "--disable-gpu",
+                "--disable-blink-features=AutomationControlled",
+                "--disable-features=IsolateOrigins,site-per-process",
+                "--no-sandbox",
+            ],
+        )
+        startup_semaphore = asyncio.Semaphore(min(worker_count, 6))
         workers = [
-            asyncio.create_task(worker_loop(index + 1, browser, work_queue, result_queue, retries, channel_cache=channel_cache))
+            asyncio.create_task(
+                worker_loop(
+                    index + 1,
+                    browser,
+                    work_queue,
+                    result_queue,
+                    retries,
+                    channel_cache=channel_cache,
+                    startup_semaphore=startup_semaphore,
+                    websocket_manager=websocket_manager,
+                )
+            )
             for index in range(worker_count)
         ]
         if websocket_manager:
@@ -824,20 +956,58 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             )
 
         try:
+            stalled_seconds = 0
             while processed < total:
-                result = await result_queue.get()
+                try:
+                    result = await asyncio.wait_for(result_queue.get(), timeout=30.0)
+                    stalled_seconds = 0
+                except asyncio.TimeoutError:
+                    stalled_seconds += 30
+                    alive_workers = sum(1 for task in workers if not task.done())
+                    if alive_workers == 0:
+                        if websocket_manager:
+                            await websocket_manager.broadcast_log(
+                                f"Tất cả worker đã dừng, hủy {total - processed} link còn lại."
+                            )
+                        # All workers are dead, mark remaining as errors
+                        remaining = total - processed
+                        for _ in range(remaining):
+                            error_count += 1
+                            processed += 1
+                        break
+                    if websocket_manager and stalled_seconds % 60 == 0:
+                        await websocket_manager.broadcast_log(
+                            f"Đang chờ kết quả... {alive_workers}/{worker_count} luồng còn sống ({processed}/{total})."
+                        )
+                    continue
+
                 processed += 1
                 data = result["data"]
                 status = result["status"]
+                bucket_rows = result.get("rows") or []
 
                 if status == "Success":
                     success_count += 1
                 else:
                     error_count += 1
-                write_result(sheet_contexts, result, data, result["channel_name"], status)
-                pending_save_count += 1
+
+                # Write the same scrape result to every spreadsheet row that shares this URL
+                for target in bucket_rows:
+                    write_result(
+                        sheet_contexts,
+                        {
+                            "sheet_name": target["sheet_name"],
+                            "row": target["row"],
+                            "url": result["url"],
+                        },
+                        data,
+                        result["channel_name"],
+                        status,
+                    )
+                pending_save_count += max(len(bucket_rows), 1)
 
                 if websocket_manager:
+                    primary_target = bucket_rows[0] if bucket_rows else {"sheet_name": ""}
                     await websocket_manager.broadcast_data({
                         "id": result["sequence"],
                         "url": result["url"],
@@ -849,37 +1019,54 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                         "status": status,
                         "worker": result["worker"],
                         "channelName": result["channel_name"],
-                        "sheetName": result["sheet_name"],
+                        "sheetName": primary_target.get("sheet_name", ""),
                     })
-                    await websocket_manager.broadcast_status(
-                        progress_payload(
-                            total,
-                            processed,
-                            success_count,
-                            error_count,
-                            worker_count,
-                            started_at,
-                            mode=mode,
-                            partner=partner_label,
-                            phase="scanning",
+                    now = time.perf_counter()
+                    if processed == total or now - last_status_broadcast > 0.25:
+                        await websocket_manager.broadcast_status(
+                            progress_payload(
+                                total,
+                                processed,
+                                success_count,
+                                error_count,
+                                worker_count,
+                                started_at,
+                                mode=mode,
+                                partner=partner_label,
+                                phase="scanning",
+                            )
                         )
-                    )
+                        last_status_broadcast = now
 
-                if pending_save_count >= save_every:
-                    saved = await save_workbook(workbook, file_path, websocket_manager)
-                    pending_save_count = 0 if saved else pending_save_count
-                    if websocket_manager and saved:
-                        await websocket_manager.broadcast_log(f"Đã lưu tạm workbook tại {processed}/{total} links.")
+                if pending_save_count >= save_every and save_skip_until_processed <= processed:
+                    saved, save_reason = await save_workbook(workbook, file_path, websocket_manager)
+                    if saved:
+                        pending_save_count = 0
+                        if websocket_manager:
+                            await websocket_manager.broadcast_log(f"Đã lưu tạm workbook tại {processed}/{total} links.")
+                    else:
+                        # Reset counter and skip saving for the next `save_every` items to avoid log spam
+                        pending_save_count = 0
+                        save_skip_until_processed = processed + save_every
 
                 result_queue.task_done()
 
-            await work_queue.join()
-            await asyncio.gather(*workers)
+            try:
+                await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=20.0)
+            except asyncio.TimeoutError:
+                pass
         finally:
             for task in workers:
                 if not task.done():
                     task.cancel()
-            await browser.close()
+            try:
+                await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=10.0)
+            except asyncio.TimeoutError:
+                pass
+            try:
+                await browser.close()
+            except Exception:
+                pass
 
     try:
         append_sheet_total_rows(workbook)
@@ -918,9 +1105,9 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
         )
         if selected_names:
             await websocket_manager.broadcast_log(
-                f"HOÀN THÀNH: Đã cập nhật {partner_label} với {processed} links, thành công {success_count}, lỗi {error_count}."
+                f"HOÀN THÀNH: Đã cập nhật {partner_label} với {processed} URL ({total_rows} dòng), thành công {success_count}, lỗi {error_count}."
             )
         else:
             await websocket_manager.broadcast_log(
-                f"HOÀN THÀNH: Đã quét {processed}/{total} links, thành công {success_count}, lỗi {error_count}."
+                f"HOÀN THÀNH: Đã quét {processed}/{total} URL ({total_rows} dòng), thành công {success_count}, lỗi {error_count}."
             )
