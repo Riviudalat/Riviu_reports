@@ -67,8 +67,7 @@ def is_generated_username_channel(value, link=""):
     compact = re.sub(r"\s+", "", text.lstrip("@"))
     if re.fullmatch(r"user\d{4,}.*", compact, flags=re.IGNORECASE):
         return True
-    username = extract_tiktok_username(link)
-    return bool(username and normalize_key(text.lstrip("@")) == normalize_key(username))
+    return False
 
 
 def is_generic_tiktok_channel_name(value):
@@ -741,10 +740,20 @@ def to_number(value):
 def is_failed_channel_name(value):
     text = clean_text(value)
     key = normalize_key(text)
+    normalized_for_error = text.casefold().replace("\u2019", "'").replace("\u2018", "'")
+    error_phrases = (
+        "couldn't find this account",
+        "couldnt find this account",
+        "video currently unavailable",
+        "video unavailable",
+        "page not available",
+        "page unavailable",
+    )
     return (
         not text
         or key in {"loi", "l?i"}
         or text.casefold().startswith("error:")
+        or any(phrase in normalized_for_error for phrase in error_phrases)
         or is_generated_username_channel(text)
         or is_generic_tiktok_channel_name(text)
     )

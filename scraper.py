@@ -568,6 +568,19 @@ def parse_channel_name(content, profile_username):
             if candidate:
                 return candidate
 
+    # Photo posts often expose only the embedded "author": {...} object
+    author_blocks_quoted = re.finditer(
+        r'"author"\s*:\s*(\{[^{}]*"uniqueId"\s*:\s*"([^"]+)"[^{}]*\})',
+        content,
+    )
+    for block_match in author_blocks_quoted:
+        if normalize_text(block_match.group(2).lstrip("@")) != normalize_text(profile_username.lstrip("@")):
+            continue
+        data = json_loads_safe(block_match.group(1))
+        candidate = author_name_from_object(data, profile_username)
+        if candidate:
+            return candidate
+
     author_blocks = re.finditer(r'\{[^{}]*"uniqueId"\s*:\s*"([^"]+)"[^{}]*\}', content)
     for block_match in author_blocks:
         if normalize_text(block_match.group(1).lstrip("@")) != normalize_text(profile_username.lstrip("@")):
@@ -763,9 +776,6 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
         for _ in range(24):
             content = await page.content()
             data, found = parse_counts(content)
-            if is_tiktok_error_page(content):
-                # Account/video unavailable - never claim a channel name
-                return data, "", "Error: Trang TikTok không khả dụng"
             dom_channel = ""
             parsed_channel = parse_channel_name(content, profile_username)
             if parsed_channel:
@@ -786,6 +796,11 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
         # Final guard against accidentally captured error text
         if looks_like_error_text(channel_name):
             channel_name = ""
+
+        # Fallback to @handle when we can detect the profile but no nickname is parsed.
+        # Auto-generated user-ID handles (user1234567890) stay empty -> mark as "Lỗi".
+        if not channel_name and profile_username and not is_generated_username_channel(profile_username):
+            channel_name = f"@{profile_username}"
 
         if not found:
             return data, channel_name, "Error: Không đọc được số liệu"
@@ -1213,8 +1228,23 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=10.0)
             except asyncio.TimeoutError:
                 pass
+            # Close any remaining contexts gracefully before shutting browser down
+            try:
+                for ctx in list(browser.contexts):
+                    try:
+                        await ctx.close()
+                    except Exception:
+                        pass
+            except Exception:
+                pass
             try:
                 await browser.close()
+            except Exception:
+                pass
+            # Brief grace period so the Playwright Node side can drain pending
+            # events instead of hitting EPIPE on the parent shutdown
+            try:
+                await asyncio.sleep(0.3)
             except Exception:
                 pass
 
