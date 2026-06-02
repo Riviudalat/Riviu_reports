@@ -613,12 +613,16 @@ def build_workbook_rows(file_path, selected_partner=None, sheet_name=None):
         workbook.close()
 
 
-def list_workbook_partners(file_path):
+def list_workbook_partners(file_path, sheet_name=None):
     workbook = load_excel_file(file_path)
     try:
         partners = []
-        for sheet_name in find_data_sheet_names_in_workbook(workbook):
-            frame = workbook.parse(sheet_name)
+        data_sheets = find_data_sheet_names_in_workbook(workbook)
+        requested_sheet = clean_text(sheet_name)
+        if requested_sheet:
+            data_sheets = [requested_sheet] if requested_sheet in data_sheets else []
+        for current_sheet in data_sheets:
+            frame = workbook.parse(current_sheet)
             partner_columns = dataframe_partner_columns(frame)
             if not partner_columns:
                 continue

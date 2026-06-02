@@ -79,7 +79,7 @@ SCRAPE_HISTORY_FILENAME = "scrape_history.json"
 SCRAPE_HISTORY_LIMIT = 200
 
 
-def _compute_workbook_totals(workbook):
+def _compute_workbook_totals(workbook, sheet_name=None):
     totals = {
         "totalLinks": 0,
         "totalViews": 0,
@@ -88,8 +88,13 @@ def _compute_workbook_totals(workbook):
         "totalSaves": 0,
         "totalShares": 0,
     }
-    for sheet_name in workbook_data_sheet_names(workbook):
-        sheet = workbook[sheet_name]
+    target_sheet = clean_text(sheet_name)
+    if target_sheet and target_sheet in workbook.sheetnames:
+        sheet_names = [target_sheet]
+    else:
+        sheet_names = workbook_data_sheet_names(workbook)
+    for current_sheet in sheet_names:
+        sheet = workbook[current_sheet]
         columns = find_columns(sheet)
         url_column = columns.get("url")
         if not url_column:
@@ -1276,10 +1281,14 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
 
     await save_workbook(workbook, file_path, websocket_manager)
     duration_seconds = max(int(time.perf_counter() - started_at), 0)
-    workbook_totals = _compute_workbook_totals(workbook)
+    scan_sheet_name = clean_text(sheet_name) or ""
+    if not scan_sheet_name and rows_to_process:
+        scan_sheet_name = clean_text(rows_to_process[0].get("sheet_name", ""))
+    workbook_totals = _compute_workbook_totals(workbook, sheet_name=scan_sheet_name or None)
     history_entry = {
         "timestamp": datetime.now().strftime("%d/%m/%Y %H:%M"),
         "fileLabel": file_label or os.path.basename(file_path),
+        "scanSheet": scan_sheet_name,
         "scrapedUrls": total,
         "scrapedRows": total_rows,
         "success": success_count,

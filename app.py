@@ -706,21 +706,26 @@ async def scrape_history(limit: int = Query(default=50)):
 
 
 @app.get("/report-partners")
-async def report_partners():
+async def report_partners(sheet_name: str = Query(default="")):
     target_path = current_excel_path()
     if not os.path.exists(target_path):
         return JSONResponse(content={"error": "File không tồn tại"}, status_code=404)
 
     try:
-        partners = list_workbook_partners(target_path)
         data_sheets = find_data_sheet_names(target_path)
+        requested_sheet = clean_text(sheet_name) or (data_sheets[0] if data_sheets else "")
+        if requested_sheet and requested_sheet not in data_sheets:
+            return JSONResponse(content={"error": f"Sheet {requested_sheet} không tồn tại trong file."}, status_code=400)
+        partners = list_workbook_partners(target_path, sheet_name=requested_sheet)
         all_sheets = workbook_sheet_names(target_path)
         return {
             "partners": partners,
             "total": len(partners),
             "file": CURRENT_SELECTED_FILE,
             "fileLabel": current_display_label(),
-            "dataSheet": data_sheets[0] if data_sheets else "",
+            "sheets": data_sheets,
+            "currentSheet": requested_sheet,
+            "dataSheet": requested_sheet,
             "allSheets": all_sheets,
         }
     except Exception as error:
@@ -745,7 +750,11 @@ async def export_report(data: dict):
     min_views = max(min_views, 0)
 
     try:
-        available_partners = set(list_workbook_partners(target_path))
+        data_sheets = find_data_sheet_names(target_path)
+        report_sheet = clean_text(data.get("sheetName", "")) or (data_sheets[0] if data_sheets else "")
+        if report_sheet and report_sheet not in data_sheets:
+            return JSONResponse(content={"error": f"Sheet {report_sheet} không tồn tại trong file."}, status_code=400)
+        available_partners = set(list_workbook_partners(target_path, sheet_name=report_sheet))
         partners = [clean_text(name) for name in selected_partners if clean_text(name) in available_partners]
         if not partners:
             return JSONResponse(content={"error": "Không tìm thấy đối tác đã chọn trong file"}, status_code=404)
@@ -753,7 +762,7 @@ async def export_report(data: dict):
 
         if len(partners) == 1:
             partner = partners[0]
-            report_rows = build_workbook_rows(target_path, selected_partner=partner)
+            report_rows = build_workbook_rows(target_path, selected_partner=partner, sheet_name=report_sheet)
             report_bytes = build_partner_report(
                 partner,
                 report_rows,
@@ -771,7 +780,7 @@ async def export_report(data: dict):
         used_names = set()
         with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zip_file:
             for partner in partners:
-                report_rows = build_workbook_rows(target_path, selected_partner=partner)
+                report_rows = build_workbook_rows(target_path, selected_partner=partner, sheet_name=report_sheet)
                 report_bytes = build_partner_report(
                     partner,
                     report_rows,
