@@ -177,15 +177,6 @@ def google_sheet_source_for_file(base_dir, file_id):
         if str(registered_file_id).replace("\\", "/") == normalized_file_id and isinstance(registered_source, dict):
             return registered_source
 
-    existing_sources = [item for item in registry.values() if isinstance(item, dict) and item.get("spreadsheetId")]
-    unique_sources = {}
-    for item in existing_sources:
-        key = clean_text(item.get("spreadsheetId", "")) or clean_text(item.get("url", ""))
-        if key and key not in unique_sources:
-            unique_sources[key] = item
-
-    if len(unique_sources) == 1 and str(file_id or "").startswith(f"{DATA_DIR_NAME}/"):
-        return next(iter(unique_sources.values()))
     return {}
 
 
@@ -559,9 +550,7 @@ def find_data_sheet_names(file_path):
 def find_data_sheet_names_in_workbook(workbook):
     sheets = workbook.sheet_names
     data_sheets = [sheet for sheet in sheets if not is_summary_sheet_name(sheet) and not is_result_sheet_name(sheet)]
-    if not data_sheets:
-        return []
-    return [data_sheets[0]]
+    return data_sheets
 
 
 def build_workbook_rows(file_path, selected_partner=None, sheet_name=None):
@@ -686,10 +675,10 @@ def worksheet_has_link_column(worksheet):
 
 
 def workbook_data_sheet_names(workbook):
-    sheet_names = [sheet for sheet in workbook.sheetnames if not is_summary_sheet_name(sheet) and not is_result_sheet_name(sheet)]
-    if not sheet_names:
-        return []
-    return [sheet_names[0]]
+    return [
+        sheet for sheet in workbook.sheetnames
+        if not is_summary_sheet_name(sheet) and not is_result_sheet_name(sheet)
+    ]
 
 
 def result_sheet_display_name(timestamp_text):

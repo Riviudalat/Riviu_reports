@@ -87,7 +87,7 @@ CURRENT_SELECTED_FILE = ""
 CURRENT_SELECTED_SHEET = ""
 CURRENT_SCAN_SHEET = ""
 GOOGLE_SHEET_SOURCE_URL = ""
-RIVIU_LOGO_PATH = r"C:\Users\cattfan\.cursor\projects\c-Users-cattfan-Desktop-TTBD\assets\c__Users_cattfan_AppData_Roaming_Cursor_User_workspaceStorage_e0f8bf31141cddbc037deae49819011e_images_image-8d49c87a-8bce-42b8-b5c7-f5ef7715efa5.png"
+LOGO_PATH = os.path.join(EXCEL_DIR, "logo.png")
 
 
 def file_entries():
@@ -319,8 +319,8 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
     ws.merge_cells(start_row=1, start_column=1, end_row=2, end_column=2)
-    if os.path.exists(RIVIU_LOGO_PATH):
-        logo = ExcelImage(RIVIU_LOGO_PATH)
+    if os.path.exists(LOGO_PATH):
+        logo = ExcelImage(LOGO_PATH)
         logo.height = 54
         logo.width = 150
         ws.add_image(logo, "A1")
@@ -506,11 +506,16 @@ async def favicon():
     return Response(status_code=204)
 
 
+@app.get("/logo.png", include_in_schema=False)
+async def logo_png():
+    if os.path.exists(LOGO_PATH):
+        return FileResponse(LOGO_PATH, media_type="image/png")
+    return Response(status_code=404)
+
+
 @app.get("/riviu-logo.png", include_in_schema=False)
 async def riviu_logo():
-    if os.path.exists(RIVIU_LOGO_PATH):
-        return FileResponse(RIVIU_LOGO_PATH, media_type="image/png")
-    return Response(status_code=404)
+    return await logo_png()
 
 
 @app.get("/list-files")
@@ -645,6 +650,9 @@ async def push_google_sheet(data: dict | None = None):
         GOOGLE_SHEET_SOURCE_URL = source_url
         register_google_sheet_source(EXCEL_DIR, ensure_selected_file(), source_url)
         upload_sheet = clean_text((data or {}).get("sourceSheet", "")) or CURRENT_SCAN_SHEET or CURRENT_SELECTED_SHEET
+        available_sheets = find_data_sheet_names(target_path)
+        if upload_sheet and upload_sheet not in available_sheets:
+            return JSONResponse(content={"error": f"Sheet {upload_sheet} không tồn tại trong file."}, status_code=400)
         rows = build_workbook_rows(target_path, sheet_name=upload_sheet)
         if not rows:
             return JSONResponse(content={"error": f"Sheet {upload_sheet or 'đang chọn'} không có link TikTok để tạo sheet."}, status_code=400)

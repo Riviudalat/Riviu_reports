@@ -62,6 +62,7 @@
         .source-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
         .source-actions .btn { justify-content: center; }
         .google-action-row { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
+        .google-action-row .scan-setting { flex: 0 1 auto; }
         .google-action-row .btn { justify-content: center; white-space: nowrap; flex: 0 1 auto; min-width: 128px; }
         .google-login-btn { min-width: 220px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
 
@@ -171,7 +172,7 @@
 <body>
     <div class="container">
         <div class="header">
-            <h1><img class="brand-logo" src="/riviu-logo.png" alt="Riviu"><span class="brand-title">Riviu Reports</span></h1>
+            <h1><img class="brand-logo" src="/logo.png" alt="Riviu"><span class="brand-title">Riviu Reports</span></h1>
             <div class="header-actions">
                 <label class="scan-setting">
                     <span>Luồng</span>
@@ -235,6 +236,10 @@
                             </button>
                         </div>
                         <div class="google-action-row">
+                            <label class="scan-setting">
+                                <span>Chọn sheet</span>
+                                <select id="pushSheetSelect" class="sheet-select"></select>
+                            </label>
                             <button class="btn btn-soft btn-compact" id="pushGoogleBtn" onclick="pushCurrentSheetToGoogle(event)" disabled>
                                 <span class="material-icons-outlined">note_add</span> Tạo sheet
                             </button>
@@ -461,6 +466,8 @@
         let currentSheetName = '';
         let currentFileId = '';
         let currentScanSheetName = '';
+        let currentPushSheetName = '';
+        let googleSheetUrlDirty = false;
         let googlePushReady = false;
         let scanCompletedForCurrentFile = false;
         let googleOAuthAuthorized = false;
@@ -468,6 +475,7 @@
         const cancelBtn = document.getElementById('cancelBtn');
         const workerCountSelect = document.getElementById('workerCountSelect');
         const scanSheetSelect = document.getElementById('scanSheetSelect');
+        const pushSheetSelect = document.getElementById('pushSheetSelect');
         const googleSheetUrlInput = document.getElementById('googleSheetUrlInput');
 
         function cmdLine(type, message) {
@@ -544,26 +552,58 @@
             return typeof file === 'string' ? file : (file?.label || file?.id || '');
         }
 
-        function renderScanSheetOptions(sheets, selectedSheet = '') {
-            const currentValue = selectedSheet || currentScanSheetName || currentSheetName;
-            scanSheetSelect.innerHTML = '';
-            const validSheets = Array.isArray(sheets) ? sheets.filter(Boolean) : [];
+        function isSummarySheetName(value) {
+            return normalizeVietnameseKey(value) === 'tong ket';
+        }
+
+        function isResultSheetName(value) {
+            return normalizeVietnameseKey(value).startsWith('report seeding tiktok');
+        }
+
+        function filterDataSheets(sheets) {
+            return (Array.isArray(sheets) ? sheets : []).filter(sheet => sheet && !isSummarySheetName(sheet) && !isResultSheetName(sheet));
+        }
+
+        function renderSheetSelect(selectEl, sheets, preferredSheet, onUpdate) {
+            const validSheets = filterDataSheets(sheets);
+            selectEl.innerHTML = '';
             if (validSheets.length === 0) {
-                scanSheetSelect.innerHTML = '<option value="">Không có sheet</option>';
-                currentScanSheetName = '';
-                scanSheetSelect.disabled = true;
+                selectEl.innerHTML = '<option value="">Không có sheet</option>';
+                onUpdate('');
+                selectEl.disabled = true;
                 return;
             }
+            const currentValue = preferredSheet && validSheets.includes(preferredSheet)
+                ? preferredSheet
+                : (validSheets.includes(selectEl.value) ? selectEl.value : validSheets[0]);
             validSheets.forEach(sheet => {
                 const opt = document.createElement('option');
                 opt.value = sheet;
                 opt.textContent = sheet;
                 if (sheet === currentValue) opt.selected = true;
-                scanSheetSelect.appendChild(opt);
+                selectEl.appendChild(opt);
             });
-            if (!validSheets.includes(scanSheetSelect.value)) scanSheetSelect.value = validSheets[0];
-            currentScanSheetName = scanSheetSelect.value;
-            scanSheetSelect.disabled = false;
+            if (!validSheets.includes(selectEl.value)) selectEl.value = validSheets[0];
+            onUpdate(selectEl.value);
+            selectEl.disabled = false;
+        }
+
+        function renderScanSheetOptions(sheets, selectedSheet = '') {
+            renderSheetSelect(
+                scanSheetSelect,
+                sheets,
+                selectedSheet || currentScanSheetName,
+                value => { currentScanSheetName = value; }
+            );
+        }
+
+        function renderPushSheetOptions(sheets, selectedSheet = '') {
+            renderSheetSelect(
+                pushSheetSelect,
+                sheets,
+                selectedSheet || currentPushSheetName || currentScanSheetName,
+                value => { currentPushSheetName = value; }
+            );
         }
 
         function hasGoogleTargetUrl() {
@@ -617,10 +657,6 @@
                 .toLowerCase();
         }
 
-        function isSummarySheetName(value) {
-            return normalizeVietnameseKey(value) === 'tong ket';
-        }
-
         function formatNumber(value) {
             const number = Number(value || 0);
             return Number.isFinite(number) ? number.toLocaleString('vi-VN') : '0';
@@ -638,10 +674,12 @@
                 const select = document.getElementById('excelFileSelect');
                 select.innerHTML = '';
 
-                if (data.googleSheetUrl) googleSheetUrlInput.value = data.googleSheetUrl;
+                if (data.googleSheetUrl && !googleSheetUrlDirty) googleSheetUrlInput.value = data.googleSheetUrl;
                 currentFileId = data.current || '';
                 currentScanSheetName = data.scanSheet || data.currentSheet || currentScanSheetName;
+                currentPushSheetName = currentPushSheetName || currentScanSheetName;
                 renderScanSheetOptions(data.sheets || [], currentScanSheetName);
+                renderPushSheetOptions(data.sheets || [], currentPushSheetName);
                 googleOAuthAuthorized = Boolean(data.googleOAuthAuthorized);
                 await refreshGoogleOauthStatus();
                 setGooglePushState();
@@ -649,6 +687,7 @@
                 if (!data.files || data.files.length === 0) {
                     select.innerHTML = '<option value="">(Không có file nào)</option>';
                     renderScanSheetOptions([], '');
+                    renderPushSheetOptions([], '');
                     return;
                 }
 
@@ -682,6 +721,7 @@
                 currentFileId = data.selected;
                 currentSheetName = data.sheet || '';
                 currentScanSheetName = data.scanSheet || currentSheetName;
+                currentPushSheetName = currentScanSheetName;
                 await updateFileList();
                 await loadPreview();
                 addLog(`Đã chuyển sang sheet: ${fileDisplayLabel({ id: currentFileId, label: currentFileId })}`);
@@ -716,6 +756,8 @@
                 currentFileId = data.file;
                 currentSheetName = data.currentSheet || '';
                 currentScanSheetName = data.scanSheet || currentSheetName;
+                currentPushSheetName = currentScanSheetName;
+                googleSheetUrlDirty = false;
                 await updateFileList();
                 await loadPreview();
                 addLog(`Đã nạp Google Sheet thành file local mới: ${fileDisplayLabel({ id: data.file, label: data.label })}.`);
@@ -742,6 +784,7 @@
                 currentFileId = data.filename;
                 currentSheetName = data.sheet || '';
                 currentScanSheetName = data.scanSheet || currentSheetName;
+                currentPushSheetName = currentScanSheetName;
                 await updateFileList();
                 await loadPreview();
                 addLog(`Tải lên thành công: ${file.name}`);
@@ -798,6 +841,11 @@
                 addLog('Vui lòng nhập URL Google Sheet đích trước khi tạo sheet.');
                 return;
             }
+            currentPushSheetName = pushSheetSelect.value || currentPushSheetName;
+            if (!currentPushSheetName) {
+                addLog('Vui lòng chọn sheet nguồn trước khi tạo sheet Google.');
+                return;
+            }
             const originalHtml = button ? button.innerHTML : '';
             if (button) {
                 button.disabled = true;
@@ -807,11 +855,11 @@
                 const res = await fetch('/push-google-sheet', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url, sourceSheet: currentScanSheetName })
+                    body: JSON.stringify({ url, sourceSheet: currentPushSheetName })
                 });
                 const data = await res.json();
                 if (!res.ok || !data.success) throw new Error(data.error || 'Không tạo được sheet trên Google');
-                addLog(`Đã tạo sheet Google mới từ ${data.sourceSheet || currentScanSheetName}: ${data.sheetTitle}`);
+                addLog(`Đã tạo sheet Google mới từ ${data.sourceSheet || currentPushSheetName}: ${data.sheetTitle}`);
             } catch (error) {
                 addLog(`Lỗi tạo sheet Google: ${error.message}`);
             } finally {
@@ -863,7 +911,8 @@
 
                 currentSheetName = data.currentSheet || '';
                 renderSheetTabs(data.sheets || [], currentSheetName);
-                renderScanSheetOptions(data.sheets || [], currentScanSheetName || currentSheetName);
+                renderScanSheetOptions(data.sheets || [], currentScanSheetName);
+                renderPushSheetOptions(data.sheets || [], currentPushSheetName);
 
                 if (isSummarySheetName(currentSheetName)) {
                     await renderSummaryDashboard();
@@ -1436,7 +1485,12 @@
             currentScanSheetName = scanSheetSelect.value;
         });
 
+        pushSheetSelect.addEventListener('change', () => {
+            currentPushSheetName = pushSheetSelect.value;
+        });
+
         googleSheetUrlInput.addEventListener('input', () => {
+            googleSheetUrlDirty = true;
             setGooglePushState();
         });
 
