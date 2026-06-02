@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Riviu Reports</title>
+    <title>Reports</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">
     <style>
@@ -42,7 +42,8 @@
 
         .controls-shell, .card { background: #fff; border-radius: 14px; box-shadow: 0 4px 18px rgba(15, 23, 42, 0.06); overflow: hidden; }
         .controls-shell { margin-bottom: 20px; border: 1px solid #e5edf9; }
-        .controls-shell-head { display: flex; justify-content: flex-start; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #edf2f7; background: #fbfdff; }
+        .controls-shell-head { display: flex; justify-content: space-between; align-items: center; gap: 12px; padding: 12px 16px; border-bottom: 1px solid #edf2f7; background: #fbfdff; }
+        .controls-shell-actions { display: flex; align-items: center; gap: 8px; margin-left: auto; flex-wrap: wrap; }
         .controls-shell-title { font-size: 15px; font-weight: 800; color: #163b73; }
         .controls-shell-note { display: none; }
         .controls-grid { display: grid; grid-template-columns: 1.2fr 1fr 0.9fr; gap: 0; }
@@ -63,8 +64,8 @@
         .source-actions .btn { justify-content: center; }
         .google-action-row { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
         .google-action-row .scan-setting { flex: 0 1 auto; }
-        .google-action-row .btn { justify-content: center; white-space: nowrap; flex: 0 1 auto; min-width: 128px; }
-        .google-login-btn { min-width: 220px; max-width: 100%; overflow: hidden; text-overflow: ellipsis; }
+        .google-action-row .btn { justify-content: center; white-space: nowrap; flex: 0 1 auto; min-width: 118px; }
+        .google-login-btn { min-width: 132px; max-width: 100%; }
 
         .upload-zone { border: 2px dashed #ff8a2a; border-radius: 12px; padding: 16px; text-align: center; cursor: pointer; transition: 0.2s; height: auto; min-height: 110px; display: flex; flex-direction: column; justify-content: center; align-items: center; background: #fcfdff; }
         .upload-zone:hover { background: #fff7ed; border-color: #2563eb; }
@@ -218,6 +219,11 @@
                 <div>
                     <div class="controls-shell-title">Nguồn dữ liệu</div>
                 </div>
+                <div class="controls-shell-actions">
+                    <button class="btn btn-outline btn-compact" id="googleOauthBtn" onclick="document.getElementById('googleOauthFileInput').click()">Nạp OAuth</button>
+                    <button class="btn btn-soft btn-compact google-login-btn" id="googleLoginBtn" onclick="connectGoogleOAuth()">Đăng nhập Google</button>
+                    <input type="file" id="googleOauthFileInput" hidden accept=".json" onchange="uploadGoogleOauthClient(this)">
+                </div>
             </div>
 
             <div class="controls-grid">
@@ -237,15 +243,12 @@
                         </div>
                         <div class="google-action-row">
                             <label class="scan-setting">
-                                <span>Chọn sheet</span>
+                                <span>Sheet nguồn</span>
                                 <select id="pushSheetSelect" class="sheet-select"></select>
                             </label>
                             <button class="btn btn-soft btn-compact" id="pushGoogleBtn" onclick="pushCurrentSheetToGoogle(event)" disabled>
                                 <span class="material-icons-outlined">note_add</span> Tạo sheet
                             </button>
-                            <button class="btn btn-outline btn-compact" id="googleOauthBtn" onclick="document.getElementById('googleOauthFileInput').click()">Nạp OAuth</button>
-                            <button class="btn btn-soft btn-compact google-login-btn" id="googleLoginBtn" onclick="connectGoogleOAuth()">Đăng nhập Google</button>
-                            <input type="file" id="googleOauthFileInput" hidden accept=".json" onchange="uploadGoogleOauthClient(this)">
                         </div>
                     </div>
                 </div>
@@ -602,7 +605,7 @@
                 pushSheetSelect,
                 sheets,
                 selectedSheet || currentPushSheetName || currentScanSheetName,
-                value => { currentPushSheetName = value; }
+                value => { currentPushSheetName = value; setGooglePushState(); }
             );
         }
 
@@ -614,11 +617,11 @@
         function setGooglePushState() {
             const button = document.getElementById('pushGoogleBtn');
             if (!button) return;
-            const enabled = Boolean(googleOAuthAuthorized && hasGoogleTargetUrl() && currentFileId);
+            const enabled = Boolean(googleOAuthAuthorized && hasGoogleTargetUrl() && currentFileId && (pushSheetSelect.value || currentPushSheetName));
             button.disabled = !enabled;
             button.title = enabled
                 ? ''
-                : 'Chỉ bật sau khi đã có file local đang chọn, URL sheet đích và đăng nhập Google.';
+                : 'Chỉ bật sau khi đã có file local, URL sheet đích, đăng nhập Google và chọn sheet nguồn.';
         }
 
         async function refreshGoogleOauthStatus() {
@@ -1487,6 +1490,7 @@
 
         pushSheetSelect.addEventListener('change', () => {
             currentPushSheetName = pushSheetSelect.value;
+            setGooglePushState();
         });
 
         googleSheetUrlInput.addEventListener('input', () => {

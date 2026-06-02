@@ -487,14 +487,6 @@ def build_google_push_rows(rows):
     return values
 
 
-def has_scraped_google_push_data(rows):
-    for row in rows:
-        if not is_failed_channel_name(row.get("TÊN KÊNH", "")):
-            return True
-        if any(metric_number(row.get(column, 0)) > 0 for column in ["LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"]):
-            return True
-    return False
-
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
@@ -655,9 +647,7 @@ async def push_google_sheet(data: dict | None = None):
             return JSONResponse(content={"error": f"Sheet {upload_sheet} không tồn tại trong file."}, status_code=400)
         rows = build_workbook_rows(target_path, sheet_name=upload_sheet)
         if not rows:
-            return JSONResponse(content={"error": f"Sheet {upload_sheet or 'đang chọn'} không có link TikTok để tạo sheet."}, status_code=400)
-        if not has_scraped_google_push_data(rows):
-            return JSONResponse(content={"error": "File đang chọn mới nạp nhưng chưa quét dữ liệu. Hãy bấm BẮT ĐẦU QUÉT trước rồi tạo sheet."}, status_code=400)
+            return JSONResponse(content={"error": f"Sheet \"{upload_sheet or 'đang chọn'}\" không có link TikTok để tạo sheet."}, status_code=400)
         values = build_google_push_rows(rows)
         sheet_title = push_rows_to_new_sheet(EXCEL_DIR, spreadsheet_id, values)
         return {"success": True, "sheetTitle": sheet_title, "sourceSheet": upload_sheet}
