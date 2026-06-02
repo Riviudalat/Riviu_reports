@@ -338,6 +338,54 @@ def ensure_unique_sheet_title(existing_titles, desired_title):
     return f"{base}-{suffix}"
 
 
+def list_google_sheet_titles(base_dir, spreadsheet_id):
+    service = sheets_service(base_dir)
+    spreadsheet = service.spreadsheets().get(
+        spreadsheetId=spreadsheet_id,
+        fields="sheets.properties.title",
+    ).execute()
+    return [item["properties"]["title"] for item in spreadsheet.get("sheets", [])]
+
+
+def push_rows_to_sheet(base_dir, spreadsheet_id, rows, sheet_title=""):
+    service = sheets_service(base_dir)
+    existing_titles = list_google_sheet_titles(base_dir, spreadsheet_id)
+    requested_title = str(sheet_title or "").strip()
+    title = requested_title if requested_title in existing_titles else ensure_unique_sheet_title(existing_titles, create_result_sheet_title())
+
+    if title not in existing_titles:
+        add_sheet_response = service.spreadsheets().batchUpdate(
+            spreadsheetId=spreadsheet_id,
+            body={"requests": [{"addSheet": {"properties": {"title": title}}}]},
+        ).execute()
+        sheet_id = add_sheet_response["replies"][0]["addSheet"]["properties"]["sheetId"]
+    else:
+        spreadsheet = service.spreadsheets().get(
+            spreadsheetId=spreadsheet_id,
+            fields="sheets.properties(title,sheetId)",
+        ).execute()
+        sheet_id = next(
+            item["properties"]["sheetId"]
+            for item in spreadsheet.get("sheets", [])
+            if item["properties"]["title"] == title
+        )
+        service.spreadsheets().values().clear(
+            spreadsheetId=spreadsheet_id,
+            range=f"'{title}'!A:ZZ",
+            body={},
+        ).execute()
+
+    service.spreadsheets().values().update(
+        spreadsheetId=spreadsheet_id,
+        range=f"'{title}'!A1",
+        valueInputOption="USER_ENTERED",
+        body={"values": rows},
+    ).execute()
+    format_result_sheet(service, spreadsheet_id, sheet_id, len(rows), max(len(row) for row in rows))
+    apply_link_formatting(service, spreadsheet_id, sheet_id, rows)
+    return title
+
+
 def push_rows_to_new_sheet(base_dir, spreadsheet_id, rows):
     service = sheets_service(base_dir)
     spreadsheet = service.spreadsheets().get(

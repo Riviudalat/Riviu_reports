@@ -211,9 +211,16 @@ def normalize_text(value):
     return re.sub(r"\s+", " ", text)
 
 
-def build_sheet_contexts(workbook):
+def selected_data_sheet_names(workbook, sheet_name=None):
+    target_sheet = clean_text(sheet_name)
+    if target_sheet:
+        return [target_sheet] if target_sheet in workbook.sheetnames else []
+    return workbook_data_sheet_names(workbook)
+
+
+def build_sheet_contexts(workbook, sheet_name=None):
     contexts = {}
-    for sheet_name in workbook_data_sheet_names(workbook):
+    for sheet_name in selected_data_sheet_names(workbook, sheet_name):
         sheet = workbook[sheet_name]
         contexts[sheet_name] = {
             "worksheet": sheet,
@@ -284,12 +291,12 @@ def find_columns(sheet):
     return column_map
 
 
-def collect_rows(workbook, selected_partner=None, selected_partners=None):
+def collect_rows(workbook, selected_partner=None, selected_partners=None, sheet_name=None):
     selected_names = normalize_selected_partners(selected_partner, selected_partners)
     selected_keys = {partner.casefold() for partner in selected_names}
     rows = []
 
-    for sheet_name in workbook_data_sheet_names(workbook):
+    for sheet_name in selected_data_sheet_names(workbook, sheet_name):
         worksheet = workbook[sheet_name]
         partner_columns = worksheet_partner_column_indexes(worksheet)
         url_column = find_columns(worksheet)["url"]
@@ -997,7 +1004,7 @@ def progress_payload(total, processed, success_count, error_count, worker_count,
     }
 
 
-async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None, create_result_sheet=False, base_dir=None, file_label=""):
+async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None, create_result_sheet=False, base_dir=None, file_label="", sheet_name=None):
     if not os.path.exists(file_path):
         if websocket_manager:
             await websocket_manager.broadcast_log(f"Lỗi: Không tìm thấy file {file_path}")
@@ -1011,8 +1018,8 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
 
     workbook = openpyxl.load_workbook(file_path)
     clear_existing_total_rows(workbook)
-    sheet_contexts = build_sheet_contexts(workbook)
-    rows_to_process = collect_rows(workbook, selected_partners=selected_names)
+    sheet_contexts = build_sheet_contexts(workbook, sheet_name=sheet_name)
+    rows_to_process = collect_rows(workbook, selected_partners=selected_names, sheet_name=sheet_name)
 
     # Dedup URL: nhiều dòng cùng URL chỉ scrape 1 lần, ghi kết quả về tất cả các dòng
     unique_buckets = {}

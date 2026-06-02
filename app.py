@@ -12,6 +12,7 @@ from urllib.parse import quote
 
 import pandas as pd
 from openpyxl import Workbook
+from openpyxl.drawing.image import Image as ExcelImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -84,7 +85,9 @@ DATA_DIR = ensure_data_dir(EXCEL_DIR)
 SCRAPE_TASK = None
 CURRENT_SELECTED_FILE = ""
 CURRENT_SELECTED_SHEET = ""
+CURRENT_SCAN_SHEET = ""
 GOOGLE_SHEET_SOURCE_URL = ""
+RIVIU_LOGO_PATH = r"C:\Users\cattfan\.cursor\projects\c-Users-cattfan-Desktop-TTBD\assets\c__Users_cattfan_AppData_Roaming_Cursor_User_workspaceStorage_e0f8bf31141cddbc037deae49819011e_images_image-8d49c87a-8bce-42b8-b5c7-f5ef7715efa5.png"
 
 
 def file_entries():
@@ -98,7 +101,7 @@ def resolve_file_path(file_id):
 
 
 def ensure_selected_file():
-    global CURRENT_SELECTED_FILE, CURRENT_SELECTED_SHEET
+    global CURRENT_SELECTED_FILE, CURRENT_SELECTED_SHEET, CURRENT_SCAN_SHEET
     current_path = resolve_file_path(CURRENT_SELECTED_FILE)
     if CURRENT_SELECTED_FILE and os.path.exists(current_path):
         return CURRENT_SELECTED_FILE
@@ -107,6 +110,7 @@ def ensure_selected_file():
     if not entries:
         CURRENT_SELECTED_FILE = ""
         CURRENT_SELECTED_SHEET = ""
+        CURRENT_SCAN_SHEET = ""
         return ""
 
     google_ids = [
@@ -151,6 +155,28 @@ def default_sheet_for_file(file_id):
         return sheets[0] if sheets else ""
     except Exception:
         return ""
+
+
+def sheets_for_current_file():
+    target_path = current_excel_path()
+    if not os.path.exists(target_path):
+        return []
+    try:
+        return find_data_sheet_names(target_path)
+    except Exception:
+        return []
+
+
+def resolve_scan_sheet(requested_sheet=""):
+    global CURRENT_SCAN_SHEET
+    sheets = sheets_for_current_file()
+    if not sheets:
+        return "", []
+    sheet_name = clean_text(requested_sheet) or CURRENT_SCAN_SHEET or CURRENT_SELECTED_SHEET or sheets[0]
+    if sheet_name not in sheets:
+        raise ValueError("Sheet không tồn tại")
+    CURRENT_SCAN_SHEET = sheet_name
+    return sheet_name, sheets
 
 
 def safe_report_name(name):
@@ -282,32 +308,34 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
     ws = wb.active
     ws.title = "Báo cáo"
     updated_at = datetime.now().strftime("%d/%m/%Y %H:%M")
-    table_header_row = 5
+    table_header_row = 6
     data_start_row = table_header_row + 1
     last_column = get_column_letter(len(REPORT_COLUMNS))
 
-    title_fill = PatternFill("solid", fgColor="123A63")
-    header_fill = PatternFill("solid", fgColor="0B5ED7")
-    total_fill = PatternFill("solid", fgColor="EAF3FF")
+    title_fill = PatternFill("solid", fgColor="FF6B00")
+    header_fill = PatternFill("solid", fgColor="FF6B00")
+    total_fill = PatternFill("solid", fgColor="FFF7ED")
     thin = Side(style="thin", color="D8DEE9")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(REPORT_COLUMNS))
-    ws["A1"] = f"BÁO CÁO ĐỐI TÁC: {partner}"
-    ws["A1"].fill = title_fill
-    ws["A1"].font = Font(color="FFFFFF", bold=True, size=14)
-    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[1].height = 28
+    ws.merge_cells(start_row=1, start_column=1, end_row=2, end_column=2)
+    if os.path.exists(RIVIU_LOGO_PATH):
+        logo = ExcelImage(RIVIU_LOGO_PATH)
+        logo.height = 54
+        logo.width = 150
+        ws.add_image(logo, "A1")
+    ws.merge_cells(start_row=1, start_column=3, end_row=1, end_column=len(REPORT_COLUMNS))
+    ws["C1"] = f"BÁO CÁO ĐỐI TÁC: {partner}"
+    ws["C1"].fill = title_fill
+    ws["C1"].font = Font(color="FFFFFF", bold=True, size=14)
+    ws["C1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.row_dimensions[1].height = 34
+    ws.row_dimensions[2].height = 24
 
-    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(REPORT_COLUMNS))
-    ws["A2"] = f"Tổng link: {len(frame)}"
-    ws["A2"].font = Font(color="374151", italic=True)
-    ws["A2"].alignment = Alignment(horizontal="center")
-
-    ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=len(REPORT_COLUMNS))
-    ws["A3"] = f"Ngày cập nhật: {updated_at}"
-    ws["A3"].font = Font(color="374151", italic=True)
-    ws["A3"].alignment = Alignment(horizontal="center")
+    ws.merge_cells(start_row=2, start_column=3, end_row=2, end_column=len(REPORT_COLUMNS))
+    ws["C2"] = f"Tổng link: {len(frame)} • Ngày cập nhật: {updated_at}"
+    ws["C2"].font = Font(color="9A3412", italic=True, bold=True)
+    ws["C2"].alignment = Alignment(horizontal="center")
 
     for col_index, header in enumerate(REPORT_COLUMNS, start=1):
         cell = ws.cell(row=table_header_row, column=col_index, value=header)
@@ -380,8 +408,9 @@ def content_disposition(filename):
     return f"attachment; filename*=UTF-8''{quote(filename)}"
 
 
-async def run_scraper_safely(target_path, worker_count, partner=None, partners=None, create_result_sheet=False, push_to_google=False):
+async def run_scraper_safely(target_path, worker_count, partner=None, partners=None, create_result_sheet=False, push_to_google=False, sheet_name=""):
     try:
+        scan_sheet, _ = resolve_scan_sheet(sheet_name)
         await run_scraper(
             target_path,
             manager,
@@ -391,6 +420,7 @@ async def run_scraper_safely(target_path, worker_count, partner=None, partners=N
             create_result_sheet=create_result_sheet,
             base_dir=EXCEL_DIR,
             file_label=current_display_label(),
+            sheet_name=scan_sheet,
         )
         if push_to_google:
             source = current_google_sheet_source()
@@ -476,6 +506,13 @@ async def favicon():
     return Response(status_code=204)
 
 
+@app.get("/riviu-logo.png", include_in_schema=False)
+async def riviu_logo():
+    if os.path.exists(RIVIU_LOGO_PATH):
+        return FileResponse(RIVIU_LOGO_PATH, media_type="image/png")
+    return Response(status_code=404)
+
+
 @app.get("/list-files")
 async def list_files():
     ensure_selected_file()
@@ -493,6 +530,8 @@ async def list_files():
         "current": CURRENT_SELECTED_FILE,
         "currentLabel": current_display_label(),
         "currentSheet": CURRENT_SELECTED_SHEET,
+        "sheets": sheets_for_current_file(),
+        "scanSheet": CURRENT_SCAN_SHEET or CURRENT_SELECTED_SHEET,
         "googleSheetUrl": target_sheet_url,
         "googlePushReady": bool(target_spreadsheet_id) and oauth.get("authorized"),
         "googleOAuthConfigured": oauth.get("configured"),
@@ -502,18 +541,19 @@ async def list_files():
 
 @app.post("/select-file")
 async def select_file(data: dict):
-    global CURRENT_SELECTED_FILE, CURRENT_SELECTED_SHEET
+    global CURRENT_SELECTED_FILE, CURRENT_SELECTED_SHEET, CURRENT_SCAN_SHEET
     file_id = data.get("filename")
     if file_id and os.path.exists(resolve_file_path(file_id)):
         CURRENT_SELECTED_FILE = file_id
         CURRENT_SELECTED_SHEET = default_sheet_for_file(file_id)
-        return {"success": True, "selected": CURRENT_SELECTED_FILE, "sheet": CURRENT_SELECTED_SHEET}
+        CURRENT_SCAN_SHEET = CURRENT_SELECTED_SHEET
+        return {"success": True, "selected": CURRENT_SELECTED_FILE, "sheet": CURRENT_SELECTED_SHEET, "scanSheet": CURRENT_SCAN_SHEET}
     return {"success": False, "error": "File không tồn tại"}
 
 
 @app.post("/sync-google-sheet")
 async def sync_google_sheet(data: dict):
-    global CURRENT_SELECTED_FILE, CURRENT_SELECTED_SHEET, GOOGLE_SHEET_SOURCE_URL
+    global CURRENT_SELECTED_FILE, CURRENT_SELECTED_SHEET, CURRENT_SCAN_SHEET, GOOGLE_SHEET_SOURCE_URL
     source_url = (data.get("url") or "").strip()
     if not source_url:
         return JSONResponse(content={"error": "Vui lòng nhập URL Google Sheet"}, status_code=400)
@@ -529,6 +569,7 @@ async def sync_google_sheet(data: dict):
         GOOGLE_SHEET_SOURCE_URL = source_url
         CURRENT_SELECTED_FILE = file_id
         CURRENT_SELECTED_SHEET = preview.get("currentSheet", "")
+        CURRENT_SCAN_SHEET = CURRENT_SELECTED_SHEET
         register_google_sheet_source(EXCEL_DIR, file_id, source_url)
         await manager.broadcast_log(f"Đã nạp Google Sheet thành file mới: {os.path.basename(file_id)}.")
         return {
@@ -537,6 +578,7 @@ async def sync_google_sheet(data: dict):
             "label": current_display_label(),
             "sheets": preview.get("sheets", []),
             "currentSheet": CURRENT_SELECTED_SHEET,
+            "scanSheet": CURRENT_SCAN_SHEET,
             "spreadsheetId": spreadsheet_id,
         }
     except Exception as error:
@@ -602,14 +644,15 @@ async def push_google_sheet(data: dict | None = None):
     try:
         GOOGLE_SHEET_SOURCE_URL = source_url
         register_google_sheet_source(EXCEL_DIR, ensure_selected_file(), source_url)
-        rows = build_workbook_rows(target_path)
+        upload_sheet = clean_text((data or {}).get("sourceSheet", "")) or CURRENT_SCAN_SHEET or CURRENT_SELECTED_SHEET
+        rows = build_workbook_rows(target_path, sheet_name=upload_sheet)
         if not rows:
-            return JSONResponse(content={"error": "File đang chọn không có link TikTok để tạo sheet."}, status_code=400)
+            return JSONResponse(content={"error": f"Sheet {upload_sheet or 'đang chọn'} không có link TikTok để tạo sheet."}, status_code=400)
         if not has_scraped_google_push_data(rows):
             return JSONResponse(content={"error": "File đang chọn mới nạp nhưng chưa quét dữ liệu. Hãy bấm BẮT ĐẦU QUÉT trước rồi tạo sheet."}, status_code=400)
         values = build_google_push_rows(rows)
         sheet_title = push_rows_to_new_sheet(EXCEL_DIR, spreadsheet_id, values)
-        return {"success": True, "sheetTitle": sheet_title}
+        return {"success": True, "sheetTitle": sheet_title, "sourceSheet": upload_sheet}
     except Exception as error:
         return JSONResponse(content={"error": f"Đẩy dữ liệu lên Google Sheet thất bại: {str(error)}"}, status_code=500)
 
@@ -758,7 +801,7 @@ async def export_report(data: dict):
 
 @app.post("/upload-excel")
 async def upload_excel(file: UploadFile = File(...)):
-    global CURRENT_SELECTED_FILE, CURRENT_SELECTED_SHEET
+    global CURRENT_SELECTED_FILE, CURRENT_SELECTED_SHEET, CURRENT_SCAN_SHEET
     try:
         if not (file.filename.endswith(".xlsx") or file.filename.endswith(".xls")):
             return {"success": False, "error": "Chỉ chấp nhận file Excel (.xlsx, .xls)"}
@@ -769,8 +812,9 @@ async def upload_excel(file: UploadFile = File(...)):
             file_obj.write(content)
 
         CURRENT_SELECTED_FILE = file.filename
-        CURRENT_SELECTED_SHEET = ""
-        return {"success": True, "filename": file.filename}
+        CURRENT_SELECTED_SHEET = default_sheet_for_file(file.filename)
+        CURRENT_SCAN_SHEET = CURRENT_SELECTED_SHEET
+        return {"success": True, "filename": file.filename, "sheet": CURRENT_SELECTED_SHEET, "scanSheet": CURRENT_SCAN_SHEET}
     except Exception as error:
         return {"success": False, "error": str(error)}
 
@@ -794,10 +838,17 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
 
                 target_path = current_excel_path()
-                worker_count = payload.get("workers", 5)
+                worker_count = payload.get("workers", 20)
                 create_result_sheet = bool(payload.get("create_result_sheet", False))
                 push_to_google = bool(payload.get("push_to_google", False))
                 partner = clean_text(payload.get("partner", ""))
+                sheet_name = clean_text(payload.get("sheet_name", ""))
+                try:
+                    sheet_name, _ = resolve_scan_sheet(sheet_name)
+                except ValueError as error:
+                    await manager.broadcast_log(str(error))
+                    await manager.broadcast_status({"total": 0, "processed": 0, "success": 0, "error": 1, "done": True})
+                    continue
                 partners_payload = payload.get("partners", [])
                 partners = []
                 if isinstance(partners_payload, list):
@@ -810,6 +861,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         partners=partners,
                         create_result_sheet=create_result_sheet,
                         push_to_google=push_to_google,
+                        sheet_name=sheet_name,
                     )
                 )
             elif action == "cancel":

@@ -564,13 +564,17 @@ def find_data_sheet_names_in_workbook(workbook):
     return [data_sheets[0]]
 
 
-def build_workbook_rows(file_path, selected_partner=None):
+def build_workbook_rows(file_path, selected_partner=None, sheet_name=None):
     workbook = load_excel_file(file_path)
     try:
         selected_key = selected_partner.casefold() if selected_partner else None
+        requested_sheet = clean_text(sheet_name)
         rows = []
+        data_sheets = find_data_sheet_names_in_workbook(workbook)
+        if requested_sheet:
+            data_sheets = [requested_sheet] if requested_sheet in workbook.sheet_names else []
 
-        for sheet_name in find_data_sheet_names_in_workbook(workbook):
+        for sheet_name in data_sheets:
             frame = workbook.parse(sheet_name)
             partner_columns = dataframe_partner_columns(frame)
             date_column = find_column_name(frame, ["NGÀY AIR", "Ngày"])
