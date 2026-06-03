@@ -15,6 +15,9 @@ from workbook_utils import (
     clean_text,
     is_generated_username_channel,
     is_generic_tiktok_channel_name,
+    is_scrapable_tiktok_url,
+    metric_number,
+    normalize_tiktok_url,
     rebuild_summary_sheet,
     result_sheet_display_name,
     workbook_data_sheet_names,
@@ -95,13 +98,13 @@ def _compute_workbook_totals(workbook, sheet_name=None):
         sheet_names = workbook_data_sheet_names(workbook)
     for current_sheet in sheet_names:
         sheet = workbook[current_sheet]
-        columns = find_columns(sheet)
+        columns = detect_columns(sheet)
         url_column = columns.get("url")
         if not url_column:
             continue
         for row_index in range(2, (sheet.max_row or 1) + 1):
-            url = clean_text(sheet.cell(row=row_index, column=url_column).value)
-            if not url or ("tiktok.com" not in url and "vt.tiktok.com" not in url):
+            raw_url = sheet.cell(row=row_index, column=url_column).value
+            if not is_scrapable_tiktok_url(raw_url):
                 continue
             totals["totalLinks"] += 1
             for metric_key, total_key in (
@@ -114,18 +117,51 @@ def _compute_workbook_totals(workbook, sheet_name=None):
                 col = columns.get(metric_key)
                 if not col:
                     continue
-                value = sheet.cell(row=row_index, column=col).value
-                if value is None or value == "":
-                    continue
-                if isinstance(value, (int, float)):
-                    totals[total_key] += int(value)
-                    continue
-                text = str(value).strip()
-                cleaned = re.sub(r"[,\s]", "", text)
-                try:
-                    totals[total_key] += int(float(cleaned))
-                except ValueError:
-                    pass
+                totals[total_key] += metric_number(sheet.cell(row=row_index, column=col).value)
+    return totals
+
+
+def _compute_session_totals(workbook, rows_to_process):
+    """Sum metrics only for rows included in the current scrape session."""
+    totals = {
+        "totalLinks": 0,
+        "totalViews": 0,
+        "totalLikes": 0,
+        "totalComments": 0,
+        "totalSaves": 0,
+        "totalShares": 0,
+    }
+    column_cache = {}
+    for item in rows_to_process:
+        sheet_name = item.get("sheet_name")
+        row_index = item.get("row")
+        if not sheet_name or not row_index:
+            continue
+        if sheet_name not in workbook.sheetnames:
+            continue
+        if sheet_name not in column_cache:
+            column_cache[sheet_name] = detect_columns(workbook[sheet_name])
+        columns = column_cache[sheet_name]
+        url_column = columns.get("url")
+        if not url_column:
+            continue
+        raw_url = workbook[sheet_name].cell(row=row_index, column=url_column).value
+        if not is_scrapable_tiktok_url(raw_url):
+            continue
+        totals["totalLinks"] += 1
+        for metric_key, total_key in (
+            ("views", "totalViews"),
+            ("likes", "totalLikes"),
+            ("comments", "totalComments"),
+            ("saves", "totalSaves"),
+            ("shares", "totalShares"),
+        ):
+            col = columns.get(metric_key)
+            if not col:
+                continue
+            totals[total_key] += metric_number(
+                workbook[sheet_name].cell(row=row_index, column=col).value
+            )
     return totals
 
 
@@ -229,16 +265,12 @@ def build_sheet_contexts(workbook, sheet_name=None):
         sheet = workbook[sheet_name]
         contexts[sheet_name] = {
             "worksheet": sheet,
-            "columns": find_columns(sheet),
+            "columns": ensure_columns(sheet),
         }
     return contexts
 
 
-def username_override_map(file_path):
-    return {}
-
-
-def find_columns(sheet):
+def detect_columns(sheet):
     column_map = {key: None for key in METRIC_HEADERS}
     column_map["url"] = None
     column_map["channel"] = None
@@ -261,9 +293,9 @@ def find_columns(sheet):
             if normalize_text(expected_header) in header:
                 column_map[key] = cell.column
 
-    max_column = sheet.max_column
+    max_column = sheet.max_column or 0
     if not column_map["url"]:
-        for row in range(2, min(sheet.max_row, 25) + 1):
+        for row in range(2, min(sheet.max_row or 1, 25) + 1):
             for col in range(1, max_column + 1):
                 value = str(sheet.cell(row=row, column=col).value or "")
                 if "tiktok.com" in value or "vt.tiktok.com" in value:
@@ -275,6 +307,13 @@ def find_columns(sheet):
     for key, fallback in {"views": 5, "likes": 6, "comments": 7, "saves": 8, "shares": 9}.items():
         if not column_map[key] and max_column >= fallback and normalize_text(sheet.cell(row=1, column=fallback).value):
             column_map[key] = fallback
+
+    return column_map
+
+
+def ensure_columns(sheet):
+    column_map = detect_columns(sheet)
+    max_column = sheet.max_column or 0
 
     if not column_map["channel"]:
         channel_col = max_column + 1
@@ -296,6 +335,10 @@ def find_columns(sheet):
     return column_map
 
 
+def find_columns(sheet):
+    return ensure_columns(sheet)
+
+
 def collect_rows(workbook, selected_partner=None, selected_partners=None, sheet_name=None):
     selected_names = normalize_selected_partners(selected_partner, selected_partners)
     selected_keys = {partner.casefold() for partner in selected_names}
@@ -304,14 +347,15 @@ def collect_rows(workbook, selected_partner=None, selected_partners=None, sheet_
     for sheet_name in selected_data_sheet_names(workbook, sheet_name):
         worksheet = workbook[sheet_name]
         partner_columns = worksheet_partner_column_indexes(worksheet)
-        url_column = find_columns(worksheet)["url"]
+        url_column = detect_columns(worksheet)["url"]
         if not url_column:
             continue
 
         for row_index in range(2, worksheet.max_row + 1):
-            url = clean_text(worksheet.cell(row=row_index, column=url_column).value)
-            if not url or ("tiktok.com" not in url and "vt.tiktok.com" not in url):
+            raw_url = worksheet.cell(row=row_index, column=url_column).value
+            if not is_scrapable_tiktok_url(raw_url):
                 continue
+            url = normalize_tiktok_url(raw_url)
 
             partners = []
             if partner_columns:
@@ -342,7 +386,7 @@ def is_total_row(sheet, row_index, url_column):
 def clear_existing_total_rows(workbook):
     for sheet_name in workbook_data_sheet_names(workbook):
         sheet = workbook[sheet_name]
-        url_column = find_columns(sheet)["url"]
+        url_column = detect_columns(sheet)["url"]
         if not url_column:
             continue
         for row_index in range(sheet.max_row, 1, -1):
@@ -353,7 +397,7 @@ def clear_existing_total_rows(workbook):
 def append_sheet_total_rows(workbook):
     for sheet_name in workbook_data_sheet_names(workbook):
         sheet = workbook[sheet_name]
-        columns = find_columns(sheet)
+        columns = ensure_columns(sheet)
         url_column = columns.get("url")
         if not url_column:
             continue
@@ -397,7 +441,7 @@ def build_result_sheet(workbook, rows_to_process, summary_update_time):
     sequence = 1
     for source_sheet_name in workbook_data_sheet_names(workbook):
         source_sheet = workbook[source_sheet_name]
-        columns = find_columns(source_sheet)
+        columns = ensure_columns(source_sheet)
         url_column = columns.get("url")
         if not url_column:
             continue
@@ -773,6 +817,7 @@ async def block_heavy_resources(route):
 async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
     data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
     channel_name = ""
+    url = normalize_tiktok_url(url)
     profile_username = extract_profile_username(url)
     try:
         await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
@@ -801,9 +846,15 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
             await page.wait_for_timeout(500)
 
         if profile_username:
-            profile_channel = await read_profile_channel_name(page, profile_username, channel_cache=channel_cache)
-            if profile_channel:
-                channel_name = profile_channel
+            needs_profile_channel = (
+                not channel_name
+                or is_generated_username_channel(channel_name, url)
+                or is_generic_tiktok_channel_name(channel_name)
+            )
+            if needs_profile_channel:
+                profile_channel = await read_profile_channel_name(page, profile_username, channel_cache=channel_cache)
+                if profile_channel:
+                    channel_name = profile_channel
 
         # Final guard against accidentally captured error text
         if looks_like_error_text(channel_name):
@@ -849,25 +900,7 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries, cha
         await ctx.route("**/*", block_heavy_resources)
         return ctx
 
-    async def drain_with_error(reason):
-        while True:
-            try:
-                pending = work_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-            if pending is None:
-                work_queue.task_done()
-                break
-            await result_queue.put({
-                **pending,
-                "worker": worker_id,
-                "data": {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"},
-                "channel_name": "",
-                "status": reason,
-                "attempts": 0,
-                "elapsed": 0.0,
-            })
-            work_queue.task_done()
+    current_item = None
 
     if startup_semaphore is not None:
         async with startup_semaphore:
@@ -878,7 +911,6 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries, cha
             except Exception as error:
                 if websocket_manager:
                     await websocket_manager.broadcast_log(f"Worker {worker_id} không khởi tạo được context: {str(error)}")
-                await drain_with_error(f"Error: Worker {worker_id} không khởi tạo được")
                 return
     else:
         context = await make_context()
@@ -889,8 +921,10 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries, cha
     try:
         while True:
             item = await work_queue.get()
+            current_item = item
             if item is None:
                 work_queue.task_done()
+                current_item = None
                 break
 
             started_at = time.perf_counter()
@@ -901,7 +935,6 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries, cha
                 channel_name = ""
                 status = f"Error: Worker {worker_id} crash ({str(error)})"
                 attempts = 0
-                # Try to recover the page so the worker keeps running
                 try:
                     if page.is_closed():
                         page = await context.new_page()
@@ -918,9 +951,9 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries, cha
                 "elapsed": elapsed,
             })
             work_queue.task_done()
+            current_item = None
             links_in_current_context += 1
 
-            # Recycle context periodically to keep RAM in check on long runs
             if links_in_current_context >= RECYCLE_AFTER:
                 try:
                     await context.close()
@@ -933,14 +966,15 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries, cha
                 except Exception as error:
                     if websocket_manager:
                         await websocket_manager.broadcast_log(f"Worker {worker_id} không khởi tạo lại được context: {str(error)}")
-                    await drain_with_error(f"Error: Worker {worker_id} mất context")
                     return
 
             await asyncio.sleep(random.uniform(0.3, 1.1))
     except Exception as error:
         if websocket_manager:
             await websocket_manager.broadcast_log(f"Worker {worker_id} dừng do lỗi: {str(error)}")
-        await drain_with_error(f"Error: Worker {worker_id} đã dừng")
+        if current_item is not None:
+            await work_queue.put(current_item)
+            work_queue.task_done()
     finally:
         try:
             await context.close()
@@ -976,14 +1010,26 @@ def write_result(sheet_contexts, item, data, channel_name, status):
 
 
 async def save_workbook(workbook, file_path, websocket_manager=None):
+    temp_path = f"{file_path}.tmp"
     try:
-        await asyncio.to_thread(workbook.save, file_path)
+        await asyncio.to_thread(workbook.save, temp_path)
+        await asyncio.to_thread(os.replace, temp_path, file_path)
         return True, None
     except PermissionError:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
         if websocket_manager:
             await websocket_manager.broadcast_log("CẢNH BÁO: File Excel đang mở, không thể ghi đè. Vui lòng đóng file rồi quét lại hoặc chờ lần lưu tiếp theo.")
         return False, "permission"
     except Exception as error:
+        if os.path.exists(temp_path):
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
         if websocket_manager:
             await websocket_manager.broadcast_log(f"CẢNH BÁO: Lỗi lưu file ({str(error)})")
         return False, "other"
@@ -1067,10 +1113,15 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
         return
 
     worker_count = min(worker_count, total)
+    active_sheet = clean_text(sheet_name) or (rows_to_process[0].get("sheet_name") if rows_to_process else "")
     if websocket_manager:
+        sheet_part = f'Sheet "{active_sheet}" • ' if active_sheet else ""
+        await websocket_manager.broadcast_log(
+            f"{sheet_part}{total_rows} dòng • {total} URL sau dedup sẽ quét."
+        )
         if duplicate_count > 0:
             await websocket_manager.broadcast_log(
-                f"Tổng {total_rows} dòng, sau dedup còn {total} URL cần quét (tiết kiệm {duplicate_count} lượt)."
+                f"Tiết kiệm {duplicate_count} lượt nhờ gộp URL trùng."
             )
         if selected_names:
             await websocket_manager.broadcast_log(
@@ -1078,7 +1129,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             )
         else:
             await websocket_manager.broadcast_log(
-                f"Bắt đầu quét nhanh {total} URL bằng {worker_count} luồng, retry {retries} lần, lưu mỗi {save_every} kết quả."
+                f"Bắt đầu quét {total} URL bằng {worker_count} luồng, retry {retries} lần, lưu mỗi {save_every} kết quả."
             )
         await websocket_manager.broadcast_status(
             progress_payload(total, 0, 0, 0, worker_count, started_at, mode=mode, partner=partner_label, phase="starting")
@@ -1284,7 +1335,8 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     scan_sheet_name = clean_text(sheet_name) or ""
     if not scan_sheet_name and rows_to_process:
         scan_sheet_name = clean_text(rows_to_process[0].get("sheet_name", ""))
-    workbook_totals = _compute_workbook_totals(workbook, sheet_name=scan_sheet_name or None)
+    session_totals = _compute_session_totals(workbook, rows_to_process)
+    sheet_totals = _compute_workbook_totals(workbook, sheet_name=scan_sheet_name or None)
     history_entry = {
         "timestamp": datetime.now().strftime("%d/%m/%Y %H:%M"),
         "fileLabel": file_label or os.path.basename(file_path),
@@ -1295,7 +1347,8 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
         "error": error_count,
         "workers": worker_count,
         "durationSeconds": duration_seconds,
-        **workbook_totals,
+        "sheetTotalLinks": sheet_totals["totalLinks"],
+        **session_totals,
     }
     append_scrape_history(base_dir or os.path.dirname(os.path.abspath(file_path)), history_entry)
     if websocket_manager:

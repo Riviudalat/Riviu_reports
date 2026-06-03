@@ -12,7 +12,6 @@ from urllib.parse import quote
 
 import pandas as pd
 from openpyxl import Workbook
-from openpyxl.drawing.image import Image as ExcelImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
 
@@ -30,11 +29,15 @@ from workbook_utils import (
     google_sheet_source_for_file,
     is_failed_channel_name,
     list_workbook_partners,
+    list_workbook_partners_with_link_counts,
     normalize_header,
     parse_google_spreadsheet_id,
     read_summary_dashboard,
     read_sheet_preview,
     register_google_sheet_source,
+    safe_join,
+    metric_number,
+    format_metric,
     timestamped_google_sheet_file_id,
     workbook_file_entries,
     workbook_sheet_names,
@@ -97,7 +100,7 @@ def file_entries():
 def resolve_file_path(file_id):
     if not file_id:
         return ""
-    return os.path.join(EXCEL_DIR, file_id.replace("/", os.sep))
+    return safe_join(EXCEL_DIR, file_id.replace("\\", "/"))
 
 
 def ensure_selected_file():
@@ -189,36 +192,6 @@ def filename_timestamp():
     return datetime.now().strftime("%d-%m-%Y-%H-%M")
 
 
-def format_metric(value):
-    if pd.isna(value) or value == "":
-        return 0
-    try:
-        number = float(value)
-        return int(number) if number.is_integer() else number
-    except (TypeError, ValueError):
-        return value
-
-
-def metric_number(value):
-    if pd.isna(value) or value == "":
-        return 0
-    if isinstance(value, (int, float)):
-        return int(float(value))
-    raw_text = str(value).strip()
-    if re.fullmatch(r"\d{1,3}([.,]\d{3})+", raw_text):
-        return int(re.sub(r"[.,]", "", raw_text))
-    if re.fullmatch(r"\d+\.0+", raw_text):
-        return int(float(raw_text))
-    text = str(value).replace(",", "").replace(".", "").strip()
-    try:
-        return int(float(text))
-    except (TypeError, ValueError):
-        try:
-            return int(float(value))
-        except (TypeError, ValueError):
-            return 0
-
-
 def spreadsheet_text(value):
     text = clean_text(value)
     return f"'{text}" if text else ""
@@ -281,15 +254,7 @@ def find_report_column(frame, header):
 
 def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
     threshold = max(int(min_views or 0), 0) if apply_min_views else 0
-    total_rows = len(rows)
-    failed_rows = sum(1 for row in rows if is_failed_channel_name(row.get("TÊN KÊNH", "")))
     if apply_min_views:
-        under_threshold_rows = sum(
-            1
-            for row in rows
-            if not is_failed_channel_name(row.get("TÊN KÊNH", ""))
-            and metric_number(row.get("LƯỢT XEM", 0)) < threshold
-        )
         valid_rows = [
             row
             for row in rows
@@ -297,7 +262,6 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
             and metric_number(row.get("LƯỢT XEM", 0)) >= threshold
         ]
     else:
-        under_threshold_rows = 0
         valid_rows = [
             row
             for row in rows
@@ -318,24 +282,17 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
     thin = Side(style="thin", color="D8DEE9")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    ws.merge_cells(start_row=1, start_column=1, end_row=2, end_column=2)
-    if os.path.exists(LOGO_PATH):
-        logo = ExcelImage(LOGO_PATH)
-        logo.height = 54
-        logo.width = 150
-        ws.add_image(logo, "A1")
-    ws.merge_cells(start_row=1, start_column=3, end_row=1, end_column=len(REPORT_COLUMNS))
-    ws["C1"] = f"BÁO CÁO ĐỐI TÁC: {partner}"
-    ws["C1"].fill = title_fill
-    ws["C1"].font = Font(color="FFFFFF", bold=True, size=14)
-    ws["C1"].alignment = Alignment(horizontal="center", vertical="center")
-    ws.row_dimensions[1].height = 34
-    ws.row_dimensions[2].height = 24
-
-    ws.merge_cells(start_row=2, start_column=3, end_row=2, end_column=len(REPORT_COLUMNS))
-    ws["C2"] = f"Tổng link: {len(frame)} • Ngày cập nhật: {updated_at}"
-    ws["C2"].font = Font(color="9A3412", italic=True, bold=True)
-    ws["C2"].alignment = Alignment(horizontal="center")
+    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(REPORT_COLUMNS))
+    ws["A1"] = f"BÁO CÁO ĐỐI TÁC: {partner}"
+    ws["A1"].fill = title_fill
+    ws["A1"].font = Font(color="FFFFFF", bold=True, size=14)
+    ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(REPORT_COLUMNS))
+    ws["A2"] = f"Tổng link: {len(frame)} • Ngày cập nhật: {updated_at}"
+    ws["A2"].font = Font(color="9A3412", italic=True, bold=True)
+    ws["A2"].alignment = Alignment(horizontal="center")
+    ws.row_dimensions[1].height = 28
+    ws.row_dimensions[2].height = 22
 
     for col_index, header in enumerate(REPORT_COLUMNS, start=1):
         cell = ws.cell(row=table_header_row, column=col_index, value=header)
@@ -380,8 +337,9 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
         cell = ws.cell(row=total_row, column=col_index)
         cell.fill = total_fill
         cell.border = border
-    ws.cell(row=total_row, column=1, value="TỔNG")
-    ws.cell(row=total_row, column=1).font = Font(bold=True)
+    total_label = ws.cell(row=total_row, column=1, value="TỔNG")
+    total_label.font = Font(bold=True)
+    total_label.alignment = Alignment(horizontal="center", vertical="center")
     if len(frame) > 0:
         for col_index in range(4, len(REPORT_COLUMNS) + 1):
             letter = get_column_letter(col_index)
@@ -426,7 +384,7 @@ async def run_scraper_safely(target_path, worker_count, partner=None, partners=N
             source = current_google_sheet_source()
             spreadsheet_id = source.get("spreadsheetId", "")
             if spreadsheet_id:
-                rows = build_workbook_rows(target_path)
+                rows = build_workbook_rows(target_path, sheet_name=scan_sheet)
                 values = build_google_push_rows(rows)
                 sheet_title = push_rows_to_new_sheet(EXCEL_DIR, spreadsheet_id, values)
                 await manager.broadcast_log(f"Đã đẩy kết quả lên Google Sheet: {sheet_title}.")
@@ -488,6 +446,61 @@ def build_google_push_rows(rows):
 
 
 
+def build_export_payload(target_path, selected_partners, apply_min_views, min_views, requested_sheet_name=""):
+    data_sheets = find_data_sheet_names(target_path)
+    report_sheet = clean_text(requested_sheet_name) or (data_sheets[0] if data_sheets else "")
+    if report_sheet and report_sheet not in data_sheets:
+        raise ValueError(f"Sheet {report_sheet} không tồn tại trong file.")
+    available_partners = set(list_workbook_partners(target_path, sheet_name=report_sheet))
+    partners = [clean_text(name) for name in selected_partners if clean_text(name) in available_partners]
+    if not partners:
+        raise ValueError("Không tìm thấy đối tác đã chọn trong file")
+    export_timestamp = filename_timestamp()
+
+    if len(partners) == 1:
+        partner = partners[0]
+        report_rows = build_workbook_rows(target_path, selected_partner=partner, sheet_name=report_sheet)
+        report_bytes = build_partner_report(
+            partner,
+            report_rows,
+            apply_min_views=apply_min_views,
+            min_views=min_views,
+        )
+        filename = f"{safe_report_name(partner)}-{export_timestamp}.xlsx"
+        return {
+            "content": report_bytes,
+            "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            "filename": filename,
+        }
+
+    archive = io.BytesIO()
+    used_names = set()
+    with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zip_file:
+        for partner in partners:
+            report_rows = build_workbook_rows(target_path, selected_partner=partner, sheet_name=report_sheet)
+            report_bytes = build_partner_report(
+                partner,
+                report_rows,
+                apply_min_views=apply_min_views,
+                min_views=min_views,
+            )
+            base_name = f"{safe_report_name(partner)}-{export_timestamp}"
+            filename = f"{base_name}.xlsx"
+            counter = 2
+            while filename in used_names:
+                filename = f"{base_name}_{counter}.xlsx"
+                counter += 1
+            used_names.add(filename)
+            zip_file.writestr(filename, report_bytes)
+
+    archive.seek(0)
+    return {
+        "content": archive.getvalue(),
+        "media_type": "application/zip",
+        "filename": f"bao_cao_doi_tac-{export_timestamp}.zip",
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     return templates.TemplateResponse(request=request, name="index.html")
@@ -540,9 +553,10 @@ async def list_files():
 async def select_file(data: dict):
     global CURRENT_SELECTED_FILE, CURRENT_SELECTED_SHEET, CURRENT_SCAN_SHEET
     file_id = data.get("filename")
-    if file_id and os.path.exists(resolve_file_path(file_id)):
-        CURRENT_SELECTED_FILE = file_id
-        CURRENT_SELECTED_SHEET = default_sheet_for_file(file_id)
+    target_path = resolve_file_path(file_id) if file_id else ""
+    if target_path and os.path.exists(target_path):
+        CURRENT_SELECTED_FILE = file_id.replace("\\", "/")
+        CURRENT_SELECTED_SHEET = default_sheet_for_file(CURRENT_SELECTED_FILE)
         CURRENT_SCAN_SHEET = CURRENT_SELECTED_SHEET
         return {"success": True, "selected": CURRENT_SELECTED_FILE, "sheet": CURRENT_SELECTED_SHEET, "scanSheet": CURRENT_SCAN_SHEET}
     return {"success": False, "error": "File không tồn tại"}
@@ -663,7 +677,11 @@ async def preview_excel(sheet_name: str = Query(default="")):
         return {"sheets": [], "currentSheet": "", "columns": [], "data": [], "message": f"Không tìm thấy file {CURRENT_SELECTED_FILE}."}
     try:
         requested_sheet = sheet_name or CURRENT_SELECTED_SHEET or default_sheet_for_file(CURRENT_SELECTED_FILE)
-        preview = read_sheet_preview(target_path, sheet_name=requested_sheet)
+
+        def _load_preview():
+            return read_sheet_preview(target_path, sheet_name=requested_sheet)
+
+        preview = await asyncio.to_thread(_load_preview)
         CURRENT_SELECTED_SHEET = preview.get("currentSheet", CURRENT_SELECTED_SHEET)
         preview["file"] = CURRENT_SELECTED_FILE
         preview["fileLabel"] = current_display_label()
@@ -678,7 +696,7 @@ async def summary_dashboard():
     if not os.path.exists(target_path):
         return JSONResponse(content={"error": "File không tồn tại"}, status_code=404)
     try:
-        summary = read_summary_dashboard(target_path)
+        summary = await asyncio.to_thread(read_summary_dashboard, target_path)
         summary["file"] = CURRENT_SELECTED_FILE
         summary["fileLabel"] = current_display_label()
         return summary
@@ -706,18 +724,32 @@ async def scrape_history(limit: int = Query(default=50)):
 
 
 @app.get("/report-partners")
-async def report_partners(sheet_name: str = Query(default="")):
+async def report_partners(
+    sheet_name: str = Query(default=""),
+    apply_min_views: bool = Query(default=True),
+    min_views: int = Query(default=100),
+):
     target_path = current_excel_path()
     if not os.path.exists(target_path):
         return JSONResponse(content={"error": "File không tồn tại"}, status_code=404)
 
     try:
-        data_sheets = find_data_sheet_names(target_path)
+        data_sheets = await asyncio.to_thread(find_data_sheet_names, target_path)
         requested_sheet = clean_text(sheet_name) or (data_sheets[0] if data_sheets else "")
         if requested_sheet and requested_sheet not in data_sheets:
             return JSONResponse(content={"error": f"Sheet {requested_sheet} không tồn tại trong file."}, status_code=400)
-        partners = list_workbook_partners(target_path, sheet_name=requested_sheet)
-        all_sheets = workbook_sheet_names(target_path)
+        safe_min_views = max(int(min_views or 0), 0)
+
+        def _load_partners():
+            return list_workbook_partners_with_link_counts(
+                target_path,
+                sheet_name=requested_sheet,
+                apply_min_views=apply_min_views,
+                min_views=safe_min_views,
+            )
+
+        partners = await asyncio.to_thread(_load_partners)
+        all_sheets = await asyncio.to_thread(workbook_sheet_names, target_path)
         return {
             "partners": partners,
             "total": len(partners),
@@ -750,58 +782,22 @@ async def export_report(data: dict):
     min_views = max(min_views, 0)
 
     try:
-        data_sheets = find_data_sheet_names(target_path)
-        report_sheet = clean_text(data.get("sheetName", "")) or (data_sheets[0] if data_sheets else "")
-        if report_sheet and report_sheet not in data_sheets:
-            return JSONResponse(content={"error": f"Sheet {report_sheet} không tồn tại trong file."}, status_code=400)
-        available_partners = set(list_workbook_partners(target_path, sheet_name=report_sheet))
-        partners = [clean_text(name) for name in selected_partners if clean_text(name) in available_partners]
-        if not partners:
-            return JSONResponse(content={"error": "Không tìm thấy đối tác đã chọn trong file"}, status_code=404)
-        export_timestamp = filename_timestamp()
-
-        if len(partners) == 1:
-            partner = partners[0]
-            report_rows = build_workbook_rows(target_path, selected_partner=partner, sheet_name=report_sheet)
-            report_bytes = build_partner_report(
-                partner,
-                report_rows,
-                apply_min_views=apply_min_views,
-                min_views=min_views,
-            )
-            filename = f"{safe_report_name(partner)}-{export_timestamp}.xlsx"
-            return Response(
-                content=report_bytes,
-                media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                headers={"Content-Disposition": content_disposition(filename)},
-            )
-
-        archive = io.BytesIO()
-        used_names = set()
-        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zip_file:
-            for partner in partners:
-                report_rows = build_workbook_rows(target_path, selected_partner=partner, sheet_name=report_sheet)
-                report_bytes = build_partner_report(
-                    partner,
-                    report_rows,
-                    apply_min_views=apply_min_views,
-                    min_views=min_views,
-                )
-                base_name = f"{safe_report_name(partner)}-{export_timestamp}"
-                filename = f"{base_name}.xlsx"
-                counter = 2
-                while filename in used_names:
-                    filename = f"{base_name}_{counter}.xlsx"
-                    counter += 1
-                used_names.add(filename)
-                zip_file.writestr(filename, report_bytes)
-
-        archive.seek(0)
-        return Response(
-            content=archive.getvalue(),
-            media_type="application/zip",
-            headers={"Content-Disposition": content_disposition(f"bao_cao_doi_tac-{export_timestamp}.zip")},
+        payload = await asyncio.to_thread(
+            build_export_payload,
+            target_path,
+            selected_partners,
+            apply_min_views,
+            min_views,
+            data.get("sheetName", ""),
         )
+        return Response(
+            content=payload["content"],
+            media_type=payload["media_type"],
+            headers={"Content-Disposition": content_disposition(payload["filename"])},
+        )
+    except ValueError as error:
+        status_code = 404 if "Không tìm thấy" in str(error) else 400
+        return JSONResponse(content={"error": str(error)}, status_code=status_code)
     except Exception as error:
         return JSONResponse(content={"error": f"Lỗi xuất báo cáo: {str(error)}"}, status_code=500)
 
@@ -810,18 +806,23 @@ async def export_report(data: dict):
 async def upload_excel(file: UploadFile = File(...)):
     global CURRENT_SELECTED_FILE, CURRENT_SELECTED_SHEET, CURRENT_SCAN_SHEET
     try:
-        if not (file.filename.endswith(".xlsx") or file.filename.endswith(".xls")):
+        original_name = os.path.basename(file.filename or "")
+        if not (original_name.endswith(".xlsx") or original_name.endswith(".xls")):
             return {"success": False, "error": "Chỉ chấp nhận file Excel (.xlsx, .xls)"}
 
-        save_path = os.path.join(EXCEL_DIR, file.filename)
+        save_path = safe_join(EXCEL_DIR, original_name)
+        if not save_path:
+            return {"success": False, "error": "Tên file không hợp lệ"}
+
         with open(save_path, "wb") as file_obj:
             content = await file.read()
             file_obj.write(content)
 
-        CURRENT_SELECTED_FILE = file.filename
-        CURRENT_SELECTED_SHEET = default_sheet_for_file(file.filename)
+        file_id = original_name.replace("\\", "/")
+        CURRENT_SELECTED_FILE = file_id
+        CURRENT_SELECTED_SHEET = default_sheet_for_file(file_id)
         CURRENT_SCAN_SHEET = CURRENT_SELECTED_SHEET
-        return {"success": True, "filename": file.filename, "sheet": CURRENT_SELECTED_SHEET, "scanSheet": CURRENT_SCAN_SHEET}
+        return {"success": True, "filename": file_id, "sheet": CURRENT_SELECTED_SHEET, "scanSheet": CURRENT_SCAN_SHEET}
     except Exception as error:
         return {"success": False, "error": str(error)}
 
@@ -884,4 +885,4 @@ async def websocket_endpoint(websocket: WebSocket):
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run(app, host="0.0.0.0", port=1231)
+    uvicorn.run(app, host="127.0.0.1", port=1231)

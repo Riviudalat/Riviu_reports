@@ -212,6 +212,60 @@ def load_channel_overrides(file_path):
     return overrides
 
 
+def safe_join(base_dir, relative_path):
+    """Resolve a relative path under base_dir; reject traversal outside base."""
+    if not relative_path:
+        return ""
+    normalized = str(relative_path).replace("\\", "/").lstrip("/")
+    if ".." in normalized.split("/"):
+        return ""
+    candidate = os.path.normpath(os.path.join(base_dir, normalized.replace("/", os.sep)))
+    base_abs = os.path.abspath(base_dir)
+    candidate_abs = os.path.abspath(candidate)
+    if candidate_abs != base_abs and not candidate_abs.startswith(base_abs + os.sep):
+        return ""
+    return candidate
+
+
+def metric_number(value):
+    if pd.isna(value) or value == "" or value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        return int(float(value))
+    raw_text = str(value).strip()
+    if not raw_text:
+        return 0
+    if re.fullmatch(r"\d{1,3}([.,]\d{3})+", raw_text):
+        return int(re.sub(r"[.,]", "", raw_text))
+    if re.fullmatch(r"\d+\.0+", raw_text):
+        return int(float(raw_text))
+    compact = re.sub(r"[,\s]", "", raw_text)
+    try:
+        return int(float(compact))
+    except ValueError:
+        try:
+            return int(float(value))
+        except (TypeError, ValueError):
+            return 0
+
+
+def format_metric(value):
+    if pd.isna(value) or value == "" or value is None:
+        return 0
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return int(number) if number.is_integer() else number
+    try:
+        number = float(value)
+        return int(number) if number.is_integer() else number
+    except (TypeError, ValueError):
+        return value
+
+
+def to_number(value):
+    return metric_number(value)
+
+
 def google_sheet_export_url(source_url):
     spreadsheet_id = parse_google_spreadsheet_id(source_url)
     return f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/export?format=xlsx"
@@ -257,6 +311,30 @@ def is_total_label(value):
 
 def is_tiktok_link(value):
     return "tiktok.com" in clean_text(value).casefold()
+
+
+def normalize_tiktok_url(value):
+    """Ensure TikTok URLs have a scheme so browsers can navigate them."""
+    text = clean_text(value)
+    if not text:
+        return ""
+    lower = text.casefold()
+    if "tiktok.com" not in lower and "vt.tiktok.com" not in lower:
+        return text
+    if lower.startswith("http://") or lower.startswith("https://"):
+        return text
+    if text.startswith("//"):
+        return f"https:{text}"
+    return f"https://{text.lstrip('/')}"
+
+
+def is_scrapable_tiktok_url(value):
+    """True when the cell value is a TikTok link row worth scraping (not TỔNG, not junk)."""
+    url = normalize_tiktok_url(value)
+    if not url or is_total_label(url):
+        return False
+    lower = url.casefold()
+    return "tiktok.com" in lower or "vt.tiktok.com" in lower
 
 
 def fill_preview_total_row(frame, link_column, metric_columns):
@@ -588,7 +666,7 @@ def build_workbook_rows(file_path, selected_partner=None, sheet_name=None):
                 if selected_key and not partners:
                     continue
 
-                link = clean_text(row.get(link_column, ""))
+                link = normalize_tiktok_url(row.get(link_column, ""))
                 if not link or is_total_label(link) or not is_tiktok_link(link):
                     continue
 
@@ -613,10 +691,26 @@ def build_workbook_rows(file_path, selected_partner=None, sheet_name=None):
         workbook.close()
 
 
-def list_workbook_partners(file_path, sheet_name=None):
+def is_exportable_report_row(row, *, apply_min_views=True, min_views=100):
+    if is_failed_channel_name(row.get("TÊN KÊNH", "")):
+        return False
+    if apply_min_views:
+        threshold = max(int(min_views or 0), 0)
+        if to_number(row.get("LƯỢT XEM", 0)) < threshold:
+            return False
+    return True
+
+
+def list_workbook_partners_with_link_counts(
+    file_path,
+    sheet_name=None,
+    *,
+    apply_min_views=True,
+    min_views=100,
+):
+    partner_stats = {}
     workbook = load_excel_file(file_path)
     try:
-        partners = []
         data_sheets = find_data_sheet_names_in_workbook(workbook)
         requested_sheet = clean_text(sheet_name)
         if requested_sheet:
@@ -627,10 +721,31 @@ def list_workbook_partners(file_path, sheet_name=None):
             if not partner_columns:
                 continue
             for _, row in frame.iterrows():
-                partners.extend(extract_row_partners(row, partner_columns))
-        return sorted(unique_preserve_order(partners), key=lambda value: value.casefold())
+                for partner in extract_row_partners(row, partner_columns):
+                    key = partner_dedup_key(partner)
+                    if key not in partner_stats:
+                        partner_stats[key] = {"name": partner, "linkCount": 0, "rawLinkCount": 0}
     finally:
         workbook.close()
+
+    if not partner_stats:
+        return []
+
+    for row in build_workbook_rows(file_path, sheet_name=sheet_name):
+        row_partners = row.get("partners") or []
+        for partner in row_partners:
+            key = partner_dedup_key(partner)
+            if key not in partner_stats:
+                continue
+            partner_stats[key]["rawLinkCount"] += 1
+            if is_exportable_report_row(row, apply_min_views=apply_min_views, min_views=min_views):
+                partner_stats[key]["linkCount"] += 1
+
+    return sorted(partner_stats.values(), key=lambda item: item["name"].casefold())
+
+
+def list_workbook_partners(file_path, sheet_name=None):
+    return [item["name"] for item in list_workbook_partners_with_link_counts(file_path, sheet_name=sheet_name)]
 
 
 def worksheet_headers(worksheet):
@@ -717,21 +832,6 @@ def worksheet_row_partners(worksheet, row_index, partner_columns):
     for value in values.values():
         partners.extend(split_partner_value(value))
     return unique_preserve_order(partners)
-
-
-def to_number(value):
-    if value is None or value == "":
-        return 0
-    if isinstance(value, (int, float)):
-        return int(value)
-    text = clean_text(value)
-    if not text:
-        return 0
-    compact = re.sub(r"[,\s]", "", text)
-    try:
-        return int(float(compact))
-    except ValueError:
-        return 0
 
 
 def is_failed_channel_name(value):

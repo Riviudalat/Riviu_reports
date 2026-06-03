@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Reports</title>
+    <title>Riviu Reports</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">
     <style>
@@ -37,6 +37,10 @@
         .stat-card .value { font-size: 28px; font-weight: 700; color: #111827; }
 
         .progress-section { background: #fff; padding: 20px; border-radius: 12px; margin-bottom: 25px; box-shadow: 0 2px 4px rgba(0,0,0,0.05); }
+        .progress-meta { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+        .progress-status { font-size: 14px; font-weight: 700; white-space: nowrap; }
+        .progress-status.success { color: #16a34a; }
+        .progress-status.cancelled { color: #dc2626; }
         .progress-bar { height: 12px; background: #e5e7eb; border-radius: 6px; overflow: hidden; margin-bottom: 12px; }
         .progress-fill { height: 100%; background: linear-gradient(90deg, #ff6b00, #ff8a2a); width: 0%; transition: width 0.5s ease-out; }
 
@@ -65,7 +69,7 @@
         .google-action-row { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; justify-content: space-between; }
         .google-action-row .scan-setting { flex: 0 1 auto; }
         .google-action-row .btn { justify-content: center; white-space: nowrap; flex: 0 1 auto; min-width: 118px; }
-        .google-login-btn { min-width: 132px; max-width: 100%; }
+        .google-login-btn { min-width: 132px; max-width: 100%; justify-content: center; text-align: center; }
 
         .upload-zone { border: 2px dashed #ff8a2a; border-radius: 12px; padding: 16px; text-align: center; cursor: pointer; transition: 0.2s; height: auto; min-height: 110px; display: flex; flex-direction: column; justify-content: center; align-items: center; background: #fcfdff; }
         .upload-zone:hover { background: #fff7ed; border-color: #2563eb; }
@@ -141,7 +145,8 @@
         .partner-item:last-child { border-bottom: none; }
         .partner-item:hover { background: #f8fafc; }
         .partner-item input { width: 18px; height: 18px; accent-color: #ff6b00; }
-        .partner-name { font-weight: 600; color: #1f2937; }
+        .partner-name { flex: 1; font-weight: 600; color: #1f2937; }
+        .partner-link-status { margin-left: auto; font-size: 12px; font-weight: 500; color: #9ca3af; white-space: nowrap; }
         .report-summary { margin-top: 12px; color: #4b5563; font-size: 13px; font-weight: 600; }
         .modal-footer { padding: 16px 24px; border-top: 1px solid #e5e7eb; display: flex; justify-content: flex-end; gap: 10px; background: #f9fafb; flex-wrap: wrap; }
         .empty-state { padding: 34px 20px; text-align: center; color: #6b7280; font-weight: 600; }
@@ -210,8 +215,9 @@
 
         <div class="progress-section">
             <div class="progress-bar"><div class="progress-fill" id="progressBar"></div></div>
-            <div style="display:flex; justify-content:space-between; align-items:center">
+            <div class="progress-meta">
                 <span id="progressText" style="font-size:14px; color:#4b5563; font-weight:500">Sẵn sàng chờ lệnh...</span>
+                <span id="progressStatus" class="progress-status"></span>
             </div>
         </div>
 
@@ -396,7 +402,7 @@
                 <div class="report-toolbar">
                     <label class="scan-setting report-sheet-setting">
                         <span>Chọn sheet</span>
-                        <select id="reportSheetSelect" class="sheet-select" onchange="loadReportPartners(this.value)"></select>
+                        <select id="reportSheetSelect" class="sheet-select"></select>
                     </label>
                     <input class="search-input" id="partnerSearch" type="search" placeholder="Tìm đối tác..." oninput="renderPartnerList()">
                     <button class="btn btn-outline btn-compact" onclick="selectAllPartners()">Chọn tất cả</button>
@@ -432,7 +438,7 @@
             <div class="modal-header">
                 <div>
                     <div class="modal-title" id="historyModalTitle">Lịch sử quét</div>
-                    <div class="modal-subtitle" id="historyModalSubtitle">Tổng số liệu sau mỗi lần cập nhật.</div>
+                    <div class="modal-subtitle" id="historyModalSubtitle">Số liệu theo từng phiên quét (link và metrics của các dòng đã quét).</div>
                 </div>
             </div>
             <div class="modal-body">
@@ -443,8 +449,9 @@
                                 <th style="text-align:left">Thời gian</th>
                                 <th style="text-align:left">File</th>
                                 <th style="text-align:left">Tên sheet</th>
-                                <th style="text-align:right">Tổng link</th>
-                                <th style="text-align:right">Tổng view</th>
+                                <th style="text-align:right">Link đã quét</th>
+                                <th style="text-align:right">Dòng xử lý</th>
+                                <th style="text-align:right">View (phiên)</th>
                                 <th style="text-align:right">Tim</th>
                                 <th style="text-align:right">Bình luận</th>
                                 <th style="text-align:right">Lưu</th>
@@ -453,7 +460,7 @@
                             </tr>
                         </thead>
                         <tbody id="historyBody">
-                            <tr><td colspan="10" style="text-align:center; padding:32px; color:#9ca3af">Đang tải lịch sử...</td></tr>
+                            <tr><td colspan="11" style="text-align:center; padding:32px; color:#9ca3af">Đang tải lịch sử...</td></tr>
                         </tbody>
                     </table>
                 </div>
@@ -471,6 +478,7 @@
         let ws;
         let reportPartners = [];
         let reportSheetName = '';
+        let reportSheetUpdating = false;
         let selectedPartners = new Set();
         let failedLinks = [];
         let currentSheetName = '';
@@ -1084,6 +1092,9 @@
             startBtn.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> ĐANG QUÉT...';
             document.getElementById('dataFeed').innerHTML = '';
             clearFailedLinks(false);
+            const statusEl = document.getElementById('progressStatus');
+            statusEl.textContent = '';
+            statusEl.className = 'progress-status';
         }
 
         function cancelScraping() {
@@ -1097,8 +1108,42 @@
             addLog('Đã gửi lệnh hủy quét.');
         }
 
+        function reportFilterParams() {
+            const applyMinViews = document.getElementById('minViewToggle')?.checked ?? true;
+            const minViewsRaw = parseInt(document.getElementById('minViewInput')?.value, 10);
+            const minViews = Number.isFinite(minViewsRaw) && minViewsRaw >= 0 ? minViewsRaw : 100;
+            return { applyMinViews, minViews };
+        }
+
+        function normalizeReportPartners(raw) {
+            return (raw || []).map(item => {
+                if (typeof item === 'string') return { name: item, linkCount: null, rawLinkCount: null };
+                const linkCount = Number(item.linkCount);
+                const rawLinkCount = Number(item.rawLinkCount);
+                return {
+                    name: String(item.name || '').trim(),
+                    linkCount: Number.isFinite(linkCount) ? linkCount : 0,
+                    rawLinkCount: Number.isFinite(rawLinkCount) ? rawLinkCount : 0,
+                };
+            }).filter(item => item.name);
+        }
+
+        function partnerShowsNoLinkStatus(item) {
+            if (item.linkCount !== null && item.linkCount !== undefined) {
+                return item.linkCount <= 0;
+            }
+            if (item.rawLinkCount !== null && item.rawLinkCount !== undefined) {
+                return item.rawLinkCount <= 0;
+            }
+            return false;
+        }
+
+        function partnerNamesFromSelection() {
+            return reportPartners.filter(item => selectedPartners.has(item.name)).map(item => item.name);
+        }
+
         async function refreshPartnerLinks() {
-            const partners = reportPartners.filter(name => selectedPartners.has(name));
+            const partners = partnerNamesFromSelection();
             if (partners.length === 0) {
                 addLog('Hãy chọn ít nhất 1 đối tác để cập nhật lại link.');
                 return;
@@ -1142,6 +1187,20 @@
                 parts.push(`còn ~${formatDuration(data.etaSeconds)}`);
             }
             document.getElementById('progressText').textContent = parts.join(' • ');
+
+            const statusEl = document.getElementById('progressStatus');
+            if (data.done || (data.processed === data.total && data.total > 0)) {
+                if (data.cancelled) {
+                    statusEl.textContent = 'Đã huỷ';
+                    statusEl.className = 'progress-status cancelled';
+                } else {
+                    statusEl.textContent = 'Thành công';
+                    statusEl.className = 'progress-status success';
+                }
+            } else {
+                statusEl.textContent = '';
+                statusEl.className = 'progress-status';
+            }
 
             if (data.done || (data.processed === data.total && data.total > 0)) {
                 startBtn.disabled = false;
@@ -1260,14 +1319,31 @@
             await loadReportPartners();
         }
 
+        function resolveReportSheets(data = {}) {
+            if (Array.isArray(data.sheets) && data.sheets.length) {
+                return filterDataSheets(data.sheets);
+            }
+            if (Array.isArray(data.allSheets) && data.allSheets.length) {
+                return filterDataSheets(data.allSheets);
+            }
+            return sheetsFromScanSelect();
+        }
+
+        function sheetsFromScanSelect() {
+            return Array.from(scanSheetSelect.options).map(option => option.value).filter(Boolean);
+        }
+
         function renderReportSheetOptions(sheets, selectedSheet = '') {
             const select = document.getElementById('reportSheetSelect');
             if (!select) return;
             const validSheets = filterDataSheets(sheets);
+            reportSheetUpdating = true;
             select.innerHTML = '';
             if (validSheets.length === 0) {
                 select.innerHTML = '<option value="">Không có sheet</option>';
+                reportSheetName = '';
                 select.disabled = true;
+                reportSheetUpdating = false;
                 return;
             }
             const currentValue = selectedSheet && validSheets.includes(selectedSheet)
@@ -1282,12 +1358,18 @@
             });
             reportSheetName = select.value;
             select.disabled = false;
+            reportSheetUpdating = false;
         }
 
         async function loadReportPartners(sheetName = '') {
             const list = document.getElementById('partnerList');
             const requestedSheet = sheetName || reportSheetName || document.getElementById('reportSheetSelect')?.value || '';
-            const query = requestedSheet ? `?sheet_name=${encodeURIComponent(requestedSheet)}` : '';
+            const { applyMinViews, minViews } = reportFilterParams();
+            const params = new URLSearchParams();
+            if (requestedSheet) params.set('sheet_name', requestedSheet);
+            params.set('apply_min_views', applyMinViews ? 'true' : 'false');
+            params.set('min_views', String(minViews));
+            const query = params.toString() ? `?${params.toString()}` : '';
             list.innerHTML = '<div class="empty-state">Đang tải danh sách đối tác...</div>';
             selectedPartners = new Set();
             updateReportSummary();
@@ -1295,12 +1377,19 @@
                 const res = await fetch(`/report-partners${query}`);
                 const data = await res.json();
                 if (!res.ok) throw new Error(data.error || 'Không tải được danh sách đối tác');
-                renderReportSheetOptions(data.sheets || [], data.currentSheet || requestedSheet);
-                reportPartners = data.partners || [];
-                reportSheetName = data.currentSheet || reportSheetName;
+                const sheetList = resolveReportSheets(data);
+                const activeSheet = data.currentSheet || data.dataSheet || requestedSheet || sheetList[0] || '';
+                renderReportSheetOptions(sheetList, activeSheet);
+                reportPartners = normalizeReportPartners(data.partners);
+                reportSheetName = activeSheet || reportSheetName;
                 document.getElementById('reportModalSubtitle').textContent = `${data.fileLabel || data.file} • ${reportSheetName || '—'} • ${reportPartners.length} đối tác`;
                 renderPartnerList();
             } catch (error) {
+                const fallbackSheets = sheetsFromScanSelect();
+                if (fallbackSheets.length) {
+                    renderReportSheetOptions(fallbackSheets, requestedSheet || fallbackSheets[0]);
+                    reportSheetName = document.getElementById('reportSheetSelect')?.value || reportSheetName;
+                }
                 list.innerHTML = `<div class="empty-state">${escapeHtml(error.message)}</div>`;
                 addLog(`Lỗi: ${error.message}`);
             }
@@ -1342,25 +1431,28 @@
         async function loadScrapeHistory() {
             const body = document.getElementById('historyBody');
             const subtitle = document.getElementById('historyModalSubtitle');
-            body.innerHTML = '<tr><td colspan="10" style="text-align:center; padding:32px; color:#9ca3af">Đang tải lịch sử...</td></tr>';
+            body.innerHTML = '<tr><td colspan="11" style="text-align:center; padding:32px; color:#9ca3af">Đang tải lịch sử...</td></tr>';
             try {
                 const res = await fetch('/scrape-history?limit=50');
                 const data = await res.json();
                 if (!res.ok) throw new Error(data.error || 'Không tải được lịch sử');
                 const history = Array.isArray(data.history) ? data.history : [];
                 if (history.length === 0) {
-                    body.innerHTML = '<tr><td colspan="10" style="text-align:center; padding:32px; color:#9ca3af">Chưa có phiên quét nào.</td></tr>';
+                    body.innerHTML = '<tr><td colspan="11" style="text-align:center; padding:32px; color:#9ca3af">Chưa có phiên quét nào.</td></tr>';
                     subtitle.textContent = 'Chưa có phiên quét nào.';
                     return;
                 }
                 subtitle.textContent = `${history.length} phiên gần nhất`;
                 body.innerHTML = history.map(entry => {
+                    const linksScanned = entry.scrapedUrls ?? entry.scrapedRows ?? entry.totalLinks ?? 0;
+                    const rowsScanned = entry.scrapedRows ?? linksScanned;
                     return `
                         <tr>
                             <td>${escapeHtml(entry.timestamp || '')}</td>
                             <td>${escapeHtml(entry.fileLabel || '')}</td>
                             <td>${escapeHtml(entry.scanSheet || '—')}</td>
-                            <td style="text-align:right">${formatNumber(entry.totalLinks || 0)}</td>
+                            <td style="text-align:right">${formatNumber(linksScanned)}</td>
+                            <td style="text-align:right">${formatNumber(rowsScanned)}</td>
                             <td style="text-align:right">${formatNumber(entry.totalViews || 0)}</td>
                             <td style="text-align:right">${formatNumber(entry.totalLikes || 0)}</td>
                             <td style="text-align:right">${formatNumber(entry.totalComments || 0)}</td>
@@ -1371,7 +1463,7 @@
                     `;
                 }).join('');
             } catch (error) {
-                body.innerHTML = `<tr><td colspan="10" style="text-align:center; padding:32px; color:#dc2626">${escapeHtml(error.message)}</td></tr>`;
+                body.innerHTML = `<tr><td colspan="11" style="text-align:center; padding:32px; color:#dc2626">${escapeHtml(error.message)}</td></tr>`;
                 subtitle.textContent = 'Không tải được lịch sử.';
             }
         }
@@ -1380,7 +1472,7 @@
             const list = document.getElementById('partnerList');
             const searchValue = document.getElementById('partnerSearch').value.trim().toLowerCase();
             const visiblePartners = reportPartners
-                .map((name, index) => ({ name, index }))
+                .map((partner, index) => ({ ...partner, index }))
                 .filter(item => item.name.toLowerCase().includes(searchValue));
 
             if (visiblePartners.length === 0) {
@@ -1393,13 +1485,14 @@
                 <label class="partner-item">
                     <input class="partner-checkbox" type="checkbox" data-index="${item.index}" ${selectedPartners.has(item.name) ? 'checked' : ''}>
                     <span class="partner-name">${escapeHtml(item.name)}</span>
+                    ${partnerShowsNoLinkStatus(item) ? '<span class="partner-link-status">Chưa có link</span>' : ''}
                 </label>
             `).join('');
             updateReportSummary();
         }
 
         function selectAllPartners() {
-            selectedPartners = new Set(reportPartners);
+            selectedPartners = new Set(reportPartners.map(item => item.name));
             renderPartnerList();
         }
 
@@ -1441,7 +1534,7 @@
         }
 
         async function exportPartnerReport() {
-            const partners = reportPartners.filter(name => selectedPartners.has(name));
+            const partners = partnerNamesFromSelection();
             if (partners.length === 0) {
                 addLog('Vui lòng chọn ít nhất một đối tác để xuất báo cáo.');
                 return;
@@ -1500,14 +1593,30 @@
             const input = document.getElementById('minViewInput');
             input.disabled = !event.target.checked;
             input.style.opacity = event.target.checked ? '1' : '0.5';
+            if (document.getElementById('reportModal').classList.contains('active')) {
+                loadReportPartners();
+            }
+        });
+
+        document.getElementById('minViewInput').addEventListener('change', () => {
+            if (document.getElementById('reportModal').classList.contains('active')) {
+                loadReportPartners();
+            }
+        });
+
+        document.getElementById('reportSheetSelect').addEventListener('change', (event) => {
+            if (reportSheetUpdating) return;
+            const sheetName = event.target.value;
+            if (!sheetName) return;
+            loadReportPartners(sheetName);
         });
 
         document.getElementById('partnerList').addEventListener('change', (event) => {
             if (!event.target.classList.contains('partner-checkbox')) return;
             const partner = reportPartners[Number(event.target.dataset.index)];
             if (!partner) return;
-            if (event.target.checked) selectedPartners.add(partner);
-            else selectedPartners.delete(partner);
+            if (event.target.checked) selectedPartners.add(partner.name);
+            else selectedPartners.delete(partner.name);
             updateReportSummary();
         });
 
