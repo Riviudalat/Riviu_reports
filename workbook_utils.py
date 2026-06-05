@@ -1,8 +1,10 @@
+import html
+import json
 import os
 import re
 import unicodedata
 import urllib.request
-import json
+from datetime import datetime
 from typing import Iterable
 from urllib.parse import urlparse
 
@@ -18,14 +20,18 @@ GOOGLE_SHEET_LABEL = "Google Sheet chính"
 GOOGLE_SHEET_REGISTRY_FILENAME = "google_sheet_sources.json"
 REPORT_COLUMNS = ["NGÀY AIR", "TÊN KÊNH", "LINK AIR", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"]
 SUMMARY_SHEET_NAME = "Tổng kết"
+SUMMARY_SHEET_TITLE_PREFIX = "Tổng kết "
 LAST_UPDATE_COLUMN = "Cập nhật lần cuối"
 SUMMARY_COLUMNS = ["Stt", "ĐỐI TÁC", "TỔNG LINK", "TỔNG LƯỢT XEM", "TỔNG TIM", "TỔNG BÌNH LUẬN", "TỔNG LƯỢT LƯU", "TỔNG CHIA SẺ", LAST_UPDATE_COLUMN]
+SUMMARY_TOTAL_LABEL = "TỔNG"
 METRIC_COLUMNS = ["LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"]
 SUMMARY_METRIC_COLUMNS = ["TỔNG LƯỢT XEM", "TỔNG TIM", "TỔNG BÌNH LUẬN", "TỔNG LƯỢT LƯU", "TỔNG CHIA SẺ"]
 PARTNER_HEADING_MARKERS = ("DANH SÁCH", "DANH SACH", "BỘ ẢNH", "BO ANH")
 CHANNEL_OVERRIDE_FILENAME = "channel_name_overrides.json"
 DEFAULT_CHANNEL_OVERRIDES = {}
 RESULT_SHEET_PREFIX = "report seeding tiktok"
+DISPLAY_DATETIME_FORMAT = "%d/%m/%Y-%H:%M"
+FILENAME_DATETIME_FORMAT = "%d-%m-%Y-%H-%M"
 
 
 def ensure_data_dir(base_dir):
@@ -72,12 +78,20 @@ def is_generated_username_channel(value, link=""):
 
 def is_generic_tiktok_channel_name(value):
     key = normalize_key(value)
-    return key in {
+    if key in {
         "tiktok",
         "make your day",
         "tiktok make your day",
         "tiktok - make your day",
-    } or ("tiktok" in key and "make your day" in key)
+        "screen time breaks",
+        "screen time break",
+    }:
+        return True
+    if "tiktok" in key and "make your day" in key:
+        return True
+    if "screen time" in key:
+        return True
+    return False
 
 
 def display_channel_name_from_file(link, raw_channel):
@@ -130,8 +144,98 @@ def google_sheet_file_id(spreadsheet_id):
     return f"{DATA_DIR_NAME}/{GOOGLE_SHEET_FILENAME_PREFIX}{safe_id}.xlsx"
 
 
+def safe_workbook_filename(name, *, max_length=80):
+    filename = re.sub(r'[\\/:*?"<>|]+', "-", clean_text(name))
+    filename = re.sub(r"\s+", " ", filename).strip(" .")
+    return filename[:max_length] if filename else "google-sheet"
+
+
+def fetch_google_spreadsheet_title(source_url):
+    spreadsheet_id = parse_google_spreadsheet_id(source_url)
+    view_url = f"https://docs.google.com/spreadsheets/d/{spreadsheet_id}/edit"
+    request = urllib.request.Request(view_url, headers={"User-Agent": "Mozilla/5.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=20) as response:
+            page_html = response.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return f"Google Sheet {spreadsheet_id[:12]}"
+
+    for pattern in (
+        r'<meta[^>]+property=["\']og:title["\'][^>]+content=["\']([^"\']+)',
+        r'<meta[^>]+content=["\']([^"\']+)["\'][^>]+property=["\']og:title["\']',
+        r"<title[^>]*>([^<]+)</title>",
+    ):
+        match = re.search(pattern, page_html, flags=re.IGNORECASE)
+        if not match:
+            continue
+        title = clean_text(html.unescape(match.group(1)))
+        title = re.sub(r"\s*-\s*Google Sheets\s*$", "", title, flags=re.IGNORECASE)
+        title = re.sub(r"\s*-\s*Google Trang tính\s*$", "", title, flags=re.IGNORECASE)
+        if title:
+            return title
+    return f"Google Sheet {spreadsheet_id[:12]}"
+
+
+def format_display_datetime(moment=None):
+    value = moment or datetime.now()
+    return value.strftime(DISPLAY_DATETIME_FORMAT)
+
+
+def format_filename_datetime(moment=None):
+    value = moment or datetime.now()
+    return value.strftime(FILENAME_DATETIME_FORMAT)
+
+
+def format_excel_sheet_datetime(moment=None):
+    return format_filename_datetime(moment)
+
+
+def parse_filename_datetime_stamp(stamp):
+    text = clean_text(stamp)
+    match = re.fullmatch(r"(\d{2})-(\d{2})-(\d{4})-(\d{2})-(\d{2})", text)
+    if not match:
+        return text
+    day, month, year, hour, minute = match.groups()
+    return f"{day}/{month}/{year}-{hour}:{minute}"
+
+
+def google_sheet_sync_timestamp_display(moment=None):
+    return format_display_datetime(moment)
+
+
+def google_sheet_sync_timestamp_filename(moment=None):
+    return format_filename_datetime(moment)
+
+
+def google_sheet_sync_label(title, timestamp_display=None):
+    sheet_title = clean_text(title)
+    stamp = clean_text(timestamp_display or google_sheet_sync_timestamp_display())
+    return f"{sheet_title} {stamp}".strip()
+
+
+def google_sheet_file_id_from_title(title, timestamp):
+    safe_title = safe_workbook_filename(title)
+    safe_stamp = safe_workbook_filename(timestamp, max_length=20)
+    return f"{DATA_DIR_NAME}/{safe_title} {safe_stamp}.xlsx"
+
+
+def google_sheet_filename_to_label(filename):
+    base = clean_text(str(filename or "")).removesuffix(".xlsx")
+    match = re.fullmatch(r"(.+?) (\d{2})-(\d{2})-(\d{4})-(\d{2})-(\d{2})", base)
+    if match:
+        title = match.group(1)
+        stamp = base[len(title) + 1 :]
+        return f"{title} {parse_filename_datetime_stamp(stamp)}"
+    legacy = re.fullmatch(r"(.+?)-(\d{2})-(\d{2})-(\d{4})-(\d{2})-(\d{2})", base)
+    if legacy:
+        title = legacy.group(1)
+        stamp = "-".join(legacy.groups()[1:])
+        return f"{title} {parse_filename_datetime_stamp(stamp)}"
+    return base
+
+
 def timestamped_google_sheet_file_id(timestamp):
-    return f"{DATA_DIR_NAME}/Report Seeding Tiktok-{timestamp}.xlsx"
+    return google_sheet_file_id_from_title("Report Seeding Tiktok", timestamp)
 
 
 def google_sheet_registry_path(base_dir):
@@ -156,11 +260,12 @@ def save_google_sheet_registry(base_dir, registry):
         json.dump(registry, file_obj, ensure_ascii=False, indent=2)
 
 
-def register_google_sheet_source(base_dir, file_id, source_url):
+def register_google_sheet_source(base_dir, file_id, source_url, title=""):
     registry = load_google_sheet_registry(base_dir)
     registry[file_id] = {
         "url": clean_text(source_url),
         "spreadsheetId": parse_google_spreadsheet_id(source_url),
+        "title": clean_text(title),
     }
     save_google_sheet_registry(base_dir, registry)
     return registry[file_id]
@@ -297,8 +402,38 @@ def read_sheet_frame(file_path, sheet_name):
     return pd.read_excel(file_path, sheet_name=sheet_name, engine="openpyxl")
 
 
+def summary_sheet_title_for_data_sheet(data_sheet_name):
+    """Build Excel tab title for a data sheet's partner summary (e.g. Tháng 6 → Tổng kết tháng 6)."""
+    label = clean_text(data_sheet_name).casefold()
+    if not label:
+        return SUMMARY_SHEET_NAME
+    return f"{SUMMARY_SHEET_TITLE_PREFIX}{label}"[:31]
+
+
+def data_sheet_name_for_summary_title(workbook_sheet_names, summary_sheet_name):
+    """Resolve the source data sheet name from a per-sheet summary tab title."""
+    text = clean_text(summary_sheet_name)
+    if normalize_key(text) == normalize_key(SUMMARY_SHEET_NAME):
+        return ""
+    prefix_folded = SUMMARY_SHEET_TITLE_PREFIX.casefold()
+    if not text.casefold().startswith(prefix_folded):
+        return ""
+    suffix = text[len(SUMMARY_SHEET_TITLE_PREFIX) :].strip()
+    if not suffix:
+        return ""
+    for candidate in workbook_sheet_names:
+        if is_summary_sheet_name(candidate) or is_result_sheet_name(candidate):
+            continue
+        if clean_text(candidate).casefold() == suffix:
+            return candidate
+    return ""
+
+
 def is_summary_sheet_name(sheet_name):
-    return normalize_key(sheet_name) == normalize_key(SUMMARY_SHEET_NAME)
+    sheet_key = normalize_key(sheet_name)
+    if sheet_key == normalize_key(SUMMARY_SHEET_NAME):
+        return True
+    return sheet_key.startswith(normalize_key(SUMMARY_SHEET_TITLE_PREFIX))
 
 
 def is_result_sheet_name(sheet_name):
@@ -401,7 +536,7 @@ def read_sheet_preview(file_path, sheet_name=None, limit=None):
         ]
         frame = fill_missing_dates_from_previous(frame, date_column, link_column)
         for column in frame.select_dtypes(include=["datetime"]).columns:
-            frame[column] = frame[column].dt.strftime("%Y-%m-%d %H:%M:%S")
+            frame[column] = frame[column].dt.strftime(DISPLAY_DATETIME_FORMAT)
         frame = fill_preview_total_row(frame, link_column, metric_columns)
 
         preview_frame = frame
@@ -446,19 +581,31 @@ def read_sheet_preview(file_path, sheet_name=None, limit=None):
         workbook.close()
 
 
-def read_summary_dashboard(file_path):
+def read_summary_dashboard(file_path, data_sheet_name=None):
     workbook = load_excel_file(file_path)
     try:
-        summary_sheet = next((sheet for sheet in workbook.sheet_names if is_summary_sheet_name(sheet)), "")
+        sheet_names = list(workbook.sheet_names)
+        requested_data_sheet = clean_text(data_sheet_name)
+        if requested_data_sheet:
+            summary_sheet = summary_sheet_title_for_data_sheet(requested_data_sheet)
+            if summary_sheet not in sheet_names:
+                summary_sheet = ""
+        else:
+            summary_sheet = next((sheet for sheet in sheet_names if is_summary_sheet_name(sheet)), "")
         if not summary_sheet:
+            label = requested_data_sheet or "sheet này"
             return {
                 "sheet": "",
+                "dataSheet": requested_data_sheet,
                 "columns": SUMMARY_COLUMNS,
                 "rows": [],
                 "totals": {},
-                "message": "Workbook chưa có sheet Tổng kết.",
+                "message": f"Workbook chưa có tổng kết cho {label}. Quét sheet đó để tạo.",
             }
 
+        resolved_data_sheet = requested_data_sheet or data_sheet_name_for_summary_title(
+            sheet_names, summary_sheet
+        )
         frame = workbook.parse(summary_sheet).fillna("")
     finally:
         workbook.close()
@@ -482,9 +629,17 @@ def read_summary_dashboard(file_path):
         for item in SUMMARY_COLUMNS
         if normalize_key(item) not in {"doi tac", normalize_key(LAST_UPDATE_COLUMN)}
     }
+    totals_row = None
     for record in frame.to_dict(orient="records"):
         partner_name = clean_text(record.get(partner_column or "", ""))
         if not partner_name:
+            continue
+        if is_total_label(partner_name):
+            totals_row = {}
+            for column in columns:
+                value = record.get(column, "")
+                totals_row[column] = to_number(value) if normalize_key(column) in numeric_summary_keys else clean_text(value)
+            totals_row.setdefault(LAST_UPDATE_COLUMN, "")
             continue
         row = {}
         for column in columns:
@@ -508,8 +663,20 @@ def read_summary_dashboard(file_path):
             if column:
                 totals[key] += to_number(row.get(column, 0))
 
+    if totals_row:
+        totals = {
+            "partners": len(rows),
+            "links": to_number(totals_row.get(total_link_column, 0)) if total_link_column else totals["links"],
+            "views": to_number(totals_row.get(summary_metric_map["views"], 0)) if summary_metric_map["views"] else totals["views"],
+            "likes": to_number(totals_row.get(summary_metric_map["likes"], 0)) if summary_metric_map["likes"] else totals["likes"],
+            "comments": to_number(totals_row.get(summary_metric_map["comments"], 0)) if summary_metric_map["comments"] else totals["comments"],
+            "saves": to_number(totals_row.get(summary_metric_map["saves"], 0)) if summary_metric_map["saves"] else totals["saves"],
+            "shares": to_number(totals_row.get(summary_metric_map["shares"], 0)) if summary_metric_map["shares"] else totals["shares"],
+        }
+
     return {
         "sheet": summary_sheet,
+        "dataSheet": resolved_data_sheet,
         "columns": columns,
         "rows": rows,
         "totals": totals,
@@ -800,8 +967,9 @@ def workbook_data_sheet_names(workbook):
     ]
 
 
-def result_sheet_display_name(timestamp_text):
-    return f"Report Seeding Tiktok {timestamp_text}"
+def result_sheet_display_name(timestamp_text=None):
+    stamp = clean_text(timestamp_text) or format_excel_sheet_datetime()
+    return f"Report Seeding Tiktok {stamp}"[:31]
 
 
 def worksheet_partner_column_indexes(worksheet):
@@ -885,11 +1053,22 @@ def normalize_selected_partner_keys(selected_partner=None, selected_partners=Non
     return {clean_text(value).casefold() for value in values if clean_text(value)}
 
 
-def build_partner_summary_rows(workbook, summary_update_time="", selected_partner=None, selected_partners=None, previous_updates=None):
+def build_partner_summary_rows(
+    workbook,
+    summary_update_time="",
+    selected_partner=None,
+    selected_partners=None,
+    previous_updates=None,
+    data_sheet_name=None,
+):
     selected_keys = normalize_selected_partner_keys(selected_partner, selected_partners)
     previous_updates = previous_updates or {}
     summary = {}
-    for sheet_name in workbook_data_sheet_names(workbook):
+    data_sheets = workbook_data_sheet_names(workbook)
+    requested_sheet = clean_text(data_sheet_name)
+    if requested_sheet:
+        data_sheets = [requested_sheet] if requested_sheet in workbook.sheetnames else []
+    for sheet_name in data_sheets:
         worksheet = workbook[sheet_name]
         link_column = worksheet_find_link_column_index(worksheet)
         if not link_column:
@@ -961,17 +1140,78 @@ def build_partner_summary_rows(workbook, summary_update_time="", selected_partne
     return result
 
 
-def rebuild_summary_sheet(workbook, summary_update_time="", selected_partner=None, selected_partners=None):
-    summary_sheet = next((name for name in workbook.sheetnames if is_summary_sheet_name(name)), None)
-    existing_worksheet = workbook[summary_sheet] if summary_sheet else None
+def _summary_row_metric_sums(partner_rows):
+    sums = {}
+    for row in partner_rows:
+        for column, value in row.items():
+            column_key = normalize_key(column)
+            if column_key in {"stt", normalize_key(LAST_UPDATE_COLUMN)} or column_key.startswith("doi tac"):
+                continue
+            sums[column_key] = sums.get(column_key, 0) + to_number(value)
+    return sums
+
+
+def build_summary_totals_row(partner_rows):
+    metric_sums = _summary_row_metric_sums(partner_rows)
+    totals = {
+        "Stt": "",
+        "ĐỐI TÁC": SUMMARY_TOTAL_LABEL,
+        "TỔNG LINK": 0,
+        "TỔNG LƯỢT XEM": 0,
+        "TỔNG TIM": 0,
+        "TỔNG BÌNH LUẬN": 0,
+        "TỔNG LƯỢT LƯU": 0,
+        "TỔNG CHIA SẺ": 0,
+        LAST_UPDATE_COLUMN: "",
+    }
+    for header, value in totals.items():
+        header_key = normalize_key(header)
+        if header_key in metric_sums:
+            totals[header] = metric_sums[header_key]
+    return totals
+
+
+def build_summary_totals_row_aligned(columns, partner_rows):
+    metric_sums = _summary_row_metric_sums(partner_rows)
+    aligned = {}
+    for column in columns:
+        column_key = normalize_key(column)
+        if column_key == "stt":
+            aligned[column] = ""
+        elif column_key.startswith("doi tac"):
+            aligned[column] = SUMMARY_TOTAL_LABEL
+        elif column_key == normalize_key(LAST_UPDATE_COLUMN):
+            aligned[column] = ""
+        else:
+            aligned[column] = metric_sums.get(column_key, 0)
+    return aligned
+
+
+def rebuild_summary_sheet(
+    workbook,
+    summary_update_time="",
+    selected_partner=None,
+    selected_partners=None,
+    data_sheet_name=None,
+):
+    source_sheet = clean_text(data_sheet_name)
+    if not source_sheet or source_sheet not in workbook.sheetnames:
+        return 0
+
+    summary_sheet = summary_sheet_title_for_data_sheet(source_sheet)
+    existing_worksheet = workbook[summary_sheet] if summary_sheet in workbook.sheetnames else None
     previous_updates = read_existing_summary_updates(existing_worksheet)
-    if summary_sheet:
+    insert_index = workbook.sheetnames.index(source_sheet) + 1
+    if summary_sheet in workbook.sheetnames:
         worksheet = workbook[summary_sheet]
         worksheet.delete_rows(1, max(worksheet.max_row or 1, 1))
-        if worksheet.title != SUMMARY_SHEET_NAME:
-            worksheet.title = SUMMARY_SHEET_NAME
+        if worksheet.title != summary_sheet:
+            worksheet.title = summary_sheet
+        current_index = workbook.sheetnames.index(summary_sheet)
+        if current_index != insert_index:
+            workbook.move_sheet(worksheet, offset=insert_index - current_index)
     else:
-        worksheet = workbook.create_sheet(SUMMARY_SHEET_NAME)
+        worksheet = workbook.create_sheet(summary_sheet, insert_index)
 
     rows = build_partner_summary_rows(
         workbook,
@@ -979,6 +1219,7 @@ def rebuild_summary_sheet(workbook, summary_update_time="", selected_partner=Non
         selected_partner=selected_partner,
         selected_partners=selected_partners,
         previous_updates=previous_updates,
+        data_sheet_name=source_sheet,
     )
     header_fill = PatternFill("solid", fgColor="0B5ED7")
     for column_index, header in enumerate(SUMMARY_COLUMNS, start=1):
@@ -998,8 +1239,9 @@ def rebuild_summary_sheet(workbook, summary_update_time="", selected_partner=Non
                 cell.number_format = "#,##0"
                 cell.alignment = Alignment(horizontal="right")
 
+    last_row = max(len(rows) + 1, 1)
     worksheet.freeze_panes = "A2"
-    worksheet.auto_filter.ref = f"A1:{get_column_letter(len(SUMMARY_COLUMNS))}{max(len(rows) + 1, 1)}"
+    worksheet.auto_filter.ref = f"A1:{get_column_letter(len(SUMMARY_COLUMNS))}{last_row}"
     widths = [8, 38, 12, 16, 12, 16, 16, 14, 20]
     for index, width in enumerate(widths, start=1):
         worksheet.column_dimensions[get_column_letter(index)].width = width
@@ -1021,15 +1263,17 @@ def workbook_file_entries(base_dir):
                 "source": "local",
             })
 
+    registry = load_google_sheet_registry(base_dir)
     for filename in os.listdir(data_dir):
         if filename.startswith("~$"):
             continue
         if filename.endswith(".xlsx") or filename.endswith(".xls"):
             relative_id = f"{DATA_DIR_NAME}/{filename}".replace("\\", "/")
-            if filename.startswith("Report Seeding Tiktok-"):
-                label = filename.removesuffix(".xlsx")
+            source = registry.get(relative_id, {})
+            if isinstance(source, dict) and clean_text(source.get("title")):
+                label = clean_text(source["title"])
             else:
-                label = f"{GOOGLE_SHEET_LABEL}: {filename.removesuffix('.xlsx').replace(GOOGLE_SHEET_FILENAME_PREFIX, '')[:12]}"
+                label = google_sheet_filename_to_label(filename)
             if relative_id == LEGACY_GOOGLE_SHEET_FILE_ID:
                 label = GOOGLE_SHEET_LABEL
             entries.append({

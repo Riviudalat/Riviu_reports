@@ -97,17 +97,9 @@
 
         .summary-dashboard { display: none; padding: 20px 24px 24px; }
         .summary-dashboard.active { display: block; }
-        .summary-head { display: flex; justify-content: space-between; gap: 16px; align-items: flex-end; margin-bottom: 16px; }
+        .summary-head { margin-bottom: 14px; }
         .summary-title { font-size: 18px; font-weight: 800; color: #111827; }
-        .summary-note { margin-top: 4px; font-size: 13px; color: #6b7280; font-weight: 500; }
-        .summary-kpis { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
-        .summary-kpi { border: 1px solid #e5e7eb; border-radius: 8px; padding: 14px; background: #f9fafb; }
-        .summary-kpi .kpi-label { font-size: 11px; color: #6b7280; font-weight: 800; text-transform: uppercase; }
-        .summary-kpi .kpi-value { margin-top: 5px; font-size: 24px; font-weight: 800; color: #111827; }
-        .kpi-label-row { display: inline-flex; align-items: center; gap: 6px; }
-        .kpi-info { width: 18px; height: 18px; border-radius: 999px; border: 1px solid #fed7aa; color: #ff6b00; background: #fff7ed; display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 900; cursor: help; position: relative; line-height: 1; }
-        .kpi-info:hover::after { content: attr(data-tooltip); position: absolute; left: 50%; bottom: calc(100% + 8px); transform: translateX(-50%); width: max-content; max-width: 280px; padding: 10px 12px; border-radius: 8px; background: #111827; color: #fff; font-size: 12px; font-weight: 600; text-transform: none; line-height: 1.4; box-shadow: 0 12px 28px rgba(15, 23, 42, 0.22); z-index: 20; }
-        .kpi-info:hover::before { content: ""; position: absolute; left: 50%; bottom: calc(100% + 2px); transform: translateX(-50%); border: 6px solid transparent; border-top-color: #111827; z-index: 21; }
+        .summary-title-meta { margin-left: 8px; font-size: 14px; font-weight: 600; color: #6b7280; }
         .summary-table-wrap { border: 1px solid #e5e7eb; border-radius: 10px; overflow: auto; max-height: 520px; }
         .summary-table th { background: #fff7ed; color: #9a3412; }
         .summary-table td { max-width: none; }
@@ -156,7 +148,6 @@
             .controls-grid { grid-template-columns: 1fr; }
             .source-block { min-height: auto; border-right: none; border-bottom: 1px solid #edf2f7; }
             .source-block:last-child { border-bottom: none; }
-            .summary-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
             .header { flex-direction: column; align-items: stretch; }
             .header-actions { flex-direction: column; align-items: stretch; }
             .header-actions .btn { width: 100%; justify-content: center; }
@@ -168,7 +159,6 @@
             .stats-grid { grid-template-columns: repeat(2, 1fr); }
             .source-inline, .source-actions { grid-template-columns: 1fr; }
             .summary-head { flex-direction: column; align-items: stretch; }
-            .summary-kpis { grid-template-columns: 1fr; }
             .card-header, .modal-header, .modal-footer { flex-direction: column; align-items: stretch; }
             .report-toolbar { grid-template-columns: 1fr; }
             .card-header-actions, .button-stack { width: 100%; }
@@ -377,6 +367,9 @@
                         <button class="btn btn-outline btn-compact" onclick="copyLogs()">
                             <span class="material-icons-outlined">content_copy</span> Copy log
                         </button>
+                        <button class="btn btn-outline btn-compact" onclick="exportLogs()">
+                            <span class="material-icons-outlined">download</span> Xuất log
+                        </button>
                         <button class="btn btn-outline btn-compact" onclick="clearLogs()">
                             <span class="material-icons-outlined">delete_sweep</span> Xóa log
                         </button>
@@ -501,24 +494,51 @@
             return `${prefix}${message}`;
         }
 
-        function addLog(msg) {
+        function detectLogLevel(msg, explicitLevel = '') {
+            const level = String(explicitLevel || '').trim().toUpperCase();
+            if (level) return level;
+            const text = String(msg || '');
+            if (
+                text.includes('LỖI')
+                || text.includes('Lỗi')
+                || text.includes('Mất kết nối')
+                || text.includes('thất bại')
+                || text.includes('Error:')
+            ) {
+                return 'ERROR';
+            }
+            if (text.includes('CẢNH BÁO') || text.includes('Đang chờ')) return 'WARN';
+            if (
+                text.includes('OK •')
+                || text.includes('thành công')
+                || text.includes('HOÀN THÀNH')
+                || text.includes('--- QUÉT HOÀN TẤT ---')
+            ) {
+                return 'OK';
+            }
+            return 'INFO';
+        }
+
+        function logLevelColor(level) {
+            if (level === 'ERROR') return '#ff6b6b';
+            if (level === 'WARN') return '#fbbf24';
+            if (level === 'OK') return '#7ddc83';
+            return '#d4d4d4';
+        }
+
+        function addLog(msg, options = {}) {
             const logs = document.getElementById('logs');
             const div = document.createElement('div');
             div.className = 'log-line';
             const now = new Date();
             const time = now.toLocaleTimeString();
             const fullTime = now.toLocaleString('vi-VN');
-            div.dataset.logText = `[${fullTime}] ${msg}`;
-            let type = 'INFO';
-            let color = '#d4d4d4';
-            if (msg.includes('Lỗi') || msg.includes('CẢNH BÁO') || msg.includes('Mất kết nối') || msg.includes('thất bại')) {
-                type = 'ERROR';
-                color = '#ff6b6b';
-            } else if (msg.includes('thành công') || msg.includes('HOÀN THÀNH') || msg.includes('Đã ') || msg.includes('--- QUÉT HOÀN TẤT ---')) {
-                type = 'OK';
-                color = '#7ddc83';
-            }
-            div.innerHTML = `<span class="log-time">[${time}]</span> <span style="color:${color}">${escapeHtml(cmdLine(type, msg))}</span>`;
+            const level = detectLogLevel(msg, options.level);
+            const detailText = options.details ? ` | ${JSON.stringify(options.details)}` : '';
+            const storedLine = `[${fullTime}] [${level}] ${msg}${detailText}`;
+            div.dataset.logText = storedLine;
+            const color = logLevelColor(level);
+            div.innerHTML = `<span class="log-time">[${time}]</span> <span style="color:${color}">${escapeHtml(cmdLine(level, msg))}</span>`;
             logs.appendChild(div);
             logs.scrollTop = logs.scrollHeight;
         }
@@ -527,6 +547,34 @@
             return Array.from(document.querySelectorAll('#logs .log-line'))
                 .map(line => line.dataset.logText || line.textContent.trim())
                 .join('\n');
+        }
+
+        function logExportFilename() {
+            const now = new Date();
+            const pad = value => String(value).padStart(2, '0');
+            const stamp = `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()}-${pad(now.getHours())}-${pad(now.getMinutes())}`;
+            return `log-${stamp}.txt`;
+        }
+
+        function exportLogs() {
+            const text = getLogText();
+            if (!text) {
+                addLog('Không có log để xuất.');
+                return;
+            }
+            try {
+                const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+                const link = document.createElement('a');
+                link.href = URL.createObjectURL(blob);
+                link.download = logExportFilename();
+                document.body.appendChild(link);
+                link.click();
+                link.remove();
+                URL.revokeObjectURL(link.href);
+                addLog(`Đã xuất log ra file ${logExportFilename()}.`, { level: 'OK' });
+            } catch (error) {
+                addLog(`Lỗi xuất log: ${error.message}`);
+            }
         }
 
         async function copyLogs() {
@@ -571,7 +619,19 @@
         }
 
         function isSummarySheetName(value) {
-            return normalizeVietnameseKey(value) === 'tong ket';
+            const key = normalizeVietnameseKey(value);
+            return key === 'tong ket' || key.startsWith('tong ket ');
+        }
+
+        function dataSheetNameForSummaryTab(summaryTabName, sheets) {
+            const prefix = 'Tổng kết ';
+            const text = String(summaryTabName || '').trim();
+            if (!text.toLowerCase().startsWith(prefix.toLowerCase())) return '';
+            const suffix = text.slice(prefix.length).trim().toLowerCase();
+            if (!suffix) return '';
+            return (Array.isArray(sheets) ? sheets : []).find(sheet => {
+                return String(sheet || '').trim().toLowerCase() === suffix;
+            }) || '';
         }
 
         function isResultSheetName(value) {
@@ -680,19 +740,56 @@
             return Number.isFinite(number) ? number.toLocaleString('vi-VN') : '0';
         }
 
+        function summaryDashboardTitle(data, totals) {
+            const sheetTitle = String(data.sheet || 'Tổng kết').trim();
+            const partnerCount = Number(totals.partners || 0);
+            const partnerMeta = partnerCount > 0
+                ? `<span class="summary-title-meta">${formatNumber(partnerCount)} đối tác</span>`
+                : '';
+            return `${escapeHtml(sheetTitle)}${partnerMeta}`;
+        }
+
+        function renderSummaryTableCell(column, value, { footer = false } = {}) {
+            const key = normalizeVietnameseKey(column);
+            if (key === 'doi tac') {
+                const className = footer ? 'partner-cell' : 'partner-cell';
+                return `<td class="${className}" title="${escapeHtml(value)}">${escapeHtml(value)}</td>`;
+            }
+            if (key === 'cap nhat lan cuoi') return `<td>${escapeHtml(value)}</td>`;
+            if (key === 'stt') return `<td class="number-cell">${value === '' ? '' : formatNumber(value)}</td>`;
+            if (key === 'tong link') return `<td class="number-cell total-link-cell">${formatNumber(value)}</td>`;
+            return `<td class="number-cell">${formatNumber(value)}</td>`;
+        }
+
         function setPreviewTableVisible(visible) {
             document.querySelector('#previewTable').closest('.table-wrap').style.display = visible ? '' : 'none';
             document.getElementById('summaryDashboard').classList.toggle('active', !visible);
         }
 
-        async function updateFileList() {
+        function setGoogleSheetUrlField(url, { force = false } = {}) {
+            const normalized = String(url || '').trim();
+            if (!normalized) return;
+            if (force || !googleSheetUrlDirty) {
+                googleSheetUrlInput.value = normalized;
+                if (force) googleSheetUrlDirty = false;
+            }
+        }
+
+        function markGoogleSheetUrlDirty() {
+            googleSheetUrlDirty = true;
+            setGooglePushState();
+        }
+
+        async function updateFileList({ applyGoogleSheetUrl = false } = {}) {
             try {
                 const res = await fetch('/list-files');
                 const data = await res.json();
                 const select = document.getElementById('excelFileSelect');
                 select.innerHTML = '';
 
-                if (data.googleSheetUrl && !googleSheetUrlDirty) googleSheetUrlInput.value = data.googleSheetUrl;
+                if (applyGoogleSheetUrl) {
+                    setGoogleSheetUrlField(data.googleSheetUrl);
+                }
                 currentFileId = data.current || '';
                 currentScanSheetName = data.scanSheet || data.currentSheet || currentScanSheetName;
                 currentPushSheetName = currentPushSheetName || currentScanSheetName;
@@ -740,7 +837,7 @@
                 currentSheetName = data.sheet || '';
                 currentScanSheetName = data.scanSheet || currentSheetName;
                 currentPushSheetName = currentScanSheetName;
-                await updateFileList();
+                await updateFileList({ applyGoogleSheetUrl: !googleSheetUrlDirty });
                 await loadPreview();
                 addLog(`Đã chuyển sang sheet: ${fileDisplayLabel({ id: currentFileId, label: currentFileId })}`);
             } catch (error) {
@@ -775,10 +872,9 @@
                 currentSheetName = data.currentSheet || '';
                 currentScanSheetName = data.scanSheet || currentSheetName;
                 currentPushSheetName = currentScanSheetName;
-                googleSheetUrlDirty = false;
+                setGoogleSheetUrlField(url, { force: true });
                 await updateFileList();
                 await loadPreview();
-                addLog(`Đã nạp Google Sheet thành file local mới: ${fileDisplayLabel({ id: data.file, label: data.label })}.`);
             } catch (error) {
                 addLog(`Lỗi đồng bộ Google Sheet: ${error.message}`);
             } finally {
@@ -932,8 +1028,11 @@
                 renderScanSheetOptions(data.sheets || [], currentScanSheetName);
                 renderPushSheetOptions(data.sheets || [], currentPushSheetName);
 
+                window.lastWorkbookSheets = data.sheets || [];
                 if (isSummarySheetName(currentSheetName)) {
-                    await renderSummaryDashboard();
+                    await renderSummaryDashboard(
+                        dataSheetNameForSummaryTab(currentSheetName, data.sheets || [])
+                    );
                     return;
                 }
 
@@ -964,7 +1063,7 @@
             }
         }
 
-        async function renderSummaryDashboard() {
+        async function renderSummaryDashboard(dataSheetName = '') {
             const dashboard = document.getElementById('summaryDashboard');
             const header = document.getElementById('previewHeader');
             const body = document.getElementById('previewBody');
@@ -973,8 +1072,15 @@
             body.innerHTML = '';
             dashboard.innerHTML = '<div class="summary-empty">Đang tải tổng kết đối tác...</div>';
 
+            const resolvedDataSheet = dataSheetName
+                || dataSheetNameForSummaryTab(currentSheetName, window.lastWorkbookSheets || [])
+                || currentScanSheetName
+                || filterDataSheets(window.lastWorkbookSheets || [])[0]
+                || '';
+            const query = resolvedDataSheet ? `?sheet_name=${encodeURIComponent(resolvedDataSheet)}` : '';
+
             try {
-                const res = await fetch('/summary-dashboard');
+                const res = await fetch(`/summary-dashboard${query}`);
                 const data = await res.json();
                 if (!res.ok) throw new Error(data.error || 'Không đọc được sheet Tổng kết');
 
@@ -987,47 +1093,22 @@
                 if (rows.length === 0) {
                     dashboard.innerHTML = `
                         <div class="summary-head">
-                            <div>
-                                <div class="summary-title">Tổng kết đối tác</div>
-                                <div class="summary-note">Chưa có dữ liệu tổng kết. Sau khi quét xong, app sẽ tự cập nhật bảng này.</div>
-                            </div>
+                            <div class="summary-title">${summaryDashboardTitle(data, totals)}</div>
                         </div>
-                        <div class="summary-empty">Chưa có đối tác nào trong sheet Tổng kết.</div>
+                        <div class="summary-empty">Chưa có đối tác nào. Quét sheet dữ liệu để tạo tổng kết.</div>
                     `;
                     return;
                 }
 
                 const tableRows = rows.map(row => `
                     <tr>
-                        ${columns.map(column => {
-                            const key = normalizeVietnameseKey(column);
-                            const value = row[column] ?? '';
-                            if (key === 'doi tac') return `<td class="partner-cell" title="${escapeHtml(value)}">${escapeHtml(value)}</td>`;
-                            if (key === 'cap nhat lan cuoi') return `<td>${escapeHtml(value)}</td>`;
-                            if (key === 'stt') return `<td class="number-cell">${formatNumber(value)}</td>`;
-                            if (key === 'tong link') return `<td class="number-cell total-link-cell">${formatNumber(value)}</td>`;
-                            return `<td class="number-cell">${formatNumber(value)}</td>`;
-                        }).join('')}
+                        ${columns.map(column => renderSummaryTableCell(column, row[column] ?? '')).join('')}
                     </tr>
                 `).join('');
 
                 dashboard.innerHTML = `
                     <div class="summary-head">
-                        <div>
-                            <div class="summary-title">Tổng kết đối tác</div>
-                            <div class="summary-note">${escapeHtml(data.fileLabel || data.file || '')} • Sheet: ${escapeHtml(data.sheet || 'Tổng kết')}</div>
-                        </div>
-                    </div>
-                    <div class="summary-kpis">
-                        <div class="summary-kpi"><div class="kpi-label">Đối tác</div><div class="kpi-value">${formatNumber(totals.partners)}</div></div>
-                        <div class="summary-kpi"><div class="kpi-label">Tổng link</div><div class="kpi-value">${formatNumber(totals.links)}</div></div>
-                        <div class="summary-kpi">
-                            <div class="kpi-label kpi-label-row">
-                                Tổng tương tác
-                                <span class="kpi-info" data-tooltip="Tổng lượt xem: ${formatNumber(totals.views || 0)} • Tim: ${formatNumber(totals.likes || 0)} • Bình luận: ${formatNumber(totals.comments || 0)} • Lượt lưu: ${formatNumber(totals.saves || 0)} • Chia sẻ: ${formatNumber(totals.shares || 0)}">!</span>
-                            </div>
-                            <div class="kpi-value">${formatNumber((totals.likes || 0) + (totals.comments || 0) + (totals.saves || 0) + (totals.shares || 0))}</div>
-                        </div>
+                        <div class="summary-title">${summaryDashboardTitle(data, totals)}</div>
                     </div>
                     <div class="summary-table-wrap">
                         <table class="summary-table">
@@ -1050,7 +1131,9 @@
 
             ws.onmessage = (event) => {
                 const message = JSON.parse(event.data);
-                if (message.type === 'log') addLog(message.message);
+                if (message.type === 'log') {
+                    addLog(message.message, { level: message.level || '', details: message.details || null });
+                }
                 else if (message.type === 'status') updateProgress(message.data);
                 else if (message.type === 'data') appendData(message.row);
             };
@@ -1473,7 +1556,7 @@
             const searchValue = document.getElementById('partnerSearch').value.trim().toLowerCase();
             const visiblePartners = reportPartners
                 .map((partner, index) => ({ ...partner, index }))
-                .filter(item => item.name.toLowerCase().includes(searchValue));
+                .filter(item => String(item.name || '').toLowerCase().includes(searchValue));
 
             if (visiblePartners.length === 0) {
                 list.innerHTML = '<div class="empty-state">Không tìm thấy đối tác phù hợp.</div>';
@@ -1646,13 +1729,12 @@
             setGooglePushState();
         });
 
-        googleSheetUrlInput.addEventListener('input', () => {
-            googleSheetUrlDirty = true;
-            setGooglePushState();
+        ['input', 'change', 'paste', 'keydown'].forEach(eventName => {
+            googleSheetUrlInput.addEventListener(eventName, markGoogleSheetUrlDirty);
         });
 
         window.onload = async () => {
-            await updateFileList();
+            await updateFileList({ applyGoogleSheetUrl: true });
             await loadPreview();
             connectWS();
         };

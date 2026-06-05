@@ -12,8 +12,13 @@ from urllib.parse import quote
 
 import pandas as pd
 from openpyxl import Workbook
+from openpyxl.drawing.image import Image as ExcelImage
+from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
+from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import coordinate_from_string
+from openpyxl.utils.units import pixels_to_EMU
 
 from scraper import run_scraper, read_scrape_history
 from google_sheets_sync import authorize_google, oauth_status, push_rows_to_new_sheet, save_oauth_client
@@ -38,7 +43,11 @@ from workbook_utils import (
     safe_join,
     metric_number,
     format_metric,
-    timestamped_google_sheet_file_id,
+    fetch_google_spreadsheet_title,
+    format_display_datetime,
+    format_filename_datetime,
+    google_sheet_file_id_from_title,
+    google_sheet_sync_label,
     workbook_file_entries,
     workbook_sheet_names,
 )
@@ -60,10 +69,13 @@ class ConnectionManager:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
 
-    async def broadcast_log(self, message: str):
+    async def broadcast_log(self, message: str, *, level: str = ""):
+        payload = {"type": "log", "message": message}
+        if level:
+            payload["level"] = level
         for conn in self.active_connections:
             try:
-                await conn.send_json({"type": "log", "message": message})
+                await conn.send_json(payload)
             except Exception:
                 pass
 
@@ -188,10 +200,6 @@ def safe_report_name(name):
     return filename[:90] if filename else "doi_tac"
 
 
-def filename_timestamp():
-    return datetime.now().strftime("%d-%m-%Y-%H-%M")
-
-
 def spreadsheet_text(value):
     text = clean_text(value)
     return f"'{text}" if text else ""
@@ -227,6 +235,50 @@ def excel_column_name(index):
         index, remainder = divmod(index - 1, 26)
         name = chr(65 + remainder) + name
     return name
+
+
+def column_width_to_pixels(width):
+    if not width:
+        width = 8.43
+    return int(width * 7 + 5)
+
+
+def row_height_to_pixels(height):
+    if not height:
+        height = 15
+    return int(height * 96 / 72)
+
+
+def add_centered_image_to_cell(ws, cell_address, image_path, max_height_px=36):
+    if not image_path or not os.path.exists(image_path):
+        return False
+
+    col_letter, row_number = coordinate_from_string(cell_address)
+    col_idx = ord(col_letter.upper()) - ord("A")
+    row_idx = row_number - 1
+
+    img = ExcelImage(image_path)
+    if img.height > max_height_px:
+        scale = max_height_px / img.height
+        img.height = max_height_px
+        img.width = int(img.width * scale)
+
+    cell_width_px = column_width_to_pixels(ws.column_dimensions[col_letter].width)
+    max_width_px = max(cell_width_px - 4, 24)
+    if img.width > max_width_px:
+        scale = max_width_px / img.width
+        img.width = max_width_px
+        img.height = int(img.height * scale)
+
+    cell_height_px = row_height_to_pixels(ws.row_dimensions[row_number].height)
+    col_off = pixels_to_EMU(max((cell_width_px - img.width) / 2, 0))
+    row_off = pixels_to_EMU(max((cell_height_px - img.height) / 2, 0))
+    img.anchor = OneCellAnchor(
+        _from=AnchorMarker(col=col_idx, colOff=col_off, row=row_idx, rowOff=row_off),
+        ext=XDRPositiveSize2D(pixels_to_EMU(img.width), pixels_to_EMU(img.height)),
+    )
+    ws.add_image(img)
+    return True
 
 
 def find_report_column(frame, header):
@@ -271,7 +323,7 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
     wb = Workbook()
     ws = wb.active
     ws.title = "Báo cáo"
-    updated_at = datetime.now().strftime("%d/%m/%Y %H:%M")
+    updated_at = format_display_datetime()
     table_header_row = 6
     data_start_row = table_header_row + 1
     last_column = get_column_letter(len(REPORT_COLUMNS))
@@ -282,17 +334,22 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
     thin = Side(style="thin", color="D8DEE9")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=len(REPORT_COLUMNS))
-    ws["A1"] = f"BÁO CÁO ĐỐI TÁC: {partner}"
-    ws["A1"].fill = title_fill
-    ws["A1"].font = Font(color="FFFFFF", bold=True, size=14)
+    ws.row_dimensions[1].height = 42
+    ws.row_dimensions[2].height = 22
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
+    add_centered_image_to_cell(ws, "A1", LOGO_PATH)
+
+    ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=len(REPORT_COLUMNS))
+    title_cell = ws["B1"]
+    title_cell.value = f"BÁO CÁO ĐỐI TÁC: {partner}"
+    title_cell.fill = title_fill
+    title_cell.font = Font(color="FFFFFF", bold=True, size=14)
+    title_cell.alignment = Alignment(horizontal="center", vertical="center")
+
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(REPORT_COLUMNS))
     ws["A2"] = f"Tổng link: {len(frame)} • Ngày cập nhật: {updated_at}"
     ws["A2"].font = Font(color="9A3412", italic=True, bold=True)
     ws["A2"].alignment = Alignment(horizontal="center")
-    ws.row_dimensions[1].height = 28
-    ws.row_dimensions[2].height = 22
 
     for col_index, header in enumerate(REPORT_COLUMNS, start=1):
         cell = ws.cell(row=table_header_row, column=col_index, value=header)
@@ -332,26 +389,32 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
                 cell.number_format = "#,##0"
                 cell.alignment = Alignment(horizontal="right", vertical="top")
 
-    total_row = len(frame) + data_start_row
-    for col_index in range(1, len(REPORT_COLUMNS) + 1):
-        cell = ws.cell(row=total_row, column=col_index)
-        cell.fill = total_fill
-        cell.border = border
-    total_label = ws.cell(row=total_row, column=1, value="TỔNG")
-    total_label.font = Font(bold=True)
-    total_label.alignment = Alignment(horizontal="center", vertical="center")
+    total_row = None
     if len(frame) > 0:
-        for col_index in range(4, len(REPORT_COLUMNS) + 1):
-            letter = get_column_letter(col_index)
-            cell = ws.cell(row=total_row, column=col_index, value=f"=SUM({letter}{data_start_row}:{letter}{total_row - 1})")
+        total_row = len(frame) + data_start_row
+        ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=3)
+        for col_index in range(1, len(REPORT_COLUMNS) + 1):
+            cell = ws.cell(row=total_row, column=col_index)
             cell.fill = total_fill
-            cell.font = Font(bold=True)
+            cell.border = border
+        total_label = ws.cell(row=total_row, column=1, value="TỔNG")
+        total_label.font = Font(bold=True, color="9A3412")
+        total_label.alignment = Alignment(horizontal="center", vertical="center")
+        for header in REPORT_COLUMNS[3:]:
+            if header not in frame.columns:
+                continue
+            col_index = REPORT_COLUMNS.index(header) + 1
+            total_value = int(frame[header].map(metric_number).sum())
+            cell = ws.cell(row=total_row, column=col_index, value=total_value)
+            cell.fill = total_fill
+            cell.font = Font(bold=True, color="9A3412")
             cell.border = border
             cell.number_format = "#,##0"
             cell.alignment = Alignment(horizontal="right")
 
     ws.freeze_panes = f"A{data_start_row}"
-    ws.auto_filter.ref = f"A{table_header_row}:{last_column}{max(total_row, table_header_row)}"
+    filter_last_row = (total_row - 1) if total_row else max(data_start_row, table_header_row)
+    ws.auto_filter.ref = f"A{table_header_row}:{last_column}{filter_last_row}"
     widths = [14, 24, 72, 14, 12, 14, 14, 12]
     for index, width in enumerate(widths, start=1):
         ws.column_dimensions[get_column_letter(index)].width = width
@@ -431,7 +494,7 @@ def build_google_push_rows(rows):
             metric_number(row.get("LƯỢT LƯU", 0)),
             metric_number(row.get("CHIA SẺ", 0)),
             *padded_partners,
-            datetime.now().strftime("%d/%m/%Y %H:%M"),
+            format_display_datetime(),
         ])
     if len(values) > 1:
         total_row_number = len(values) + 1
@@ -455,7 +518,7 @@ def build_export_payload(target_path, selected_partners, apply_min_views, min_vi
     partners = [clean_text(name) for name in selected_partners if clean_text(name) in available_partners]
     if not partners:
         raise ValueError("Không tìm thấy đối tác đã chọn trong file")
-    export_timestamp = filename_timestamp()
+    export_timestamp = format_filename_datetime()
 
     if len(partners) == 1:
         partner = partners[0]
@@ -466,7 +529,7 @@ def build_export_payload(target_path, selected_partners, apply_min_views, min_vi
             apply_min_views=apply_min_views,
             min_views=min_views,
         )
-        filename = f"{safe_report_name(partner)}-{export_timestamp}.xlsx"
+        filename = f"{safe_report_name(partner)} {export_timestamp}.xlsx"
         return {
             "content": report_bytes,
             "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -484,7 +547,7 @@ def build_export_payload(target_path, selected_partners, apply_min_views, min_vi
                 apply_min_views=apply_min_views,
                 min_views=min_views,
             )
-            base_name = f"{safe_report_name(partner)}-{export_timestamp}"
+            base_name = f"{safe_report_name(partner)} {export_timestamp}"
             filename = f"{base_name}.xlsx"
             counter = 2
             while filename in used_names:
@@ -497,7 +560,7 @@ def build_export_payload(target_path, selected_partners, apply_min_views, min_vi
     return {
         "content": archive.getvalue(),
         "media_type": "application/zip",
-        "filename": f"bao_cao_doi_tac-{export_timestamp}.zip",
+        "filename": f"bao_cao_doi_tac {export_timestamp}.zip",
     }
 
 
@@ -571,8 +634,10 @@ async def sync_google_sheet(data: dict):
 
     try:
         spreadsheet_id = parse_google_spreadsheet_id(source_url)
-        timestamp = filename_timestamp()
-        file_id = timestamped_google_sheet_file_id(timestamp)
+        spreadsheet_title = fetch_google_spreadsheet_title(source_url)
+        timestamp_filename = format_filename_datetime()
+        file_label = google_sheet_sync_label(spreadsheet_title)
+        file_id = google_sheet_file_id_from_title(spreadsheet_title, timestamp_filename)
         target_path = resolve_file_path(file_id)
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
         download_google_sheet(source_url, target_path)
@@ -581,12 +646,15 @@ async def sync_google_sheet(data: dict):
         CURRENT_SELECTED_FILE = file_id
         CURRENT_SELECTED_SHEET = preview.get("currentSheet", "")
         CURRENT_SCAN_SHEET = CURRENT_SELECTED_SHEET
-        register_google_sheet_source(EXCEL_DIR, file_id, source_url)
-        await manager.broadcast_log(f"Đã nạp Google Sheet thành file mới: {os.path.basename(file_id)}.")
+        register_google_sheet_source(EXCEL_DIR, file_id, source_url, title=file_label)
+        await manager.broadcast_log(
+            f"Đã nạp Google Sheet thành file mới: {file_label} → {os.path.basename(file_id)} • sheet={CURRENT_SELECTED_SHEET or ''} • url={source_url}",
+            level="OK",
+        )
         return {
             "success": True,
             "file": file_id,
-            "label": current_display_label(),
+            "label": file_label,
             "sheets": preview.get("sheets", []),
             "currentSheet": CURRENT_SELECTED_SHEET,
             "scanSheet": CURRENT_SCAN_SHEET,
@@ -691,12 +759,13 @@ async def preview_excel(sheet_name: str = Query(default="")):
 
 
 @app.get("/summary-dashboard")
-async def summary_dashboard():
+async def summary_dashboard(sheet_name: str = Query(default="")):
     target_path = current_excel_path()
     if not os.path.exists(target_path):
         return JSONResponse(content={"error": "File không tồn tại"}, status_code=404)
     try:
-        summary = await asyncio.to_thread(read_summary_dashboard, target_path)
+        requested_sheet = clean_text(sheet_name) or CURRENT_SCAN_SHEET or CURRENT_SELECTED_SHEET or ""
+        summary = await asyncio.to_thread(read_summary_dashboard, target_path, requested_sheet or None)
         summary["file"] = CURRENT_SELECTED_FILE
         summary["fileLabel"] = current_display_label()
         return summary

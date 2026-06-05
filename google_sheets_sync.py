@@ -1,12 +1,12 @@
 import json
 import os
 import urllib.request
-from datetime import datetime
-
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
+
+from workbook_utils import format_excel_sheet_datetime
 
 CLIENT_SECRET_FILENAME = "google_oauth_client.json"
 TOKEN_FILENAME = "google_oauth_token.json"
@@ -324,7 +324,7 @@ def sheets_service(base_dir):
 
 
 def create_result_sheet_title():
-    return datetime.now().strftime('%d-%m-%Y-%H-%M')
+    return f"{RESULT_SHEET_PREFIX} {format_excel_sheet_datetime()}"
 
 
 def ensure_unique_sheet_title(existing_titles, desired_title):
