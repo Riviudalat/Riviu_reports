@@ -1,5 +1,6 @@
 import io
 from datetime import datetime
+from unittest.mock import patch
 
 from openpyxl import load_workbook
 
@@ -94,3 +95,22 @@ def test_build_partner_report_total_row_has_numeric_sums():
     assert worksheet.cell(row=total_row, column=6).value == 3
     assert worksheet.cell(row=total_row, column=7).value == 5
     assert worksheet.cell(row=total_row, column=8).value == 5
+
+
+def test_build_partner_report_works_when_logo_image_unavailable():
+    rows = [
+        {
+            "NGÀY AIR": "",
+            "TÊN KÊNH": "A",
+            "LINK AIR": "https://www.tiktok.com/@a/video/1",
+            "LƯỢT XEM": 100,
+            "TIM": 10,
+            "BÌNH LUẬN": 2,
+            "LƯỢT LƯU": 3,
+            "CHIA SẺ": 4,
+        }
+    ]
+    with patch("app.ExcelImage", side_effect=ImportError("You must install Pillow to fetch image objects")):
+        report_bytes = build_partner_report("Partner", rows, apply_min_views=False)
+    assert isinstance(report_bytes, bytes)
+    assert len(report_bytes) > 0

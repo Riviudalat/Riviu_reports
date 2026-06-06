@@ -252,12 +252,15 @@ def row_height_to_pixels(height):
 def add_centered_image_to_cell(ws, cell_address, image_path, max_height_px=36):
     if not image_path or not os.path.exists(image_path):
         return False
+    try:
+        img = ExcelImage(image_path)
+    except Exception:
+        return False
 
     col_letter, row_number = coordinate_from_string(cell_address)
     col_idx = ord(col_letter.upper()) - ord("A")
     row_idx = row_number - 1
 
-    img = ExcelImage(image_path)
     if img.height > max_height_px:
         scale = max_height_px / img.height
         img.height = max_height_px
