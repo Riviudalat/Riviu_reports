@@ -15,10 +15,12 @@ __pycache__/
 .DS_Store
 Thumbs.db
 
-# File dữ liệu/kết quả cào nghiệm
+# File dữ liệu/token người dùng (token OAuth riêng từng máy, không đẩy lên Git)
 data/
-google_oauth_token.json
-google_oauth_client.json
 *.xlsx
 *.xls
 *.csv
+
+# Kết quả benchmark/chẩn đoán (artifact tạm, không commit)
+benchmark_*.json
+probe_scrape_result.json

@@ -4,8 +4,11 @@ import json
 import os
 import random
 import re
+import threading
 import time
 import unicodedata
+import urllib.error
+import urllib.request
 from datetime import datetime
 
 import openpyxl
@@ -15,12 +18,15 @@ from workbook_utils import (
     clean_text,
     is_generated_username_channel,
     is_generic_tiktok_channel_name,
+    is_numeric_channel_garbage,
     is_scrapable_tiktok_url,
+    load_channel_overrides,
     metric_number,
     format_display_datetime,
     format_excel_sheet_datetime,
     normalize_tiktok_url,
     rebuild_summary_sheet,
+    resolve_channel_name,
     result_sheet_display_name,
     summary_sheet_title_for_data_sheet,
     workbook_data_sheet_names,
@@ -36,6 +42,10 @@ USER_AGENTS = [
     "Mozilla/5.0 (Linux; Android 12; SM-G991B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Mobile Safari/537.36",
     "Mozilla/5.0 (iPad; CPU OS 16_5 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.5 Mobile/15E148 Safari/604.1",
 ]
+DEFAULT_USER_AGENT = USER_AGENTS[0]
+BROWSER_LOCALE = "vi-VN"
+BROWSER_TIMEZONE = "Asia/Ho_Chi_Minh"
+BROWSER_GEOLOCATION = {"latitude": 11.9404, "longitude": 108.4583}
 
 METRIC_HEADERS = {
     "views": "LƯỢT XEM",
@@ -69,16 +79,36 @@ COUNT_PATTERNS = {
 }
 
 BLOCKED_RESOURCE_TYPES = {"image", "media", "font", "texttrack"}
-UNIVERSAL_DETAIL_KEY_MARKERS = ("video-detail", "photo-detail", "photomode", "image-detail")
+UNIVERSAL_DETAIL_KEY_MARKERS = (
+    "video-detail",
+    "photo-detail",
+    "photomode",
+    "image-detail",
+    "reflow.video.detail",
+    "reflow.photo.detail",
+)
 EMBEDDED_STATE_SCRIPT_PATTERNS = (
     r'<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
     r'<script[^>]+id="SIGI_STATE"[^>]*>(.*?)</script>',
 )
 
+MAX_CONCURRENT_REQUESTS = 12
+REQUEST_SHELL_RETRY_DELAY = 1.25
+REQUEST_METRIC_HINT_PATTERN = re.compile(r'"(?:playCount|diggCount)"\s*:\s*"?(\d+)"?')
+_request_semaphore = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
+
+# Phân biệt hai loại "không có số liệu":
+# - METRICS_UNREADABLE: HTML có dấu hiệu số liệu nhưng đọc lỗi (hiếm, đáng retry).
+# - TIKTOK_NO_STATS: TikTok trả trang rỗng, không hề có số liệu (post ẩn view) -> lỗi vĩnh viễn.
+STATUS_METRICS_UNREADABLE = "Error: Không đọc được số liệu"
+STATUS_TIKTOK_NO_STATS = "Lỗi: TikTok không trả số liệu"
+
 MAX_WORKERS = 50
 DEFAULT_WORKERS = 5
 DEFAULT_RETRIES = 2
 DEFAULT_SAVE_EVERY = 25
+DEFAULT_REQUEST_TIMEOUT = 30
+MAX_BROWSER_FALLBACK_WORKERS = 15
 RESULT_SHEET_HEADERS = [
     "Stt",
     "Ngày",
@@ -539,18 +569,82 @@ def parse_count_value(raw):
 def stats_dict_to_metrics(stats):
     if not isinstance(stats, dict):
         return None
+    return metrics_from_stats_sources(stats)
+
+
+def metrics_from_stats_sources(*sources):
+    """Read metrics from stats/statsV2 blobs and take the max per field."""
+    field_values = {metric: [] for metric in COUNT_FIELD_MAP}
+
+    def collect_from_dict(obj):
+        if not isinstance(obj, dict):
+            return
+        blobs = []
+        if isinstance(obj.get("stats"), dict):
+            blobs.append(obj["stats"])
+        if isinstance(obj.get("statsV2"), dict):
+            blobs.append(obj["statsV2"])
+        if not blobs:
+            blobs.append(obj)
+        for blob in blobs:
+            if not isinstance(blob, dict):
+                continue
+            for metric, field in COUNT_FIELD_MAP.items():
+                parsed = parse_count_value(blob.get(field))
+                if parsed is not None:
+                    field_values[metric].append(int(parsed))
+
+    for source in sources:
+        collect_from_dict(source)
 
     metrics = {}
-    for metric, field in COUNT_FIELD_MAP.items():
-        parsed = parse_count_value(stats.get(field))
-        if parsed is None:
-            nested = stats.get("stats")
-            if isinstance(nested, dict):
-                parsed = parse_count_value(nested.get(field))
-        if parsed is None:
+    for metric in COUNT_FIELD_MAP:
+        if not field_values[metric]:
             return None
-        metrics[metric] = parsed
+        metrics[metric] = str(max(field_values[metric]))
     return metrics
+
+
+def extract_raw_stats_fields(content, media_id=""):
+    """Diagnostic helper: expose raw stats/statsV2 playCount values for probe tooling."""
+    raw = {"stats": None, "statsV2": None, "source": ""}
+    for blob in extract_embedded_state_blobs(content):
+        scope = blob.get("__DEFAULT_SCOPE__")
+        if isinstance(scope, dict):
+            for key, value in scope.items():
+                key_norm = normalize_text(key)
+                if not any(marker in key_norm for marker in UNIVERSAL_DETAIL_KEY_MARKERS):
+                    continue
+                if not isinstance(value, dict):
+                    continue
+                item_struct = item_struct_from_scope_value(value)
+                if not isinstance(item_struct, dict):
+                    continue
+                item_id = clean_text(item_struct.get("id") or item_struct.get("awemeId"))
+                if media_id and item_id and item_id != media_id:
+                    continue
+                stats = item_struct.get("stats")
+                stats_v2 = item_struct.get("statsV2")
+                if isinstance(stats, dict):
+                    raw["stats"] = {field: stats.get(field) for field in COUNT_FIELD_MAP.values()}
+                if isinstance(stats_v2, dict):
+                    raw["statsV2"] = {field: stats_v2.get(field) for field in COUNT_FIELD_MAP.values()}
+                raw["source"] = key
+                return raw
+
+        item_module = blob.get("ItemModule")
+        if isinstance(item_module, dict) and media_id:
+            item = item_module.get(media_id) or item_module.get(str(media_id))
+            if isinstance(item, dict):
+                stats = item.get("stats")
+                stats_v2 = item.get("statsV2")
+                if isinstance(stats, dict):
+                    raw["stats"] = {field: stats.get(field) for field in COUNT_FIELD_MAP.values()}
+                if isinstance(stats_v2, dict):
+                    raw["statsV2"] = {field: stats_v2.get(field) for field in COUNT_FIELD_MAP.values()}
+                raw["source"] = "ItemModule"
+                return raw
+    return raw
 
 
 def extract_embedded_state_blobs(content):
@@ -574,13 +668,13 @@ def universal_detail_scope_metrics(scope, media_id=""):
             continue
         if not isinstance(value, dict):
             continue
-        item_struct = value.get("itemInfo", {}).get("itemStruct", {})
+        item_struct = item_struct_from_scope_value(value)
         if not isinstance(item_struct, dict):
             continue
         item_id = clean_text(item_struct.get("id") or item_struct.get("awemeId"))
         if media_id and item_id and item_id != media_id:
             continue
-        metrics = stats_dict_to_metrics(item_struct.get("stats") or item_struct)
+        metrics = metrics_from_stats_sources(item_struct)
         if metrics:
             return metrics
     return None
@@ -606,7 +700,7 @@ def parse_counts_from_sigi_state(data, media_id=""):
         for module_key in (media_id, str(media_id)):
             item = item_module.get(module_key)
             if isinstance(item, dict):
-                metrics = stats_dict_to_metrics(item.get("stats") or item)
+                metrics = metrics_from_stats_sources(item)
                 if metrics:
                     return metrics
 
@@ -617,7 +711,7 @@ def parse_counts_from_sigi_state(data, media_id=""):
             item_id = clean_text(obj.get("id") or obj.get("awemeId") or obj.get("itemId"))
             if item_id != media_id:
                 continue
-            metrics = stats_dict_to_metrics(obj.get("stats") or obj)
+            metrics = metrics_from_stats_sources(obj)
             if metrics:
                 return metrics
     return None
@@ -636,9 +730,9 @@ def parse_counts_regex(content, media_id=""):
                 return window_data, True
 
     for key, pattern in COUNT_PATTERNS.items():
-        match = re.search(pattern, search_text)
-        if match:
-            data[key] = match.group(1)
+        matches = [int(value) for value in re.findall(pattern, search_text)]
+        if matches:
+            data[key] = str(max(matches))
             found = True
     return data, found
 
@@ -675,6 +769,10 @@ def validate_metrics(data):
 
     views = values["Views"]
     if views < 0:
+        return False
+
+    engagement = values["Likes"] + values["Comments"] + values["Saves"] + values["Shares"]
+    if views == 0 and engagement > 0:
         return False
 
     for metric in ("Likes", "Comments", "Saves", "Shares"):
@@ -735,23 +833,86 @@ def iter_nested_dicts(value):
             yield from iter_nested_dicts(child)
 
 
-def author_name_from_object(obj, profile_username):
-    if not isinstance(obj, dict) or not profile_username:
+def author_name_from_object(obj, profile_username="", *, require_username_match=True):
+    if not isinstance(obj, dict):
         return ""
 
     unique_id = clean_text(obj.get("uniqueId") or obj.get("unique_id") or obj.get("uniqueID"))
-    if normalize_text(unique_id.lstrip("@")) != normalize_text(profile_username.lstrip("@")):
-        return ""
+    if require_username_match:
+        if not profile_username:
+            return ""
+        if normalize_text(unique_id.lstrip("@")) != normalize_text(profile_username.lstrip("@")):
+            return ""
+        handle = profile_username
+    else:
+        if not unique_id:
+            return ""
+        handle = unique_id
 
-    for key in ("nickname", "authorName", "name", "displayName"):
+    profile_url = f"https://www.tiktok.com/@{handle.lstrip('@')}"
+    for key in ("nickname", "nickName", "authorName", "name", "displayName"):
         candidate = clean_text(obj.get(key))
         if (
             candidate
-            and not is_generated_username_channel(candidate, f"https://www.tiktok.com/@{profile_username}")
+            and not is_generated_username_channel(candidate, profile_url)
             and not is_generic_tiktok_channel_name(candidate)
         ):
-            return candidate
+            validated = valid_channel_candidate(candidate, handle)
+            if validated:
+                return validated
     return ""
+
+
+def iter_matching_item_structs(content, media_id=""):
+    media_id = clean_text(media_id)
+    if not media_id:
+        return
+
+    for blob in extract_embedded_state_blobs(content):
+        scope = blob.get("__DEFAULT_SCOPE__")
+        if isinstance(scope, dict):
+            for value in scope.values():
+                item_struct = item_struct_from_scope_value(value)
+                if not isinstance(item_struct, dict):
+                    continue
+                item_id = clean_text(item_struct.get("id") or item_struct.get("awemeId"))
+                if item_id == media_id:
+                    yield item_struct
+
+        item_module = blob.get("ItemModule")
+        if isinstance(item_module, dict):
+            item = item_module.get(media_id) or item_module.get(str(media_id))
+            if isinstance(item, dict):
+                yield item
+
+        for obj in iter_nested_dicts(blob):
+            if not isinstance(obj, dict):
+                continue
+            item_id = clean_text(obj.get("id") or obj.get("awemeId") or obj.get("itemId"))
+            if item_id != media_id:
+                continue
+            if isinstance(obj.get("author"), dict) or "stats" in obj or "statsV2" in obj:
+                yield obj
+
+
+def channel_name_from_item_struct(item_struct):
+    if not isinstance(item_struct, dict):
+        return ""
+    author = item_struct.get("author")
+    if isinstance(author, dict):
+        candidate = author_name_from_object(author, require_username_match=False)
+        if candidate:
+            return candidate
+    return author_name_from_object(item_struct, require_username_match=False)
+
+
+def parse_channel_name_from_page(content, profile_username="", media_id=""):
+    if media_id:
+        for item_struct in iter_matching_item_structs(content, media_id):
+            candidate = channel_name_from_item_struct(item_struct)
+            if candidate:
+                return candidate
+    return parse_channel_name(content, profile_username)
 
 
 TIKTOK_NOT_FOUND_PHRASES = (
@@ -909,8 +1070,8 @@ def profile_title_candidate(raw_title, profile_username):
     return valid_channel_candidate(candidate, profile_username)
 
 
-def parse_profile_channel_name(content, profile_username):
-    candidate = parse_channel_name(content, profile_username)
+def parse_profile_channel_name(content, profile_username, media_id=""):
+    candidate = parse_channel_name_from_page(content, profile_username, media_id=media_id)
     if candidate:
         return candidate
 
@@ -932,9 +1093,232 @@ def parse_profile_channel_name(content, profile_username):
     return ""
 
 
+def fetch_profile_channel_name_request(profile_username, timeout=DEFAULT_REQUEST_TIMEOUT):
+    username = clean_text(profile_username).lstrip("@")
+    if not username:
+        return ""
+    profile_url = f"https://www.tiktok.com/@{username}"
+    try:
+        _final_url, content = fetch_tiktok_html(profile_url, timeout=timeout)
+        return parse_profile_channel_name(content, username)
+    except Exception:
+        return ""
+
+
+def is_usable_channel_name(name, url=""):
+    text = clean_text(name)
+    if not text or text == "Lỗi" or is_numeric_channel_garbage(text):
+        return False
+    if is_generated_username_channel(text, url) or is_generic_tiktok_channel_name(text):
+        return False
+    return True
+
+
+def author_unique_id_from_post(url, resolved_url="", timeout=DEFAULT_REQUEST_TIMEOUT):
+    media_id = extract_media_id(resolved_url) or extract_media_id(url)
+    if not media_id:
+        return ""
+    for candidate_url in (resolved_url, url):
+        normalized = normalize_tiktok_url(clean_text(candidate_url))
+        if not normalized:
+            continue
+        try:
+            _final_url, content = fetch_tiktok_html(normalized, timeout=timeout)
+        except Exception:
+            continue
+        for item_struct in iter_matching_item_structs(content, media_id):
+            author = item_struct.get("author")
+            if isinstance(author, dict):
+                unique_id = clean_text(author.get("uniqueId") or author.get("unique_id"))
+                if unique_id:
+                    return unique_id
+    return ""
+
+
+def enrich_channel_name(
+    url,
+    channel_name,
+    *,
+    resolved_url="",
+    channel_cache=None,
+    channel_overrides=None,
+    profile_lookup_attempted=None,
+    cache_lock=None,
+    timeout=DEFAULT_REQUEST_TIMEOUT,
+):
+    source_url = normalize_tiktok_url(url)
+    lookup_url = normalize_tiktok_url(resolved_url or url)
+    username = username_for_channel_lookup(source_url, lookup_url)
+    overrides = channel_overrides or {}
+    parsed = clean_text(channel_name)
+
+    def read_cache():
+        if not channel_cache or not username:
+            return ""
+        if cache_lock:
+            with cache_lock:
+                return clean_text(channel_cache.get(username.casefold(), ""))
+        return clean_text(channel_cache.get(username.casefold(), ""))
+
+    def write_cache(name):
+        if channel_cache and username and name:
+            if cache_lock:
+                with cache_lock:
+                    channel_cache[username.casefold()] = name
+            else:
+                channel_cache[username.casefold()] = name
+
+    def profile_already_tried():
+        if not profile_lookup_attempted or not username:
+            return False
+        key = username.casefold()
+        if cache_lock:
+            with cache_lock:
+                return key in profile_lookup_attempted
+        return key in profile_lookup_attempted
+
+    def mark_profile_tried():
+        if not profile_lookup_attempted or not username:
+            return
+        key = username.casefold()
+        if cache_lock:
+            with cache_lock:
+                profile_lookup_attempted.add(key)
+        else:
+            profile_lookup_attempted.add(key)
+
+    resolved = resolve_channel_name(source_url, parsed.lstrip("@") if parsed.startswith("@") else parsed, overrides)
+    if not resolved and parsed.startswith("@") and is_usable_channel_name(parsed, lookup_url or source_url):
+        resolved = parsed
+    if is_usable_channel_name(resolved, lookup_url or source_url):
+        write_cache(resolved)
+        return resolved
+
+    cached = read_cache()
+    if is_usable_channel_name(cached, lookup_url or source_url):
+        return cached
+
+    if username and not profile_already_tried():
+        mark_profile_tried()
+        fetched = fetch_profile_channel_name_request(username, timeout=timeout)
+        if not fetched and is_generated_username_channel(username):
+            alt_handle = author_unique_id_from_post(source_url, lookup_url, timeout=timeout)
+            if alt_handle and alt_handle.casefold() != username.casefold():
+                fetched = fetch_profile_channel_name_request(alt_handle, timeout=timeout)
+        resolved = resolve_channel_name(source_url, fetched, overrides) or fetched
+        if is_usable_channel_name(resolved, lookup_url or source_url):
+            write_cache(resolved)
+            return resolved
+
+    if username:
+        handle = f"@{username.lstrip('@')}"
+        write_cache(handle)
+        return handle
+
+    return ""
+
+
+def seed_channel_cache_from_workbook(rows_to_process, sheet_contexts, channel_cache):
+    for item in rows_to_process:
+        username = extract_profile_username(item.get("url", ""))
+        if not username:
+            continue
+        context = sheet_contexts.get(item["sheet_name"])
+        if not context:
+            continue
+        channel_col = context["columns"].get("channel")
+        if not channel_col:
+            continue
+        raw = clean_text(context["worksheet"].cell(row=item["row"], column=channel_col).value)
+        if raw and raw != "Lỗi" and is_usable_channel_name(raw, item["url"]):
+            channel_cache[username.casefold()] = raw
+
+
+def channel_name_for_sheet(
+    url,
+    channel_name,
+    *,
+    resolved_url="",
+    status="Success",
+    channel_cache=None,
+    channel_overrides=None,
+    profile_lookup_attempted=None,
+    cache_lock=None,
+):
+    source_url = normalize_tiktok_url(url)
+    resolved = enrich_channel_name(
+        source_url,
+        channel_name,
+        resolved_url=resolved_url,
+        channel_cache=channel_cache,
+        channel_overrides=channel_overrides,
+        profile_lookup_attempted=profile_lookup_attempted,
+        cache_lock=cache_lock,
+    )
+    lookup_url = normalize_tiktok_url(resolved_url or url)
+    if is_usable_channel_name(resolved, lookup_url or source_url):
+        return resolved
+    username = username_for_channel_lookup(source_url, lookup_url)
+    if status == "Success" and username and not is_generated_username_channel(username):
+        return f"@{username.lstrip('@')}"
+    return "Lỗi"
+
+
+def channel_name_quality(name, url=""):
+    """Rank a channel cell so re-scrapes never downgrade a better existing value.
+
+    2 = real nickname, 1 = @handle fallback, 0 = failed/garbage/empty.
+    """
+    text = clean_text(name)
+    if not is_usable_channel_name(text, url):
+        return 0
+    return 1 if text.startswith("@") else 2
+
+
+def format_metric_log_plain(data):
+    views = int(metric_number(data.get("Views", 0)))
+    likes = int(metric_number(data.get("Likes", 0)))
+    comments = int(metric_number(data.get("Comments", 0)))
+    saves = int(metric_number(data.get("Saves", 0)))
+    shares = int(metric_number(data.get("Shares", 0)))
+    return (
+        f"Lượt xem {views} • Tim {likes} • Bình luận {comments} • "
+        f"Lưu {saves} • Chia sẻ {shares}"
+    )
+
+
+def scrape_metric_details(data):
+    return {
+        "views": int(metric_number(data.get("Views", 0))),
+        "likes": int(metric_number(data.get("Likes", 0))),
+        "comments": int(metric_number(data.get("Comments", 0))),
+        "saves": int(metric_number(data.get("Saves", 0))),
+        "shares": int(metric_number(data.get("Shares", 0))),
+    }
+
+
+def format_metric_log_line(data):
+    metrics = scrape_metric_details(data)
+    return (
+        f"view={metrics['views']} tim={metrics['likes']} cmt={metrics['comments']} "
+        f"save={metrics['saves']} share={metrics['shares']}"
+    )
+
+
 def extract_profile_username(url):
     match = re.search(r"tiktok\.com/@([^/?]+)", url or "", re.IGNORECASE)
     return match.group(1).strip() if match else ""
+
+
+def username_for_channel_lookup(source_url, resolved_url=""):
+    for candidate in (resolved_url, source_url):
+        normalized = normalize_tiktok_url(clean_text(candidate))
+        if not normalized:
+            continue
+        username = extract_profile_username(normalized)
+        if username:
+            return username
+    return ""
 
 
 async def read_channel_name_from_dom(page, profile_username):
@@ -1035,11 +1419,240 @@ async def read_profile_channel_name(page, profile_username, channel_cache=None, 
     return ""
 
 
+def item_struct_from_scope_value(value):
+    if not isinstance(value, dict):
+        return None
+    item_info = value.get("itemInfo")
+    if isinstance(item_info, dict):
+        item_struct = item_info.get("itemStruct")
+        if isinstance(item_struct, dict):
+            return item_struct
+    item_struct = value.get("itemStruct")
+    if isinstance(item_struct, dict):
+        return item_struct
+    extra_info = value.get("extra_info")
+    if isinstance(extra_info, dict):
+        nested = item_struct_from_scope_value(extra_info)
+        if nested:
+            return nested
+        nested = extra_info.get("itemStruct")
+        if isinstance(nested, dict):
+            return nested
+    return None
+
+
+def request_html_has_metric_hints(content):
+    return bool(REQUEST_METRIC_HINT_PATTERN.search(content or ""))
+
+
+def no_metrics_status(content):
+    """Nhãn lỗi rõ nghĩa: trang rỗng (TikTok ẩn) vs đọc lỗi tạm thời."""
+    if request_html_has_metric_hints(content):
+        return STATUS_METRICS_UNREADABLE
+    return STATUS_TIKTOK_NO_STATS
+
+
+def build_request_url_candidates(url):
+    url = normalize_tiktok_url(url)
+    candidates = []
+    seen = set()
+
+    def add(candidate):
+        normalized = normalize_tiktok_url(candidate) if candidate else ""
+        if not normalized or normalized in seen:
+            return
+        seen.add(normalized)
+        candidates.append(normalized)
+
+    add(url)
+    base = url.split("?")[0]
+    add(base)
+
+    media_id = extract_media_id(url)
+    profile_username = extract_profile_username(url)
+    if media_id and "/photo/" in url.lower():
+        if "_r=1" not in url.lower():
+            add(f"{base}?_r=1")
+        if profile_username:
+            add(f"https://www.tiktok.com/@{profile_username}/video/{media_id}")
+
+    return candidates
+
+
+def parse_fetched_request_page(source_url, final_url, content):
+    empty = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
+    if is_tiktok_error_page(content):
+        return empty, "", "Error: Trang TikTok không khả dụng"
+
+    media_id = extract_media_id(source_url) or extract_media_id(final_url)
+    profile_username = extract_profile_username(source_url) or extract_profile_username(final_url)
+    metrics, found = parse_counts(content, media_id=media_id)
+    channel_name = parse_profile_channel_name(content, profile_username, media_id=media_id)
+    if not channel_name and profile_username and not is_generated_username_channel(profile_username):
+        channel_name = f"@{profile_username.lstrip('@')}"
+    if found and validate_metrics(metrics):
+        return metrics, channel_name, "Success"
+    return (metrics if found else empty), channel_name, no_metrics_status(content)
+
+
+def hybrid_browser_worker_count(request_workers, total_links):
+    if total_links <= 0:
+        return 0
+    if total_links <= 40:
+        return min(max(request_workers // 2, 3), 8)
+    return min(max(request_workers // 3, 5), MAX_BROWSER_FALLBACK_WORKERS)
+
+
+def fetch_tiktok_html(url, timeout=DEFAULT_REQUEST_TIMEOUT):
+    request = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": DEFAULT_USER_AGENT,
+            "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Referer": "https://www.tiktok.com/",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+        },
+    )
+    with _request_semaphore:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.geturl(), response.read().decode("utf-8", errors="replace")
+
+
+def scrape_link_request(url, timeout=DEFAULT_REQUEST_TIMEOUT):
+    data, channel_name, status, _hints, _resolved = _scrape_link_request_impl(url, timeout=timeout)
+    return data, channel_name, status
+
+
+def _scrape_link_request_impl(url, timeout=DEFAULT_REQUEST_TIMEOUT):
+    url = normalize_tiktok_url(url)
+    last_data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
+    last_channel = ""
+    last_status = "Error: Không đọc được số liệu"
+    last_resolved_url = ""
+    saw_metric_hints = False
+
+    try:
+        candidates = build_request_url_candidates(url)[:4]
+        best_success = None
+
+        for candidate in candidates:
+            try:
+                final_url, content = fetch_tiktok_html(candidate, timeout=timeout)
+            except urllib.error.HTTPError as error:
+                last_status = f"Error: HTTP {error.code}"
+                continue
+            except Exception as error:
+                last_status = f"Error: {str(error)}"
+                continue
+
+            last_resolved_url = final_url or last_resolved_url
+            if request_html_has_metric_hints(content):
+                saw_metric_hints = True
+
+            data, channel_name, status = parse_fetched_request_page(url, final_url, content)
+            last_data, last_channel, last_status = data, channel_name, status
+            if status == "Success":
+                if best_success is None or (channel_name and not best_success[1]):
+                    best_success = (data, channel_name, status, final_url)
+                if channel_name:
+                    return data, channel_name, status, saw_metric_hints, final_url
+
+            if request_html_has_metric_hints(content):
+                time.sleep(REQUEST_SHELL_RETRY_DELAY)
+                try:
+                    final_url, content = fetch_tiktok_html(candidate, timeout=timeout)
+                except Exception:
+                    continue
+                last_resolved_url = final_url or last_resolved_url
+                data, channel_name, status = parse_fetched_request_page(url, final_url, content)
+                last_data, last_channel, last_status = data, channel_name, status
+                if status == "Success":
+                    if best_success is None or (channel_name and not best_success[1]):
+                        best_success = (data, channel_name, status, final_url)
+                    if channel_name:
+                        return data, channel_name, status, saw_metric_hints, final_url
+
+            redirect_candidate = normalize_tiktok_url(final_url.split("?")[0])
+            if (
+                redirect_candidate
+                and redirect_candidate not in candidates
+                and len(candidates) < 4
+            ):
+                candidates.append(redirect_candidate)
+
+        if best_success:
+            data, channel_name, status, final_url = best_success
+            return data, channel_name, status, saw_metric_hints, final_url
+
+        return last_data, last_channel, last_status, saw_metric_hints, last_resolved_url
+    except urllib.error.HTTPError as error:
+        return last_data, last_channel, f"Error: HTTP {error.code}", saw_metric_hints, last_resolved_url
+    except Exception as error:
+        return last_data, last_channel, f"Error: {str(error)}", saw_metric_hints, last_resolved_url
+
+
+def scrape_link_with_retries_request(
+    url,
+    retries=DEFAULT_RETRIES,
+    timeout=DEFAULT_REQUEST_TIMEOUT,
+    channel_cache=None,
+    channel_overrides=None,
+    profile_lookup_attempted=None,
+    cache_lock=None,
+):
+    last_data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
+    last_status = "Error: Chưa chạy"
+    last_channel = ""
+    last_resolved_url = ""
+
+    for attempt in range(retries + 1):
+        if attempt > 0:
+            time.sleep(1.0 + attempt * 0.75 + random.uniform(0.2, 0.8))
+        data, channel_name, status, saw_metric_hints, resolved_url = _scrape_link_request_impl(
+            url, timeout=timeout
+        )
+        if resolved_url:
+            last_resolved_url = resolved_url
+        channel_name = enrich_channel_name(
+            url,
+            channel_name,
+            resolved_url=resolved_url,
+            channel_cache=channel_cache,
+            channel_overrides=channel_overrides,
+            profile_lookup_attempted=profile_lookup_attempted,
+            cache_lock=cache_lock,
+            timeout=timeout,
+        )
+        last_data, last_channel, last_status = data, channel_name, status
+        if status == "Success":
+            return data, channel_name, status, attempt + 1, last_resolved_url
+        if not saw_metric_hints:
+            break
+
+    return last_data, last_channel, last_status, retries + 1, last_resolved_url
+
+
 async def block_heavy_resources(route):
     if route.request.resource_type in BLOCKED_RESOURCE_TYPES:
         await route.abort()
     else:
         await route.continue_()
+
+
+async def make_browser_context(browser):
+    context = await browser.new_context(
+        user_agent=DEFAULT_USER_AGENT,
+        viewport={"width": 390, "height": 844},
+        locale=BROWSER_LOCALE,
+        timezone_id=BROWSER_TIMEZONE,
+        geolocation=BROWSER_GEOLOCATION,
+        permissions=["geolocation"],
+    )
+    await context.route("**/*", block_heavy_resources)
+    return context
 
 
 async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
@@ -1081,9 +1694,9 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
                     break
                 previous_metrics = candidate
             elif is_tiktok_error_page(content):
-                return data, channel_name, "Error: Trang TikTok không khả dụng"
+                return data, channel_name, "Error: Trang TikTok không khả dụng", page_url
 
-            parsed_channel = parse_channel_name(content, profile_username)
+            parsed_channel = parse_channel_name_from_page(content, profile_username, media_id=media_id)
             if parsed_channel:
                 channel_name = parsed_channel
             if profile_username and not channel_name:
@@ -1117,39 +1730,51 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
             found = True
 
         if not found:
-            return data, channel_name, "Error: Không đọc được số liệu"
+            return data, channel_name, no_metrics_status(content), page_url
 
-        return data, channel_name, "Success"
+        return data, channel_name, "Success", page_url
     except Exception as error:
-        return data, channel_name, f"Error: {str(error)}"
+        return data, channel_name, f"Error: {str(error)}", url
 
 
 async def scrape_with_retries(page, url, retries, channel_cache=None):
     last_data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
     last_status = "Error: Chưa chạy"
     last_channel = ""
+    last_resolved_url = ""
 
     for attempt in range(retries + 1):
         if attempt > 0:
             await asyncio.sleep(random.uniform(1.5, 3.5))
-        data, channel_name, status = await scrape_single_link(page, url, channel_cache=channel_cache)
+        data, channel_name, status, resolved_url = await scrape_single_link(page, url, channel_cache=channel_cache)
+        if resolved_url:
+            last_resolved_url = resolved_url
         last_data, last_channel, last_status = data, channel_name, status
         if status == "Success":
-            return data, channel_name, status, attempt + 1
+            return data, channel_name, status, attempt + 1, last_resolved_url
 
-    return last_data, last_channel, last_status, retries + 1
+    return last_data, last_channel, last_status, retries + 1, last_resolved_url
 
 
-async def worker_loop(worker_id, browser, work_queue, result_queue, retries, channel_cache=None, startup_semaphore=None, websocket_manager=None):
+async def worker_loop(
+    worker_id,
+    browser,
+    scrape_queue,
+    result_queue,
+    retries,
+    channel_cache=None,
+    channel_overrides=None,
+    profile_lookup_attempted=None,
+    cache_lock=None,
+    startup_semaphore=None,
+    websocket_manager=None,
+    worker_label=None,
+):
     RECYCLE_AFTER = 100
+    display_worker = worker_label if worker_label is not None else worker_id
 
     async def make_context():
-        ctx = await browser.new_context(
-            user_agent=random.choice(USER_AGENTS),
-            viewport={"width": 390, "height": 844},
-        )
-        await ctx.route("**/*", block_heavy_resources)
-        return ctx
+        return await make_browser_context(browser)
 
     current_item = None
 
@@ -1161,7 +1786,7 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries, cha
                 page = await context.new_page()
             except Exception as error:
                 if websocket_manager:
-                    await websocket_manager.broadcast_log(f"Worker {worker_id} không khởi tạo được context: {str(error)}")
+                    await websocket_manager.broadcast_log(f"Worker {display_worker} không khởi tạo được context: {str(error)}")
                 return
     else:
         context = await make_context()
@@ -1171,37 +1796,48 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries, cha
 
     try:
         while True:
-            item = await work_queue.get()
+            item = await scrape_queue.get()
             current_item = item
             if item is None:
-                work_queue.task_done()
+                scrape_queue.task_done()
                 current_item = None
                 break
 
             started_at = time.perf_counter()
             try:
-                data, channel_name, status, attempts = await scrape_with_retries(page, item["url"], retries, channel_cache=channel_cache)
+                data, channel_name, status, attempts, resolved_url = await scrape_with_retries(page, item["url"], retries, channel_cache=channel_cache)
             except Exception as error:
                 data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
                 channel_name = ""
-                status = f"Error: Worker {worker_id} crash ({str(error)})"
+                status = f"Error: Worker {display_worker} crash ({str(error)})"
                 attempts = 0
+                resolved_url = ""
                 try:
                     if page.is_closed():
                         page = await context.new_page()
                 except Exception:
                     pass
             elapsed = time.perf_counter() - started_at
+            channel_name = enrich_channel_name(
+                item["url"],
+                channel_name,
+                resolved_url=resolved_url,
+                channel_cache=channel_cache,
+                channel_overrides=channel_overrides,
+                profile_lookup_attempted=profile_lookup_attempted,
+                cache_lock=cache_lock,
+            )
             await result_queue.put({
                 **item,
-                "worker": worker_id,
+                "worker": display_worker,
                 "data": data,
                 "channel_name": channel_name,
                 "status": status,
                 "attempts": attempts,
                 "elapsed": elapsed,
+                "resolved_url": resolved_url,
             })
-            work_queue.task_done()
+            scrape_queue.task_done()
             current_item = None
             links_in_current_context += 1
 
@@ -1216,16 +1852,16 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries, cha
                     links_in_current_context = 0
                 except Exception as error:
                     if websocket_manager:
-                        await websocket_manager.broadcast_log(f"Worker {worker_id} không khởi tạo lại được context: {str(error)}")
+                        await websocket_manager.broadcast_log(f"Worker {display_worker} không khởi tạo lại được context: {str(error)}")
                     return
 
             await asyncio.sleep(random.uniform(0.3, 1.1))
     except Exception as error:
         if websocket_manager:
-            await websocket_manager.broadcast_log(f"Worker {worker_id} dừng do lỗi: {str(error)}")
+            await websocket_manager.broadcast_log(f"Worker {display_worker} dừng do lỗi: {str(error)}")
         if current_item is not None:
-            await work_queue.put(current_item)
-            work_queue.task_done()
+            await scrape_queue.put(current_item)
+            scrape_queue.task_done()
     finally:
         try:
             await context.close()
@@ -1233,7 +1869,89 @@ async def worker_loop(worker_id, browser, work_queue, result_queue, retries, cha
             pass
 
 
-def write_result(sheet_contexts, item, data, channel_name, status):
+async def request_worker_loop(
+    worker_id,
+    scrape_queue,
+    browser_queue,
+    result_queue,
+    retries,
+    websocket_manager=None,
+    browser_fallback=True,
+    channel_cache=None,
+    channel_overrides=None,
+    profile_lookup_attempted=None,
+    cache_lock=None,
+):
+    loop = asyncio.get_running_loop()
+    worker_label = f"R{worker_id}"
+    current_item = None
+
+    try:
+        while True:
+            item = await scrape_queue.get()
+            current_item = item
+            if item is None:
+                scrape_queue.task_done()
+                current_item = None
+                break
+
+            started_at = time.perf_counter()
+            try:
+                data, channel_name, status, attempts, resolved_url = await loop.run_in_executor(
+                    None,
+                    lambda url=item["url"]: scrape_link_with_retries_request(
+                        url,
+                        retries=retries,
+                        channel_cache=channel_cache,
+                        channel_overrides=channel_overrides,
+                        profile_lookup_attempted=profile_lookup_attempted,
+                        cache_lock=cache_lock,
+                    ),
+                )
+            except Exception as error:
+                data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
+                channel_name = ""
+                status = f"Error: Request worker {worker_label} crash ({str(error)})"
+                attempts = 0
+                resolved_url = ""
+
+            elapsed = time.perf_counter() - started_at
+            if status == "Success" or not browser_fallback:
+                await result_queue.put({
+                    **item,
+                    "worker": worker_label,
+                    "data": data,
+                    "channel_name": channel_name,
+                    "status": status,
+                    "attempts": attempts,
+                    "elapsed": elapsed,
+                    "resolved_url": resolved_url,
+                })
+            else:
+                await browser_queue.put(item)
+            scrape_queue.task_done()
+            current_item = None
+    except Exception as error:
+        if websocket_manager:
+            await websocket_manager.broadcast_log(f"Request worker {worker_label} dừng do lỗi: {str(error)}")
+        if current_item is not None:
+            await browser_queue.put(current_item)
+            scrape_queue.task_done()
+
+
+def write_result(
+    sheet_contexts,
+    item,
+    data,
+    channel_name,
+    status,
+    *,
+    resolved_url="",
+    channel_cache=None,
+    channel_overrides=None,
+    profile_lookup_attempted=None,
+    cache_lock=None,
+):
     context = sheet_contexts[item["sheet_name"]]
     sheet = context["worksheet"]
     columns = context["columns"]
@@ -1247,14 +1965,20 @@ def write_result(sheet_contexts, item, data, channel_name, status):
                 sheet.cell(row=row_index, column=column_index).value = int(data.get(data_key) or 0)
 
     if columns.get("channel"):
-        if (
-            channel_name
-            and not is_generated_username_channel(channel_name, item["url"])
-            and not is_generic_tiktok_channel_name(channel_name)
-        ):
-            sheet.cell(row=row_index, column=columns["channel"]).value = channel_name
-        else:
-            sheet.cell(row=row_index, column=columns["channel"]).value = "Lỗi"
+        channel_value = channel_name_for_sheet(
+            item["url"],
+            channel_name,
+            resolved_url=resolved_url,
+            status=status,
+            channel_cache=channel_cache,
+            channel_overrides=channel_overrides,
+            profile_lookup_attempted=profile_lookup_attempted,
+            cache_lock=cache_lock,
+        )
+        existing = clean_text(sheet.cell(row=row_index, column=columns["channel"]).value)
+        if channel_name_quality(existing, item["url"]) > channel_name_quality(channel_value, item["url"]):
+            channel_value = existing
+        sheet.cell(row=row_index, column=columns["channel"]).value = channel_value
 
     if columns.get("last_update"):
         sheet.cell(row=row_index, column=columns["last_update"]).value = update_time
@@ -1294,6 +2018,7 @@ def format_scrape_result_log(result, processed, total):
     elapsed = float(result.get("elapsed") or 0)
     data = result.get("data") or {}
     rows = result.get("rows") or []
+    channel = clean_text(result.get("channel_name", "")) or "—"
     row_refs = ", ".join(
         f'{clean_text(row.get("sheet_name", ""))}#{row.get("row", "")}'
         for row in rows[:6]
@@ -1301,24 +2026,56 @@ def format_scrape_result_log(result, processed, total):
     if len(rows) > 6:
         row_refs = f"{row_refs} +{len(rows) - 6}"
 
+    base = {
+        "processed": processed,
+        "total": total,
+        "worker": worker,
+        "elapsed": round(elapsed, 1),
+        "rows": row_refs or "—",
+        "url": url,
+    }
+
     if status == "Success":
+        metrics = scrape_metric_details(data)
         message = (
-            f"[{processed}/{total}] OK • worker {worker} • {elapsed:.1f}s • "
-            f"view={data.get('Views', 0)} tim={data.get('Likes', 0)} "
-            f"cmt={data.get('Comments', 0)} save={data.get('Saves', 0)} share={data.get('Shares', 0)} • "
-            f"kênh={clean_text(result.get('channel_name', '')) or '—'} • "
-            f"dòng={row_refs or '—'} • {url}"
+            f"[{processed}/{total}] OK • {channel} • {format_metric_log_plain(data)} • "
+            f"{elapsed:.1f}s • luồng {worker} • dòng {row_refs or '—'}"
         )
-        return message, "OK"
+        details = {
+            "kind": "scrape_ok",
+            **base,
+            "channel": channel,
+            "metrics": metrics,
+        }
+        return message, "OK", details
+
+    if status == STATUS_TIKTOK_NO_STATS:
+        message = (
+            f"[{processed}/{total}] Ẩn số liệu • {elapsed:.1f}s • luồng {worker} • "
+            f"TikTok không trả số liệu • dòng {row_refs or '—'}"
+        )
+        details = {
+            "kind": "scrape_hidden",
+            **base,
+            "attempts": attempts,
+            "status": status,
+        }
+        return message, "WARN", details
 
     message = (
-        f"[{processed}/{total}] LỖI • worker {worker} • {elapsed:.1f}s • "
-        f"thử={attempts} • {status} • dòng={row_refs or '—'} • {url}"
+        f"[{processed}/{total}] Lỗi • {elapsed:.1f}s • luồng {worker} • "
+        f"thử {attempts} lần • {status} • dòng {row_refs or '—'}"
     )
-    return message, "ERROR"
+    details = {
+        "kind": "scrape_error",
+        **base,
+        "attempts": attempts,
+        "status": status,
+    }
+    return message, "ERROR", details
 
 
-def progress_payload(total, processed, success_count, error_count, worker_count, started_at, done=False, mode="full", partner="", phase="scanning"):
+def progress_payload(total, processed, success_count, error_count, worker_count, started_at, done=False, mode="full", partner="", phase="scanning", uses_browser=False):
     elapsed = max(time.perf_counter() - started_at, 0.001)
     rate = processed / elapsed * 60 if processed else 0
     remaining = max(total - processed, 0)
@@ -1335,10 +2092,11 @@ def progress_payload(total, processed, success_count, error_count, worker_count,
         "mode": mode,
         "partner": partner,
         "phase": phase,
+        "usesBrowser": uses_browser,
     }
 
 
-async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None, create_result_sheet=False, base_dir=None, file_label="", sheet_name=None):
+async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None, create_result_sheet=False, base_dir=None, file_label="", sheet_name=None, use_request=True, browser_fallback=False):
     if not os.path.exists(file_path):
         if websocket_manager:
             await websocket_manager.broadcast_log(f"Lỗi: Không tìm thấy file {file_path}")
@@ -1377,6 +2135,10 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
 
     duplicate_count = len(rows_to_process) - len(bucket_order)
     channel_cache = {}
+    channel_overrides = load_channel_overrides(file_path)
+    profile_lookup_attempted = set()
+    cache_lock = threading.Lock()
+    seed_channel_cache_from_workbook(rows_to_process, sheet_contexts, channel_cache)
     total_rows = len(rows_to_process)
     total = len(bucket_order)
     started_at = time.perf_counter()
@@ -1410,20 +2172,47 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             await websocket_manager.broadcast_log(
                 f"Bắt đầu cập nhật {partner_label}: {total} URL, {worker_count} luồng, retry {retries} lần."
             )
+        elif use_request:
+            if browser_fallback:
+                fallback_count = hybrid_browser_worker_count(worker_count, total)
+                await websocket_manager.broadcast_log(
+                    f"Bắt đầu quét hybrid {total} URL: {worker_count} luồng Request + {fallback_count} luồng trình duyệt fallback, retry {retries} lần, lưu mỗi {save_every} kết quả."
+                )
+            else:
+                await websocket_manager.broadcast_log(
+                    f"Bắt đầu quét {total} URL bằng Request (HTTP), {worker_count} luồng, retry {retries} lần, lưu mỗi {save_every} kết quả."
+                )
         else:
             await websocket_manager.broadcast_log(
-                f"Bắt đầu quét {total} URL bằng {worker_count} luồng, retry {retries} lần, lưu mỗi {save_every} kết quả."
+                f"Bắt đầu quét {total} URL bằng {worker_count} luồng trình duyệt, retry {retries} lần, lưu mỗi {save_every} kết quả."
             )
         await websocket_manager.broadcast_status(
-            progress_payload(total, 0, 0, 0, worker_count, started_at, mode=mode, partner=partner_label, phase="starting")
+            progress_payload(
+                total, 0, 0, 0, worker_count, started_at,
+                mode=mode, partner=partner_label, phase="starting",
+                uses_browser=(not use_request) or browser_fallback,
+            )
         )
 
     work_queue = asyncio.Queue()
+    browser_queue = asyncio.Queue()
     result_queue = asyncio.Queue()
     for bucket in bucket_order:
         await work_queue.put(bucket)
-    for _ in range(worker_count):
-        await work_queue.put(None)
+
+    request_worker_count = worker_count if use_request else 0
+    browser_worker_count = (
+        hybrid_browser_worker_count(worker_count, total)
+        if use_request and browser_fallback
+        else (worker_count if not use_request else 0)
+    )
+
+    if use_request:
+        for _ in range(request_worker_count):
+            await work_queue.put(None)
+    else:
+        for _ in range(browser_worker_count):
+            await work_queue.put(None)
 
     processed = 0
     success_count = 0
@@ -1431,40 +2220,92 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     pending_save_count = 0
     save_skip_until_processed = 0
     last_status_broadcast = 0.0
+    active_worker_count = request_worker_count + browser_worker_count
 
     async with async_playwright() as playwright:
         if websocket_manager:
-            await websocket_manager.broadcast_log(f"Đang khởi tạo trình duyệt và {worker_count} luồng...")
-        browser = await playwright.chromium.launch(
-            headless=True,
-            args=[
-                "--disable-dev-shm-usage",
-                "--disable-gpu",
-                "--disable-blink-features=AutomationControlled",
-                "--disable-features=IsolateOrigins,site-per-process",
-                "--no-sandbox",
-            ],
-        )
-        startup_semaphore = asyncio.Semaphore(min(worker_count, 6))
-        workers = [
-            asyncio.create_task(
-                worker_loop(
-                    index + 1,
-                    browser,
-                    work_queue,
-                    result_queue,
-                    retries,
-                    channel_cache=channel_cache,
-                    startup_semaphore=startup_semaphore,
-                    websocket_manager=websocket_manager,
+            if use_request and browser_fallback:
+                await websocket_manager.broadcast_log(
+                    f"Đang khởi tạo {request_worker_count} luồng Request và {browser_worker_count} luồng trình duyệt fallback..."
                 )
+            elif use_request:
+                await websocket_manager.broadcast_log(
+                    f"Đang khởi tạo {request_worker_count} luồng Request..."
+                )
+            else:
+                await websocket_manager.broadcast_log(f"Đang khởi tạo trình duyệt và {browser_worker_count} luồng...")
+        browser = None
+        if browser_worker_count > 0:
+            browser = await playwright.chromium.launch(
+                headless=True,
+                args=[
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--no-sandbox",
+                ],
             )
-            for index in range(worker_count)
-        ]
+        startup_semaphore = asyncio.Semaphore(min(browser_worker_count, 6)) if browser_worker_count else None
+        workers = []
+
+        if use_request:
+            workers.extend([
+                asyncio.create_task(
+                    request_worker_loop(
+                        index + 1,
+                        work_queue,
+                        browser_queue,
+                        result_queue,
+                        retries,
+                        websocket_manager=websocket_manager,
+                        browser_fallback=browser_fallback,
+                        channel_cache=channel_cache,
+                        channel_overrides=channel_overrides,
+                        profile_lookup_attempted=profile_lookup_attempted,
+                        cache_lock=cache_lock,
+                    )
+                )
+                for index in range(request_worker_count)
+            ])
+
+        if browser_worker_count > 0:
+            workers.extend([
+                asyncio.create_task(
+                    worker_loop(
+                        index + 1,
+                        browser,
+                        browser_queue if use_request else work_queue,
+                        result_queue,
+                        retries,
+                        channel_cache=channel_cache,
+                        channel_overrides=channel_overrides,
+                        profile_lookup_attempted=profile_lookup_attempted,
+                        cache_lock=cache_lock,
+                        startup_semaphore=startup_semaphore,
+                        websocket_manager=websocket_manager,
+                        worker_label=f"B{index + 1}" if use_request else None,
+                    )
+                )
+                for index in range(browser_worker_count)
+            ])
         if websocket_manager:
             await websocket_manager.broadcast_status(
-                progress_payload(total, 0, 0, 0, worker_count, started_at, mode=mode, partner=partner_label, phase="scanning")
+                progress_payload(total, 0, 0, 0, active_worker_count, started_at, mode=mode, partner=partner_label, phase="scanning")
             )
+
+        async def finalize_hybrid_workers():
+            if not use_request:
+                return
+            request_tasks = workers[:request_worker_count]
+            browser_tasks = workers[request_worker_count:]
+            await asyncio.gather(*request_tasks, return_exceptions=True)
+            for _ in range(browser_worker_count):
+                await browser_queue.put(None)
+            if browser_tasks:
+                await asyncio.gather(*browser_tasks, return_exceptions=True)
+
+        finalize_task = asyncio.create_task(finalize_hybrid_workers()) if use_request and browser_fallback and browser_worker_count > 0 else None
 
         try:
             stalled_seconds = 0
@@ -1488,7 +2329,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                         break
                     if websocket_manager and stalled_seconds % 60 == 0:
                         await websocket_manager.broadcast_log(
-                            f"Đang chờ kết quả... {alive_workers}/{worker_count} luồng còn sống ({processed}/{total})."
+                            f"Đang chờ kết quả... {alive_workers}/{active_worker_count} luồng còn sống ({processed}/{total})."
                         )
                     continue
 
@@ -1496,6 +2337,16 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 data = result["data"]
                 status = result["status"]
                 bucket_rows = result.get("rows") or []
+                resolved_url = clean_text(result.get("resolved_url", ""))
+                result["channel_name"] = enrich_channel_name(
+                    result["url"],
+                    result.get("channel_name", ""),
+                    resolved_url=resolved_url,
+                    channel_cache=channel_cache,
+                    channel_overrides=channel_overrides,
+                    profile_lookup_attempted=profile_lookup_attempted,
+                    cache_lock=cache_lock,
+                )
 
                 if status == "Success":
                     success_count += 1
@@ -1503,8 +2354,8 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                     error_count += 1
 
                 if websocket_manager:
-                    log_message, log_level = format_scrape_result_log(result, processed, total)
-                    await websocket_manager.broadcast_log(log_message, level=log_level)
+                    log_message, log_level, log_details = format_scrape_result_log(result, processed, total)
+                    await websocket_manager.broadcast_log(log_message, level=log_level, details=log_details)
 
                 # Write the same scrape result to every spreadsheet row that shares this URL
                 for target in bucket_rows:
@@ -1518,6 +2369,11 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                         data,
                         result["channel_name"],
                         status,
+                        resolved_url=resolved_url,
+                        channel_cache=channel_cache,
+                        channel_overrides=channel_overrides,
+                        profile_lookup_attempted=profile_lookup_attempted,
+                        cache_lock=cache_lock,
                     )
                 pending_save_count += max(len(bucket_rows), 1)
 
@@ -1526,14 +2382,23 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                     await websocket_manager.broadcast_data({
                         "id": result["sequence"],
                         "url": result["url"],
-                        "views": data["Views"],
-                        "likes": data["Likes"],
-                        "comments": data["Comments"],
-                        "saves": data["Saves"],
-                        "shares": data["Shares"],
+                        "views": int(metric_number(data.get("Views", 0))),
+                        "likes": int(metric_number(data.get("Likes", 0))),
+                        "comments": int(metric_number(data.get("Comments", 0))),
+                        "saves": int(metric_number(data.get("Saves", 0))),
+                        "shares": int(metric_number(data.get("Shares", 0))),
                         "status": status,
                         "worker": result["worker"],
-                        "channelName": result["channel_name"],
+                        "channelName": channel_name_for_sheet(
+                            result["url"],
+                            result["channel_name"],
+                            resolved_url=resolved_url,
+                            status=status,
+                            channel_cache=channel_cache,
+                            channel_overrides=channel_overrides,
+                            profile_lookup_attempted=profile_lookup_attempted,
+                            cache_lock=cache_lock,
+                        ),
                         "sheetName": primary_target.get("sheet_name", ""),
                     })
                     now = time.perf_counter()
@@ -1544,7 +2409,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                                 processed,
                                 success_count,
                                 error_count,
-                                worker_count,
+                                active_worker_count,
                                 started_at,
                                 mode=mode,
                                 partner=partner_label,
@@ -1566,10 +2431,13 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
 
                 result_queue.task_done()
 
-            try:
-                await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=20.0)
-            except asyncio.TimeoutError:
-                pass
+            if finalize_task is not None:
+                await finalize_task
+            else:
+                try:
+                    await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=20.0)
+                except asyncio.TimeoutError:
+                    pass
         finally:
             for task in workers:
                 if not task.done():
@@ -1579,18 +2447,19 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             except asyncio.TimeoutError:
                 pass
             # Close any remaining contexts gracefully before shutting browser down
-            try:
-                for ctx in list(browser.contexts):
-                    try:
-                        await ctx.close()
-                    except Exception:
-                        pass
-            except Exception:
-                pass
-            try:
-                await browser.close()
-            except Exception:
-                pass
+            if browser is not None:
+                try:
+                    for ctx in list(browser.contexts):
+                        try:
+                            await ctx.close()
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                try:
+                    await browser.close()
+                except Exception:
+                    pass
             # Brief grace period so the Playwright Node side can drain pending
             # events instead of hitting EPIPE on the parent shutdown
             try:
@@ -1639,7 +2508,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
         "scrapedRows": total_rows,
         "success": success_count,
         "error": error_count,
-        "workers": worker_count,
+        "workers": active_worker_count if use_request else worker_count,
         "durationSeconds": duration_seconds,
         "sheetTotalLinks": sheet_totals["totalLinks"],
         **session_totals,
@@ -1652,7 +2521,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 processed,
                 success_count,
                 error_count,
-                worker_count,
+                active_worker_count if use_request else worker_count,
                 started_at,
                 done=True,
                 mode=mode,

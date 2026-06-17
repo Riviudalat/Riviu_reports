@@ -5,9 +5,11 @@ from workbook_utils import (
     fetch_google_spreadsheet_title,
     google_sheet_file_id_from_title,
     format_display_datetime,
+    format_excel_sheet_datetime,
     format_filename_datetime,
     google_sheet_filename_to_label,
     google_sheet_sync_label,
+    is_internal_workbook_filename,
     parse_filename_datetime_stamp,
     result_sheet_display_name,
     is_exportable_report_row,
@@ -15,6 +17,8 @@ from workbook_utils import (
     is_failed_channel_name,
     is_generated_username_channel,
     is_scrapable_tiktok_url,
+    is_result_sheet_name,
+    is_result_sheet_timestamp_name,
     is_summary_sheet_name,
     metric_number,
     normalize_tiktok_url,
@@ -25,6 +29,7 @@ from workbook_utils import (
     split_partner_value,
     summary_sheet_title_for_data_sheet,
     to_number,
+    workbook_file_entries,
 )
 
 
@@ -63,10 +68,21 @@ def test_is_failed_channel_name():
     assert is_failed_channel_name("Error: timeout") is True
     assert is_failed_channel_name("Nice Cafe") is False
     assert is_failed_channel_name("Screen time breaks") is True
+    assert is_failed_channel_name("1.0") is True
+    assert is_failed_channel_name("1") is True
+    assert is_failed_channel_name(1.0) is True
 
 
 def test_display_channel_name_maps_tiktok_ui_garbage_to_loi():
     assert display_channel_name_from_file("https://www.tiktok.com/@a/video/1", "Screen time breaks") == "Lỗi"
+
+
+def test_display_channel_name_maps_numeric_garbage_to_loi():
+    link = "https://www.tiktok.com/@a/video/1"
+    assert display_channel_name_from_file(link, "1.0") == "Lỗi"
+    assert display_channel_name_from_file(link, 1.0) == "Lỗi"
+    assert display_channel_name_from_file(link, "") == ""
+    assert display_channel_name_from_file(link, "Nice Cafe") == "Nice Cafe"
 
 
 def test_is_generated_username_channel():
@@ -98,13 +114,25 @@ def test_datetime_formats_are_consistent():
     moment = __import__("datetime").datetime(2026, 6, 3, 14, 30)
     assert format_display_datetime(moment) == "03/06/2026-14:30"
     assert format_filename_datetime(moment) == "03-06-2026-14-30"
+    assert format_excel_sheet_datetime(moment) == "03-06-2026-14:30"
     assert parse_filename_datetime_stamp("03-06-2026-14-30") == "03/06/2026-14:30"
 
 
 def test_result_sheet_display_name_uses_excel_safe_timestamp():
-    name = result_sheet_display_name("03-06-2026-14-30")
-    assert name.startswith("Report Seeding Tiktok 03-06-")
+    name = result_sheet_display_name("17-06-2026-14:44")
+    assert name == "17-06-2026-14:44"
     assert len(name) <= 31
+
+
+def test_is_result_sheet_name_recognizes_timestamp_and_legacy_prefix():
+    assert is_result_sheet_timestamp_name("17-06-2026-14:44") is True
+    assert is_result_sheet_timestamp_name("17-06-2026-14:44-2") is True
+    assert is_result_sheet_timestamp_name("03-06-2026-14-30") is True
+    assert is_result_sheet_timestamp_name("03-06-2026-14-30-2") is True
+    assert is_result_sheet_timestamp_name("Tháng 6") is False
+    assert is_result_sheet_name("03-06-2026-14-30") is True
+    assert is_result_sheet_name("Report Seeding Tiktok 03-06-2026-14-30") is True
+    assert is_result_sheet_name("Tháng 6") is False
 
 
 def test_google_sheet_filename_to_label():
@@ -234,3 +262,22 @@ def test_safe_join_blocks_traversal(tmp_path):
     assert allowed.endswith("file.xlsx")
     assert safe_join(str(base), "../outside.xlsx") == ""
     assert safe_join(str(base), "../../etc/passwd") == ""
+
+
+def test_is_internal_workbook_filename():
+    assert is_internal_workbook_filename("_test_export.xlsx") is True
+    assert is_internal_workbook_filename("~$Report.xlsx") is True
+    assert is_internal_workbook_filename("Report Seeding Tiktok.xlsx") is False
+
+
+def test_workbook_file_entries_skips_internal_files(tmp_path):
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    (tmp_path / "Report.xlsx").write_bytes(b"x")
+    (data_dir / "_test_export.xlsx").write_bytes(b"x")
+    (data_dir / "Report Seeding Tiktok.xlsx").write_bytes(b"x")
+
+    ids = {entry["id"] for entry in workbook_file_entries(str(tmp_path))}
+    assert "data/_test_export.xlsx" not in ids
+    assert "data/Report Seeding Tiktok.xlsx" in ids
+    assert "Report.xlsx" in ids

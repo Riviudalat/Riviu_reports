@@ -1,5 +1,6 @@
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Query
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
+from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 import asyncio
 import io
@@ -56,6 +57,10 @@ from workbook_utils import (
 app = FastAPI()
 templates = Jinja2Templates(directory="templates")
 
+_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+if os.path.isdir(_STATIC_DIR):
+    app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
+
 
 class ConnectionManager:
     def __init__(self):
@@ -69,10 +74,12 @@ class ConnectionManager:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
 
-    async def broadcast_log(self, message: str, *, level: str = ""):
+    async def broadcast_log(self, message: str, *, level: str = "", details=None):
         payload = {"type": "log", "message": message}
         if level:
             payload["level"] = level
+        if details:
+            payload["details"] = details
         for conn in self.active_connections:
             try:
                 await conn.send_json(payload)
@@ -117,11 +124,12 @@ def resolve_file_path(file_id):
 
 def ensure_selected_file():
     global CURRENT_SELECTED_FILE, CURRENT_SELECTED_SHEET, CURRENT_SCAN_SHEET
-    current_path = resolve_file_path(CURRENT_SELECTED_FILE)
-    if CURRENT_SELECTED_FILE and os.path.exists(current_path):
+    entries = file_entries()
+    available_ids = {entry["id"] for entry in entries}
+
+    if CURRENT_SELECTED_FILE and CURRENT_SELECTED_FILE in available_ids:
         return CURRENT_SELECTED_FILE
 
-    entries = file_entries()
     if not entries:
         CURRENT_SELECTED_FILE = ""
         CURRENT_SELECTED_SHEET = ""
@@ -139,7 +147,6 @@ def ensure_selected_file():
         reverse=True,
     )
     preferred_ids = google_ids + [LEGACY_GOOGLE_SHEET_FILE_ID, "Report_v1.xlsx", "Report_v1_with_partners.xlsx"]
-    available_ids = {entry["id"] for entry in entries}
     CURRENT_SELECTED_FILE = next((file_id for file_id in preferred_ids if file_id in available_ids), entries[0]["id"])
     return CURRENT_SELECTED_FILE
 
@@ -432,7 +439,7 @@ def content_disposition(filename):
     return f"attachment; filename*=UTF-8''{quote(filename)}"
 
 
-async def run_scraper_safely(target_path, worker_count, partner=None, partners=None, create_result_sheet=False, push_to_google=False, sheet_name=""):
+async def run_scraper_safely(target_path, worker_count, partner=None, partners=None, create_result_sheet=False, push_to_google=False, sheet_name="", use_request=True, browser_fallback=False):
     try:
         scan_sheet, _ = resolve_scan_sheet(sheet_name)
         await run_scraper(
@@ -445,6 +452,8 @@ async def run_scraper_safely(target_path, worker_count, partner=None, partners=N
             base_dir=EXCEL_DIR,
             file_label=current_display_label(),
             sheet_name=scan_sheet,
+            use_request=use_request,
+            browser_fallback=browser_fallback,
         )
         if push_to_google:
             source = current_google_sheet_source()
@@ -933,6 +942,16 @@ async def websocket_endpoint(websocket: WebSocket):
                 partners = []
                 if isinstance(partners_payload, list):
                     partners = [clean_text(name) for name in partners_payload if clean_text(name)]
+                scrape_mode = clean_text(payload.get("scrape_mode", "")).lower()
+                if scrape_mode == "browser":
+                    use_request = False
+                    browser_fallback = False
+                elif scrape_mode == "hybrid":
+                    use_request = True
+                    browser_fallback = True
+                else:
+                    use_request = True
+                    browser_fallback = False
                 SCRAPE_TASK = asyncio.create_task(
                     run_scraper_safely(
                         target_path,
@@ -942,6 +961,8 @@ async def websocket_endpoint(websocket: WebSocket):
                         create_result_sheet=create_result_sheet,
                         push_to_google=push_to_google,
                         sheet_name=sheet_name,
+                        use_request=use_request,
+                        browser_fallback=browser_fallback,
                     )
                 )
             elif action == "cancel":

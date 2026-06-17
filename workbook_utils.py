@@ -30,14 +30,24 @@ PARTNER_HEADING_MARKERS = ("DANH SÁCH", "DANH SACH", "BỘ ẢNH", "BO ANH")
 CHANNEL_OVERRIDE_FILENAME = "channel_name_overrides.json"
 DEFAULT_CHANNEL_OVERRIDES = {}
 RESULT_SHEET_PREFIX = "report seeding tiktok"
+RESULT_SHEET_TIMESTAMP_RE = re.compile(
+    r"^(?:\d{2}-\d{2}-\d{4}-\d{2}-\d{2}|\d{2}-\d{2}-\d{4}-\d{2}:\d{2})(?:-\d+)?$"
+)
 DISPLAY_DATETIME_FORMAT = "%d/%m/%Y-%H:%M"
 FILENAME_DATETIME_FORMAT = "%d-%m-%Y-%H-%M"
+SHEET_DATETIME_FORMAT = "%d-%m-%Y-%H:%M"
 
 
 def ensure_data_dir(base_dir):
     data_dir = os.path.join(base_dir, DATA_DIR_NAME)
     os.makedirs(data_dir, exist_ok=True)
     return data_dir
+
+
+def is_internal_workbook_filename(filename):
+    """Skip Excel temp files and underscore-prefixed internal/test workbooks."""
+    name = os.path.basename(str(filename or ""))
+    return not name or name.startswith("~$") or name.startswith("_")
 
 
 def normalize_header(value):
@@ -54,8 +64,18 @@ def normalize_key(value):
 def clean_text(value):
     if pd.isna(value):
         return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
     text = str(value).strip()
     return "" if text.lower() == "nan" else text
+
+
+def is_numeric_channel_garbage(value):
+    text = clean_text(value)
+    if not text:
+        return False
+    normalized = text.replace(",", "").strip()
+    return bool(re.fullmatch(r"\d+(?:\.\d+)?", normalized))
 
 
 def normalize_channel_display(value):
@@ -96,7 +116,13 @@ def is_generic_tiktok_channel_name(value):
 
 def display_channel_name_from_file(link, raw_channel):
     normalized_channel = normalize_channel_display(raw_channel)
-    if is_generated_username_channel(normalized_channel, link) or is_generic_tiktok_channel_name(normalized_channel):
+    if not normalized_channel:
+        return ""
+    if (
+        is_numeric_channel_garbage(normalized_channel)
+        or is_generated_username_channel(normalized_channel, link)
+        or is_generic_tiktok_channel_name(normalized_channel)
+    ):
         return "Lỗi"
     return normalized_channel
 
@@ -187,7 +213,8 @@ def format_filename_datetime(moment=None):
 
 
 def format_excel_sheet_datetime(moment=None):
-    return format_filename_datetime(moment)
+    value = moment or datetime.now()
+    return value.strftime(SHEET_DATETIME_FORMAT)
 
 
 def parse_filename_datetime_stamp(stamp):
@@ -436,8 +463,14 @@ def is_summary_sheet_name(sheet_name):
     return sheet_key.startswith(normalize_key(SUMMARY_SHEET_TITLE_PREFIX))
 
 
+def is_result_sheet_timestamp_name(sheet_name):
+    return bool(RESULT_SHEET_TIMESTAMP_RE.fullmatch(clean_text(sheet_name)))
+
+
 def is_result_sheet_name(sheet_name):
-    return normalize_key(sheet_name).startswith(RESULT_SHEET_PREFIX)
+    if normalize_key(sheet_name).startswith(RESULT_SHEET_PREFIX):
+        return True
+    return is_result_sheet_timestamp_name(sheet_name)
 
 
 def is_total_label(value):
@@ -969,7 +1002,7 @@ def workbook_data_sheet_names(workbook):
 
 def result_sheet_display_name(timestamp_text=None):
     stamp = clean_text(timestamp_text) or format_excel_sheet_datetime()
-    return f"Report Seeding Tiktok {stamp}"[:31]
+    return stamp[:31]
 
 
 def worksheet_partner_column_indexes(worksheet):
@@ -1019,6 +1052,7 @@ def is_failed_channel_name(value):
         or key in {"loi", "l?i"}
         or text.casefold().startswith("error:")
         or any(phrase in normalized_for_error for phrase in error_phrases)
+        or is_numeric_channel_garbage(text)
         or is_generated_username_channel(text)
         or is_generic_tiktok_channel_name(text)
     )
@@ -1254,7 +1288,7 @@ def workbook_file_entries(base_dir):
     entries = []
 
     for filename in os.listdir(base_dir):
-        if filename.startswith("~$"):
+        if is_internal_workbook_filename(filename):
             continue
         if filename.endswith(".xlsx") or filename.endswith(".xls"):
             entries.append({
@@ -1265,7 +1299,7 @@ def workbook_file_entries(base_dir):
 
     registry = load_google_sheet_registry(base_dir)
     for filename in os.listdir(data_dir):
-        if filename.startswith("~$"):
+        if is_internal_workbook_filename(filename):
             continue
         if filename.endswith(".xlsx") or filename.endswith(".xls"):
             relative_id = f"{DATA_DIR_NAME}/{filename}".replace("\\", "/")
