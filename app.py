@@ -23,7 +23,13 @@ from openpyxl.utils.units import pixels_to_EMU
 
 from scraper import run_scraper, read_scrape_history
 from google_sheets_sync import authorize_google, oauth_status, push_rows_to_new_sheet, save_oauth_client
-from proxy_utils import proxy_status
+from proxy_utils import (
+    load_proxy_list_text,
+    proxy_status,
+    resolve_proxy_configs,
+    save_proxy_list_text,
+    test_proxy_text,
+)
 from workbook_utils import (
     GOOGLE_SHEET_LABEL,
     LEGACY_GOOGLE_SHEET_FILE_ID,
@@ -440,7 +446,7 @@ def content_disposition(filename):
     return f"attachment; filename*=UTF-8''{quote(filename)}"
 
 
-async def run_scraper_safely(target_path, worker_count, partner=None, partners=None, create_result_sheet=False, push_to_google=False, sheet_name="", use_request=True, browser_fallback=False, use_proxy=False):
+async def run_scraper_safely(target_path, worker_count, partner=None, partners=None, create_result_sheet=False, push_to_google=False, sheet_name="", use_request=True, browser_fallback=False, use_proxy=False, proxy_text=""):
     try:
         scan_sheet, _ = resolve_scan_sheet(sheet_name)
         await run_scraper(
@@ -456,6 +462,7 @@ async def run_scraper_safely(target_path, worker_count, partner=None, partners=N
             use_request=use_request,
             browser_fallback=browser_fallback,
             use_proxy=use_proxy,
+            proxy_text=proxy_text,
         )
         if push_to_google:
             source = current_google_sheet_source()
@@ -699,6 +706,43 @@ async def google_oauth_status():
 @app.get("/proxy-status")
 async def proxy_status_endpoint():
     return proxy_status(EXCEL_DIR)
+
+
+@app.get("/proxy-list")
+async def get_proxy_list():
+    text = load_proxy_list_text(EXCEL_DIR)
+    configs = resolve_proxy_configs(EXCEL_DIR, text)
+    return {
+        "text": text,
+        "count": len(configs),
+        "samples": [item["host"] for item in configs[:5]],
+    }
+
+
+@app.post("/proxy-list")
+async def save_proxy_list(data: dict):
+    text = str(data.get("text") or "")
+    save_proxy_list_text(EXCEL_DIR, text)
+    configs = resolve_proxy_configs(EXCEL_DIR, text)
+    return {
+        "ok": True,
+        "count": len(configs),
+        "message": f"Đã lưu {len(configs)} proxy" if configs else "Đã lưu danh sách (chưa đọc được proxy hợp lệ)",
+    }
+
+
+@app.post("/proxy-test")
+async def test_proxy_list(data: dict | None = None):
+    payload = data or {}
+    text = str(payload.get("text") or load_proxy_list_text(EXCEL_DIR))
+    attempts = payload.get("attempts", 5)
+    try:
+        attempts = max(1, min(int(attempts), 5))
+    except (TypeError, ValueError):
+        attempts = 5
+    if payload.get("save"):
+        save_proxy_list_text(EXCEL_DIR, text)
+    return test_proxy_text(text, attempts=attempts)
 
 
 @app.post("/google-oauth-client")
@@ -960,6 +1004,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     use_request = True
                     browser_fallback = False
                 use_proxy = bool(payload.get("use_proxy", False))
+                proxy_text = str(payload.get("proxy_text") or "")
                 SCRAPE_TASK = asyncio.create_task(
                     run_scraper_safely(
                         target_path,
@@ -972,6 +1017,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         use_request=use_request,
                         browser_fallback=browser_fallback,
                         use_proxy=use_proxy,
+                        proxy_text=proxy_text,
                     )
                 )
             elif action == "cancel":

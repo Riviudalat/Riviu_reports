@@ -34,9 +34,10 @@ from workbook_utils import (
     worksheet_row_partners,
 )
 from proxy_utils import (
-    load_proxy_config,
     playwright_proxy_settings,
-    set_session_proxy,
+    proxy_label,
+    resolve_proxy_configs,
+    set_session_proxies,
     urlopen_request,
 )
 
@@ -1648,7 +1649,7 @@ async def block_heavy_resources(route):
         await route.continue_()
 
 
-async def make_browser_context(browser, proxy_config=None):
+async def make_browser_context(browser, proxy_configs=None):
     context_kwargs = {
         "user_agent": DEFAULT_USER_AGENT,
         "viewport": {"width": 390, "height": 844},
@@ -1657,7 +1658,9 @@ async def make_browser_context(browser, proxy_config=None):
         "geolocation": BROWSER_GEOLOCATION,
         "permissions": ["geolocation"],
     }
-    if proxy_config and proxy_config.get("enabled"):
+    configs = [item for item in (proxy_configs or []) if item and item.get("enabled")]
+    if configs:
+        proxy_config = random.choice(configs)
         context_kwargs["proxy"] = playwright_proxy_settings(proxy_config)
     context = await browser.new_context(**context_kwargs)
     await context.route("**/*", block_heavy_resources)
@@ -1779,12 +1782,14 @@ async def worker_loop(
     websocket_manager=None,
     worker_label=None,
     proxy_config=None,
+    proxy_configs=None,
 ):
     RECYCLE_AFTER = 100
     display_worker = worker_label if worker_label is not None else worker_id
+    browser_proxy_configs = proxy_configs if proxy_configs is not None else ([proxy_config] if proxy_config else [])
 
     async def make_context():
-        return await make_browser_context(browser, proxy_config=proxy_config)
+        return await make_browser_context(browser, proxy_configs=browser_proxy_configs)
 
     current_item = None
 
@@ -2106,7 +2111,7 @@ def progress_payload(total, processed, success_count, error_count, worker_count,
     }
 
 
-async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None, create_result_sheet=False, base_dir=None, file_label="", sheet_name=None, use_request=True, browser_fallback=False, use_proxy=False):
+async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None, create_result_sheet=False, base_dir=None, file_label="", sheet_name=None, use_request=True, browser_fallback=False, use_proxy=False, proxy_text=""):
     if not os.path.exists(file_path):
         if websocket_manager:
             await websocket_manager.broadcast_log(f"Lỗi: Không tìm thấy file {file_path}")
@@ -2154,7 +2159,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     started_at = time.perf_counter()
     mode = "partner" if selected_names else "full"
     scrape_base_dir = base_dir or os.path.dirname(os.path.abspath(file_path))
-    proxy_config = load_proxy_config(scrape_base_dir, enabled_only=True) if use_proxy else None
+    proxy_configs = resolve_proxy_configs(scrape_base_dir, proxy_text=proxy_text) if use_proxy else []
 
     # Adaptive save_every: file lớn save thưa hơn để giảm I/O
     if total > 500:
@@ -2192,9 +2197,11 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 )
             else:
                 proxy_note = ""
-                if proxy_config:
-                    proxy_port = proxy_config["socks_port"] if proxy_config.get("type") == "socks5" else proxy_config["port"]
-                    proxy_note = f" • proxy {proxy_config['type'].upper()} {proxy_config['host']}:{proxy_port}"
+                if proxy_configs:
+                    if len(proxy_configs) == 1:
+                        proxy_note = f" • proxy {proxy_label(proxy_configs[0])}"
+                    else:
+                        proxy_note = f" • {len(proxy_configs)} proxy (random)"
                 elif use_proxy:
                     proxy_note = " • proxy: chưa cấu hình"
                 await websocket_manager.broadcast_log(
@@ -2241,7 +2248,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     active_worker_count = request_worker_count + browser_worker_count
 
     async with async_playwright() as playwright:
-        set_session_proxy(proxy_config if proxy_config and proxy_config.get("enabled") else None)
+        set_session_proxies(proxy_configs if use_proxy else [])
         if websocket_manager:
             if use_request and browser_fallback:
                 await websocket_manager.broadcast_log(
@@ -2304,7 +2311,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                         startup_semaphore=startup_semaphore,
                         websocket_manager=websocket_manager,
                         worker_label=f"B{index + 1}" if use_request else None,
-                        proxy_config=proxy_config,
+                        proxy_configs=proxy_configs,
                     )
                 )
                 for index in range(browser_worker_count)
@@ -2486,7 +2493,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 await asyncio.sleep(0.3)
             except Exception:
                 pass
-            set_session_proxy(None)
+            set_session_proxies([])
 
     try:
         append_sheet_total_rows(workbook)

@@ -37,6 +37,9 @@
                     <input type="checkbox" id="proxyUseCheckbox">
                     <span id="proxyUseLabel">Proxy xoay</span>
                 </label>
+                <button class="btn btn-outline btn-compact" id="proxyConfigBtn" type="button" onclick="openProxyModal()" title="Dán danh sách proxy">
+                    <span class="material-icons-outlined">vpn_key</span>
+                </button>
                 <label class="scan-setting">
                     <span>Chọn sheet</span>
                     <select id="scanSheetSelect" class="sheet-select"></select>
@@ -317,6 +320,36 @@
                     <span class="material-icons-outlined">refresh</span> Làm mới
                 </button>
                 <button class="btn btn-outline" onclick="closeHistoryModal()">Đóng</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-backdrop" id="proxyModal" aria-hidden="true">
+        <div class="report-modal proxy-modal" role="dialog" aria-modal="true" aria-labelledby="proxyModalTitle">
+            <div class="modal-header">
+                <div>
+                    <div class="modal-title" id="proxyModalTitle">Cấu hình proxy</div>
+                    <div class="modal-subtitle">Dán proxy vào — không cần file config. Nhiều dòng sẽ chọn ngẫu nhiên mỗi request.</div>
+                </div>
+                <button class="icon-btn" onclick="closeProxyModal()" aria-label="Đóng">
+                    <span class="material-icons-outlined">close</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <div class="proxy-format-hint">
+                    Hỗ trợ: <code>host:port:user:pass</code> · <code>user:pass@host:port</code> · <code>http://user:pass@host:port</code> · <code>socks5://...</code> · <code>host:port</code> · JSON · dòng <code>#</code> bỏ qua
+                </div>
+                <textarea id="proxyTextInput" class="proxy-textarea" rows="10" placeholder="Mỗi dòng 1 proxy&#10;103.162.31.100:8080:user:pass&#10;user:pass@1.2.3.4:8080&#10;http://user:pass@host:port"></textarea>
+                <div class="proxy-test-result" id="proxyTestResult">Chưa test.</div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeProxyModal()">Đóng</button>
+                <button class="btn btn-soft" id="proxySaveBtn" onclick="saveProxyList()">
+                    <span class="material-icons-outlined">save</span> Lưu
+                </button>
+                <button class="btn btn-primary" id="proxyTestBtn" onclick="testProxyList()">
+                    <span class="material-icons-outlined">network_check</span> Test proxy
+                </button>
             </div>
         </div>
     </div>

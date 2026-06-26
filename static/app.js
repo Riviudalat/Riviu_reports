@@ -18,6 +18,9 @@ const workerCountSelect = document.getElementById('workerCountSelect');
 const scrapeModeSelect = document.getElementById('scrapeModeSelect');
 const proxyUseCheckbox = document.getElementById('proxyUseCheckbox');
 const proxyUseLabel = document.getElementById('proxyUseLabel');
+const proxyTextInput = document.getElementById('proxyTextInput');
+const proxyTestResult = document.getElementById('proxyTestResult');
+let proxyListText = '';
 const scanSheetSelect = document.getElementById('scanSheetSelect');
 const pushSheetSelect = document.getElementById('pushSheetSelect');
 const googleSheetUrlInput = document.getElementById('googleSheetUrlInput');
@@ -306,24 +309,143 @@ function setGooglePushState() {
         : 'Chỉ bật sau khi đã có file local, URL sheet đích, đăng nhập Google và chọn sheet nguồn.';
 }
 
+async function loadProxyList() {
+    try {
+        const res = await fetch('/proxy-list');
+        const data = await res.json();
+        proxyListText = String(data.text || '');
+        if (proxyTextInput && !proxyTextInput.value.trim()) {
+            proxyTextInput.value = proxyListText;
+        }
+        return data;
+    } catch (error) {
+        return { text: '', count: 0, samples: [] };
+    }
+}
+
+function currentProxyText() {
+    if (proxyTextInput && proxyTextInput.value.trim()) {
+        return proxyTextInput.value;
+    }
+    return proxyListText || '';
+}
+
+function renderProxyTestResult(data, isError = false) {
+    if (!proxyTestResult) return;
+    if (isError) {
+        proxyTestResult.className = 'proxy-test-result error';
+        proxyTestResult.textContent = String(data || 'Test thất bại');
+        return;
+    }
+    const lines = [data.message || ''];
+    if (Array.isArray(data.results) && data.results.length) {
+        data.results.forEach(item => {
+            const ip = item.ip ? `IP ${item.ip}` : 'không lấy được IP';
+            const tiktok = item.tiktokOk ? 'TikTok OK' : 'TikTok chưa OK';
+            const err = item.error ? ` • ${item.error}` : '';
+            lines.push(`#${item.attempt || '?'} ${item.label || item.host || 'proxy'} — ${ip} • ${tiktok}${err}`);
+        });
+    }
+    proxyTestResult.className = `proxy-test-result ${data.uniqueIps ? 'ok' : 'error'}`;
+    proxyTestResult.textContent = lines.join('\n');
+}
+
 async function refreshProxyStatus() {
     if (!proxyUseCheckbox || !proxyUseLabel) return;
     try {
-        const res = await fetch('/proxy-status');
-        const data = await res.json();
-        if (data.configured && data.enabled) {
-            proxyUseLabel.textContent = `Proxy xoay (${data.host}:${data.port || ''})`;
-            proxyUseCheckbox.title = `HTTP proxy ${data.host}:${data.port || ''} — IP đổi theo từng kết nối`;
-        } else if (data.configured) {
-            proxyUseLabel.textContent = 'Proxy (tắt trong config)';
-            proxyUseCheckbox.disabled = true;
-            proxyUseCheckbox.title = 'Mở data/proxy_config.json và đặt enabled: true';
+        const data = await loadProxyList();
+        const count = Number(data.count || 0);
+        if (count > 0) {
+            const sample = Array.isArray(data.samples) && data.samples.length ? data.samples[0] : '';
+            proxyUseLabel.textContent = count === 1 ? `Proxy (${sample})` : `Proxy (${count} dòng, random)`;
+            proxyUseCheckbox.disabled = false;
+            proxyUseCheckbox.title = count === 1
+                ? `1 proxy — ${sample}`
+                : `${count} proxy — mỗi request chọn ngẫu nhiên`;
         } else {
-            proxyUseLabel.textContent = 'Proxy xoay (chưa cấu hình)';
-            proxyUseCheckbox.title = 'Tạo data/proxy_config.json từ proxy_config.example.json';
+            proxyUseLabel.textContent = 'Proxy (chưa có)';
+            proxyUseCheckbox.title = 'Bấm nút chìa khóa để dán proxy';
         }
     } catch (error) {
         proxyUseLabel.textContent = 'Proxy xoay';
+    }
+}
+
+function openProxyModal() {
+    const modal = document.getElementById('proxyModal');
+    if (!modal) return;
+    if (proxyTextInput) {
+        proxyTextInput.value = currentProxyText();
+    }
+    if (proxyTestResult) {
+        proxyTestResult.className = 'proxy-test-result';
+        proxyTestResult.textContent = 'Chưa test.';
+    }
+    modal.classList.add('active');
+    modal.setAttribute('aria-hidden', 'false');
+    if (proxyTextInput) proxyTextInput.focus();
+}
+
+function closeProxyModal() {
+    const modal = document.getElementById('proxyModal');
+    if (!modal) return;
+    modal.classList.remove('active');
+    modal.setAttribute('aria-hidden', 'true');
+}
+
+async function saveProxyList() {
+    const text = proxyTextInput ? proxyTextInput.value : '';
+    const btn = document.getElementById('proxySaveBtn');
+    if (btn) btn.disabled = true;
+    try {
+        const res = await fetch('/proxy-list', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || data.message || 'Lưu thất bại');
+        proxyListText = text;
+        await refreshProxyStatus();
+        notify(data.message || 'Đã lưu proxy', 'success');
+    } catch (error) {
+        notify(error.message || 'Không lưu được proxy', 'error');
+    } finally {
+        if (btn) btn.disabled = false;
+    }
+}
+
+async function testProxyList() {
+    const text = proxyTextInput ? proxyTextInput.value : '';
+    const btn = document.getElementById('proxyTestBtn');
+    if (btn) {
+        btn.disabled = true;
+        btn.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> Đang test...';
+    }
+    if (proxyTestResult) {
+        proxyTestResult.className = 'proxy-test-result';
+        proxyTestResult.textContent = 'Đang kiểm tra proxy...';
+    }
+    try {
+        const res = await fetch('/proxy-test', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ text, attempts: 3, save: true }),
+        });
+        const data = await res.json();
+        if (!res.ok) throw new Error(data.detail || data.message || 'Test thất bại');
+        proxyListText = text;
+        renderProxyTestResult(data);
+        await refreshProxyStatus();
+        notify(data.message || 'Test xong', data.uniqueIps ? 'success' : 'warn');
+    } catch (error) {
+        renderProxyTestResult(error.message || 'Test thất bại', true);
+        notify(error.message || 'Test proxy thất bại', 'error');
+    } finally {
+        if (btn) {
+            btn.disabled = false;
+            btn.innerHTML = '<span class="material-icons-outlined">network_check</span> Test proxy';
+        }
     }
 }
 
@@ -783,6 +905,12 @@ function startScraping(partners = []) {
     const workers = Number(workerCountSelect.value || 20);
     const scrapeMode = scrapeModeSelect.value === 'browser' ? 'browser' : 'request';
     const useProxy = Boolean(proxyUseCheckbox && proxyUseCheckbox.checked);
+    const proxyText = useProxy ? currentProxyText() : '';
+    if (useProxy && !proxyText.trim()) {
+        notify('Bật proxy nhưng chưa có danh sách. Bấm nút chìa khóa để dán proxy.', 'warn');
+        openProxyModal();
+        return;
+    }
     currentScanSheetName = scanSheetSelect.value || currentScanSheetName || currentSheetName;
     if (!currentScanSheetName) {
         notify('Vui lòng chọn sheet để quét.', 'warn');
@@ -796,6 +924,7 @@ function startScraping(partners = []) {
         workers,
         scrape_mode: scrapeMode,
         use_proxy: useProxy,
+        proxy_text: proxyText,
         sheet_name: currentScanSheetName,
         partners: selected,
         partner: selected.length === 1 ? selected[0] : ''
@@ -806,6 +935,8 @@ function startScraping(partners = []) {
     workerCountSelect.disabled = true;
     scrapeModeSelect.disabled = true;
     if (proxyUseCheckbox) proxyUseCheckbox.disabled = true;
+    const proxyConfigBtn = document.getElementById('proxyConfigBtn');
+    if (proxyConfigBtn) proxyConfigBtn.disabled = true;
     scanSheetSelect.disabled = true;
     document.getElementById('refreshPartnerBtn').disabled = true;
     startBtn.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> ĐANG QUÉT...';
@@ -929,6 +1060,8 @@ function updateProgress(data) {
         workerCountSelect.disabled = false;
         scrapeModeSelect.disabled = false;
         if (proxyUseCheckbox) proxyUseCheckbox.disabled = false;
+        const proxyConfigBtn = document.getElementById('proxyConfigBtn');
+        if (proxyConfigBtn) proxyConfigBtn.disabled = false;
         scanSheetSelect.disabled = false;
         startBtn.innerHTML = '<span class="material-icons-outlined">play_circle</span> BẮT ĐẦU QUÉT';
         addLog(data.cancelled ? '--- ĐÃ HỦY QUÉT ---' : '--- QUÉT HOÀN TẤT ---');
