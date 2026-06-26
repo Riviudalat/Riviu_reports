@@ -17,10 +17,29 @@ const cancelBtn = document.getElementById('cancelBtn');
 const workerCountSelect = document.getElementById('workerCountSelect');
 const scrapeModeSelect = document.getElementById('scrapeModeSelect');
 const proxyUseCheckbox = document.getElementById('proxyUseCheckbox');
-const proxyUseLabel = document.getElementById('proxyUseLabel');
 const proxyTextInput = document.getElementById('proxyTextInput');
 const proxyTestResult = document.getElementById('proxyTestResult');
+const proxyModalSummary = document.getElementById('proxyModalSummary');
+const proxyCard = document.getElementById('proxyCard');
+const proxyConfigBtn = document.getElementById('proxyConfigBtn');
 let proxyListText = '';
+let proxySavedCount = 0;
+
+const BTN_START_IDLE = '<span class="material-icons-outlined">play_arrow</span><span>Bắt đầu quét</span>';
+const BTN_START_BUSY = '<span class="material-icons-outlined">hourglass_top</span><span>Đang quét...</span>';
+const BTN_CANCEL_IDLE = '<span class="material-icons-outlined">stop_circle</span><span>Hủy</span>';
+const BTN_CANCEL_BUSY = '<span class="material-icons-outlined">hourglass_top</span><span>Đang hủy...</span>';
+
+function setProxyCardState({ ready = false, active = false } = {}) {
+    if (!proxyCard) return;
+    proxyCard.classList.toggle('ready', ready);
+    proxyCard.classList.toggle('active', active);
+}
+
+function syncProxyCardActiveState() {
+    const ready = proxySavedCount > 0;
+    setProxyCardState({ ready, active: ready && Boolean(proxyUseCheckbox && proxyUseCheckbox.checked) });
+}
 const scanSheetSelect = document.getElementById('scanSheetSelect');
 const pushSheetSelect = document.getElementById('pushSheetSelect');
 const googleSheetUrlInput = document.getElementById('googleSheetUrlInput');
@@ -314,6 +333,7 @@ async function loadProxyList() {
         const res = await fetch('/proxy-list');
         const data = await res.json();
         proxyListText = String(data.text || '');
+        proxySavedCount = Number(data.count || 0);
         if (proxyTextInput && !proxyTextInput.value.trim()) {
             proxyTextInput.value = proxyListText;
         }
@@ -351,23 +371,31 @@ function renderProxyTestResult(data, isError = false) {
 }
 
 async function refreshProxyStatus() {
-    if (!proxyUseCheckbox || !proxyUseLabel) return;
+    if (!proxyUseCheckbox) return;
     try {
         const data = await loadProxyList();
         const count = Number(data.count || 0);
-        if (count > 0) {
-            const sample = Array.isArray(data.samples) && data.samples.length ? data.samples[0] : '';
-            proxyUseLabel.textContent = count === 1 ? `Proxy (${sample})` : `Proxy (${count} dòng, random)`;
-            proxyUseCheckbox.disabled = false;
-            proxyUseCheckbox.title = count === 1
-                ? `1 proxy — ${sample}`
-                : `${count} proxy — mỗi request chọn ngẫu nhiên`;
-        } else {
-            proxyUseLabel.textContent = 'Proxy (chưa có)';
-            proxyUseCheckbox.title = 'Bấm nút chìa khóa để dán proxy';
+        proxySavedCount = count;
+        const ready = count > 0;
+        proxyUseCheckbox.disabled = false;
+        proxyUseCheckbox.title = ready
+            ? `${count} proxy đã lưu — bấm Cấu hình để xem/sửa`
+            : 'Bấm Cấu hình để dán proxy';
+        setProxyCardState({ ready, active: ready && proxyUseCheckbox.checked });
+        if (proxyConfigBtn) {
+            proxyConfigBtn.title = ready ? `${count} proxy đã lưu` : 'Dán & test proxy';
         }
     } catch (error) {
-        proxyUseLabel.textContent = 'Proxy xoay';
+        setProxyCardState({ ready: false, active: false });
+    }
+}
+
+function updateProxyModalSummary(count) {
+    if (!proxyModalSummary) return;
+    if (count > 0) {
+        proxyModalSummary.textContent = `Đã lưu ${count} proxy. Mỗi dòng 1 proxy — nhiều dòng sẽ chọn ngẫu nhiên khi quét.`;
+    } else {
+        proxyModalSummary.textContent = 'Chưa có proxy. Dán vào ô bên dưới rồi Test hoặc Lưu.';
     }
 }
 
@@ -381,6 +409,7 @@ function openProxyModal() {
         proxyTestResult.className = 'proxy-test-result';
         proxyTestResult.textContent = 'Chưa test.';
     }
+    loadProxyList().then(data => updateProxyModalSummary(Number(data.count || 0)));
     modal.classList.add('active');
     modal.setAttribute('aria-hidden', 'false');
     if (proxyTextInput) proxyTextInput.focus();
@@ -406,6 +435,7 @@ async function saveProxyList() {
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || data.message || 'Lưu thất bại');
         proxyListText = text;
+        updateProxyModalSummary(Number(data.count || 0));
         await refreshProxyStatus();
         notify(data.message || 'Đã lưu proxy', 'success');
     } catch (error) {
@@ -436,6 +466,7 @@ async function testProxyList() {
         if (!res.ok) throw new Error(data.detail || data.message || 'Test thất bại');
         proxyListText = text;
         renderProxyTestResult(data);
+        updateProxyModalSummary(Number(data.count || 0));
         await refreshProxyStatus();
         notify(data.message || 'Test xong', data.uniqueIps ? 'success' : 'warn');
     } catch (error) {
@@ -907,7 +938,7 @@ function startScraping(partners = []) {
     const useProxy = Boolean(proxyUseCheckbox && proxyUseCheckbox.checked);
     const proxyText = useProxy ? currentProxyText() : '';
     if (useProxy && !proxyText.trim()) {
-        notify('Bật proxy nhưng chưa có danh sách. Bấm nút chìa khóa để dán proxy.', 'warn');
+        notify('Bật proxy nhưng chưa có danh sách. Bấm Cấu hình để dán proxy.', 'warn');
         openProxyModal();
         return;
     }
@@ -931,7 +962,7 @@ function startScraping(partners = []) {
     }));
     startBtn.disabled = true;
     cancelBtn.disabled = false;
-    cancelBtn.innerHTML = '<span class="material-icons-outlined">stop_circle</span> HỦY QUÉT';
+    cancelBtn.innerHTML = BTN_CANCEL_IDLE;
     workerCountSelect.disabled = true;
     scrapeModeSelect.disabled = true;
     if (proxyUseCheckbox) proxyUseCheckbox.disabled = true;
@@ -939,7 +970,7 @@ function startScraping(partners = []) {
     if (proxyConfigBtn) proxyConfigBtn.disabled = true;
     scanSheetSelect.disabled = true;
     document.getElementById('refreshPartnerBtn').disabled = true;
-    startBtn.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> ĐANG QUÉT...';
+    startBtn.innerHTML = BTN_START_BUSY;
     document.getElementById('dataFeed').innerHTML = '';
     clearFailedLinks(false);
     const statusEl = document.getElementById('progressStatus');
@@ -954,7 +985,7 @@ function cancelScraping() {
     }
     ws.send(JSON.stringify({ action: 'cancel' }));
     cancelBtn.disabled = true;
-    cancelBtn.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> ĐANG HỦY...';
+    cancelBtn.innerHTML = BTN_CANCEL_BUSY;
     addLog('Đã gửi lệnh hủy quét.');
 }
 
@@ -1056,14 +1087,15 @@ function updateProgress(data) {
     if (data.done || (data.processed === data.total && data.total > 0)) {
         startBtn.disabled = false;
         cancelBtn.disabled = true;
-        cancelBtn.innerHTML = '<span class="material-icons-outlined">stop_circle</span> HỦY QUÉT';
+        cancelBtn.innerHTML = BTN_CANCEL_IDLE;
         workerCountSelect.disabled = false;
         scrapeModeSelect.disabled = false;
         if (proxyUseCheckbox) proxyUseCheckbox.disabled = false;
         const proxyConfigBtn = document.getElementById('proxyConfigBtn');
         if (proxyConfigBtn) proxyConfigBtn.disabled = false;
         scanSheetSelect.disabled = false;
-        startBtn.innerHTML = '<span class="material-icons-outlined">play_circle</span> BẮT ĐẦU QUÉT';
+        startBtn.innerHTML = BTN_START_IDLE;
+        syncProxyCardActiveState();
         addLog(data.cancelled ? '--- ĐÃ HỦY QUÉT ---' : '--- QUÉT HOÀN TẤT ---');
         scanCompletedForCurrentFile = true;
         setGooglePushState();
@@ -1510,6 +1542,10 @@ pushSheetSelect.addEventListener('change', () => {
 ['input', 'change', 'paste', 'keydown'].forEach(eventName => {
     googleSheetUrlInput.addEventListener(eventName, markGoogleSheetUrlDirty);
 });
+
+if (proxyUseCheckbox) {
+    proxyUseCheckbox.addEventListener('change', syncProxyCardActiveState);
+}
 
 window.onload = async () => {
     await updateFileList({ applyGoogleSheetUrl: true });

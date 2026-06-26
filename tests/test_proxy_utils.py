@@ -5,7 +5,6 @@ import urllib.request
 
 from proxy_utils import (
     build_http_proxy_url,
-    load_proxy_config,
     normalize_proxy_config,
     parse_proxy_line,
     parse_proxy_text,
@@ -98,21 +97,20 @@ def test_resolve_proxy_configs_prefers_inline_text(tmp_path):
     assert saved[0]["host"] == "9.9.9.9"
 
 
-def test_load_proxy_config_from_data_dir(tmp_path):
+def test_resolve_proxy_configs_ignores_legacy_json_file(tmp_path):
     data_dir = tmp_path / "data"
     data_dir.mkdir()
     (data_dir / "proxy_config.json").write_text(
         json.dumps({
             "enabled": True,
-            "host": "1.2.3.4",
+            "host": "legacy.example",
             "port": 8080,
             "username": "u",
             "password": "p",
         }),
         encoding="utf-8",
     )
-    config = load_proxy_config(str(tmp_path), enabled_only=True)
-    assert config["host"] == "1.2.3.4"
+    assert resolve_proxy_configs(str(tmp_path), "") == []
 
 
 def test_proxy_status_not_configured(tmp_path):

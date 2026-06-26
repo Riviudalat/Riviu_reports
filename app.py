@@ -25,8 +25,8 @@ from scraper import run_scraper, read_scrape_history
 from google_sheets_sync import authorize_google, oauth_status, push_rows_to_new_sheet, save_oauth_client
 from proxy_utils import (
     load_proxy_list_text,
+    parse_proxy_text,
     proxy_status,
-    resolve_proxy_configs,
     save_proxy_list_text,
     test_proxy_text,
 )
@@ -711,11 +711,10 @@ async def proxy_status_endpoint():
 @app.get("/proxy-list")
 async def get_proxy_list():
     text = load_proxy_list_text(EXCEL_DIR)
-    configs = resolve_proxy_configs(EXCEL_DIR, text)
+    configs = parse_proxy_text(text)
     return {
         "text": text,
         "count": len(configs),
-        "samples": [item["host"] for item in configs[:5]],
     }
 
 
@@ -723,7 +722,7 @@ async def get_proxy_list():
 async def save_proxy_list(data: dict):
     text = str(data.get("text") or "")
     save_proxy_list_text(EXCEL_DIR, text)
-    configs = resolve_proxy_configs(EXCEL_DIR, text)
+    configs = parse_proxy_text(text)
     return {
         "ok": True,
         "count": len(configs),

@@ -8,7 +8,6 @@ import urllib.request
 from urllib.parse import quote, urlparse
 
 PROXY_LIST_FILENAME = "proxy_list.txt"
-PROXY_CONFIG_FILENAME = "proxy_config.json"
 IP_CHECK_URL = "https://api.ipify.org?format=json"
 TIKTOK_PROBE_URL = "https://www.tiktok.com/"
 
@@ -18,12 +17,6 @@ _session_proxy_lock = threading.Lock()
 
 def proxy_list_path(base_dir):
     return os.path.join(base_dir, "data", PROXY_LIST_FILENAME)
-
-
-def proxy_config_candidates(base_dir):
-    data_path = os.path.join(base_dir, "data", PROXY_CONFIG_FILENAME)
-    root_path = os.path.join(base_dir, PROXY_CONFIG_FILENAME)
-    return [data_path, root_path]
 
 
 def looks_like_host(value):
@@ -205,29 +198,11 @@ def save_proxy_list_text(base_dir, text):
     return path
 
 
-def load_proxy_config(base_dir, *, enabled_only=False):
-    for path in proxy_config_candidates(base_dir):
-        if not os.path.exists(path):
-            continue
-        try:
-            with open(path, "r", encoding="utf-8") as file_obj:
-                config = normalize_proxy_config(json.load(file_obj))
-        except (OSError, json.JSONDecodeError, TypeError, ValueError):
-            continue
-        if config and (not enabled_only or config.get("enabled")):
-            return config
-    return None
-
-
 def resolve_proxy_configs(base_dir, proxy_text=""):
     configs = parse_proxy_text(proxy_text)
     if configs:
         return configs
-    saved = parse_proxy_text(load_proxy_list_text(base_dir))
-    if saved:
-        return saved
-    legacy = load_proxy_config(base_dir, enabled_only=True)
-    return [legacy] if legacy else []
+    return parse_proxy_text(load_proxy_list_text(base_dir))
 
 
 def proxy_label(config):
@@ -238,14 +213,11 @@ def proxy_label(config):
 
 def proxy_status(base_dir):
     text = load_proxy_list_text(base_dir)
-    configs = resolve_proxy_configs(base_dir, text)
-    legacy = load_proxy_config(base_dir, enabled_only=False)
+    configs = parse_proxy_text(text)
     return {
         "configured": bool(configs),
         "count": len(configs),
         "text": text,
-        "legacyFile": bool(legacy),
-        "samples": [proxy_label(item) for item in configs[:3]],
     }
 
 

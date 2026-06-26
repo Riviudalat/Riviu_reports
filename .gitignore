@@ -24,3 +24,7 @@ data/
 # Kết quả benchmark/chẩn đoán (artifact tạm, không commit)
 benchmark_*.json
 probe_scrape_result.json
+
+# Script test local (có thể chứa credential proxy)
+scripts/
+docs/superpowers/

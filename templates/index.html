@@ -12,44 +12,85 @@
     <div class="toast-stack" id="toastStack" aria-live="assertive"></div>
     <div class="container">
         <div class="header">
-            <h1><img class="brand-logo" src="/logo.png" alt="Riviu"><span class="brand-title">Reports</span></h1>
-            <div class="header-actions">
-                <label class="scan-setting">
-                    <span>Luồng</span>
-                    <select id="workerCountSelect">
-                        <option value="1">1</option>
-                        <option value="3">3</option>
-                        <option value="5">5</option>
-                        <option value="8">8</option>
-                        <option value="10">10</option>
-                        <option value="20" selected>20</option>
-                        <option value="50">50</option>
-                    </select>
-                </label>
-                <label class="scan-setting">
-                    <span>Chế độ</span>
-                    <select id="scrapeModeSelect" class="sheet-select" style="width:148px">
-                        <option value="request" selected>Request</option>
-                        <option value="browser">Trình duyệt</option>
-                    </select>
-                </label>
-                <label class="scan-setting scan-setting-toggle">
-                    <input type="checkbox" id="proxyUseCheckbox">
-                    <span id="proxyUseLabel">Proxy xoay</span>
-                </label>
-                <button class="btn btn-outline btn-compact" id="proxyConfigBtn" type="button" onclick="openProxyModal()" title="Dán danh sách proxy">
-                    <span class="material-icons-outlined">vpn_key</span>
-                </button>
-                <label class="scan-setting">
-                    <span>Chọn sheet</span>
-                    <select id="scanSheetSelect" class="sheet-select"></select>
-                </label>
-                <button class="btn btn-outline" id="cancelBtn" onclick="cancelScraping()" disabled>
-                    <span class="material-icons-outlined">stop_circle</span> HỦY QUÉT
-                </button>
-                <button class="btn btn-primary" id="startBtn" onclick="startScraping()">
-                    <span class="material-icons-outlined">play_circle</span> BẮT ĐẦU QUÉT
-                </button>
+            <div class="header-brand">
+                <h1><img class="brand-logo" src="/logo.png" alt="Riviu"><span class="brand-title">Reports</span></h1>
+            </div>
+
+            <div class="scan-toolbar" role="toolbar" aria-label="Cấu hình quét">
+                <div class="toolbar-group toolbar-config">
+                    <div class="toolbar-field">
+                        <label class="toolbar-label" for="workerCountSelect">
+                            <span class="material-icons-outlined toolbar-label-icon">bolt</span>
+                            Luồng
+                        </label>
+                        <select id="workerCountSelect" class="toolbar-select toolbar-select-sm">
+                            <option value="1">1</option>
+                            <option value="3">3</option>
+                            <option value="5">5</option>
+                            <option value="8">8</option>
+                            <option value="10">10</option>
+                            <option value="20" selected>20</option>
+                            <option value="50">50</option>
+                        </select>
+                    </div>
+                    <div class="toolbar-field">
+                        <label class="toolbar-label" for="scrapeModeSelect">
+                            <span class="material-icons-outlined toolbar-label-icon">tune</span>
+                            Chế độ
+                        </label>
+                        <select id="scrapeModeSelect" class="toolbar-select">
+                            <option value="request" selected>Request</option>
+                            <option value="browser">Trình duyệt</option>
+                        </select>
+                    </div>
+                </div>
+
+                <div class="toolbar-divider" aria-hidden="true"></div>
+
+                <div class="toolbar-group toolbar-proxy">
+                    <div class="toolbar-field toolbar-field-proxy">
+                        <label class="toolbar-label" for="proxyUseCheckbox">
+                            <span class="material-icons-outlined toolbar-label-icon">vpn_key</span>
+                            Proxy xoay
+                        </label>
+                        <div class="proxy-card" id="proxyCard">
+                            <label class="proxy-toggle" for="proxyUseCheckbox" title="Bật/tắt proxy khi quét">
+                                <input type="checkbox" id="proxyUseCheckbox" class="proxy-toggle-input">
+                                <span class="proxy-switch" aria-hidden="true"><span class="proxy-switch-knob"></span></span>
+                                <span class="proxy-status-dot" id="proxyStatusDot" aria-hidden="true"></span>
+                            </label>
+                            <button class="proxy-setup-btn" id="proxyConfigBtn" type="button" onclick="openProxyModal()" title="Dán & test proxy">
+                                <span class="material-icons-outlined">edit</span>
+                                <span class="proxy-setup-text">Cấu hình</span>
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="toolbar-divider" aria-hidden="true"></div>
+
+                <div class="toolbar-group toolbar-sheet">
+                    <div class="toolbar-field toolbar-field-grow">
+                        <label class="toolbar-label" for="scanSheetSelect">
+                            <span class="material-icons-outlined toolbar-label-icon">table_chart</span>
+                            Sheet quét
+                        </label>
+                        <select id="scanSheetSelect" class="toolbar-select sheet-select"></select>
+                    </div>
+                </div>
+
+                <div class="toolbar-divider toolbar-divider-actions" aria-hidden="true"></div>
+
+                <div class="toolbar-group toolbar-actions">
+                    <button class="btn btn-ghost btn-action" id="cancelBtn" onclick="cancelScraping()" disabled>
+                        <span class="material-icons-outlined">stop_circle</span>
+                        <span>Hủy</span>
+                    </button>
+                    <button class="btn btn-primary btn-action btn-start" id="startBtn" onclick="startScraping()">
+                        <span class="material-icons-outlined">play_arrow</span>
+                        <span>Bắt đầu quét</span>
+                    </button>
+                </div>
             </div>
         </div>
 
@@ -329,7 +370,7 @@
             <div class="modal-header">
                 <div>
                     <div class="modal-title" id="proxyModalTitle">Cấu hình proxy</div>
-                    <div class="modal-subtitle">Dán proxy vào — không cần file config. Nhiều dòng sẽ chọn ngẫu nhiên mỗi request.</div>
+                    <div class="modal-subtitle" id="proxyModalSummary">Dán proxy vào ô bên dưới. Chi tiết chỉ hiện ở đây.</div>
                 </div>
                 <button class="icon-btn" onclick="closeProxyModal()" aria-label="Đóng">
                     <span class="material-icons-outlined">close</span>
@@ -337,7 +378,7 @@
             </div>
             <div class="modal-body">
                 <div class="proxy-format-hint">
-                    Hỗ trợ: <code>host:port:user:pass</code> · <code>user:pass@host:port</code> · <code>http://user:pass@host:port</code> · <code>socks5://...</code> · <code>host:port</code> · JSON · dòng <code>#</code> bỏ qua
+                    Hỗ trợ: <code>host:port:user:pass</code> · <code>user:pass@host:port</code> · <code>http://user:pass@host:port</code> · <code>socks5://...</code> · <code>host:port</code> 
                 </div>
                 <textarea id="proxyTextInput" class="proxy-textarea" rows="10" placeholder="Mỗi dòng 1 proxy&#10;103.162.31.100:8080:user:pass&#10;user:pass@1.2.3.4:8080&#10;http://user:pass@host:port"></textarea>
                 <div class="proxy-test-result" id="proxyTestResult">Chưa test.</div>
