@@ -25,6 +25,8 @@ const proxyConfigBtn = document.getElementById('proxyConfigBtn');
 let proxyListText = '';
 let proxySavedCount = 0;
 const SERVER_BUILD_KEY = 'serverProxyBuild';
+let directMaxWorkers = 10;
+let proxyMaxWorkers = 50;
 
 const BTN_START_IDLE = '<span class="material-icons-outlined">play_arrow</span><span>Bắt đầu quét</span>';
 const BTN_START_BUSY = '<span class="material-icons-outlined">hourglass_top</span><span>Đang quét...</span>';
@@ -40,6 +42,24 @@ function setProxyCardState({ ready = false, active = false } = {}) {
 function syncProxyCardActiveState() {
     const ready = proxySavedCount > 0;
     setProxyCardState({ ready, active: ready && Boolean(proxyUseCheckbox && proxyUseCheckbox.checked) });
+    syncWorkerCountOptions();
+}
+
+function syncWorkerCountOptions() {
+    if (!workerCountSelect) return;
+    const proxyOn = Boolean(proxyUseCheckbox && proxyUseCheckbox.checked);
+    const maxWorkers = proxyOn ? proxyMaxWorkers : directMaxWorkers;
+    let selected = Number(workerCountSelect.value || directMaxWorkers);
+    Array.from(workerCountSelect.options).forEach(option => {
+        const value = Number(option.value);
+        const allowed = value <= maxWorkers;
+        option.disabled = !allowed;
+        option.hidden = !allowed;
+    });
+    if (selected > maxWorkers) {
+        selected = maxWorkers;
+        workerCountSelect.value = String(maxWorkers);
+    }
 }
 const scanSheetSelect = document.getElementById('scanSheetSelect');
 const pushSheetSelect = document.getElementById('pushSheetSelect');
@@ -346,6 +366,13 @@ async function checkServerVersion() {
         const res = await fetch('/api/version');
         const data = await res.json();
         const build = String(data.proxyTestBuild || '').trim();
+        if (Number(data.directMaxWorkers) > 0) {
+            directMaxWorkers = Number(data.directMaxWorkers);
+        }
+        if (Number(data.proxyMaxWorkers) > 0) {
+            proxyMaxWorkers = Number(data.proxyMaxWorkers);
+        }
+        syncWorkerCountOptions();
         if (!build) return;
         const stored = localStorage.getItem(SERVER_BUILD_KEY);
         if (stored && stored !== build && banner) {
@@ -1009,9 +1036,10 @@ function startScraping(partners = []) {
     scanCompletedForCurrentFile = false;
     setGooglePushState();
     const selected = Array.isArray(partners) ? partners : (partners ? [partners] : []);
-    const workers = Number(workerCountSelect.value || 20);
-    const scrapeMode = scrapeModeSelect.value || 'request';
     const useProxy = Boolean(proxyUseCheckbox && proxyUseCheckbox.checked);
+    const maxWorkers = useProxy ? proxyMaxWorkers : directMaxWorkers;
+    const workers = Math.min(Number(workerCountSelect.value || directMaxWorkers), maxWorkers);
+    const scrapeMode = scrapeModeSelect.value || 'request';
     const proxyText = useProxy ? currentProxyText() : '';
     if (useProxy && !proxyText.trim()) {
         notify('Bật proxy nhưng chưa có danh sách. Bấm Cấu hình để dán proxy.', 'warn');
@@ -1629,6 +1657,7 @@ if (proxyUseCheckbox) {
 
 window.onload = async () => {
     await checkServerVersion();
+    syncWorkerCountOptions();
     await updateFileList({ applyGoogleSheetUrl: true });
     await loadPreview();
     await refreshProxyStatus();

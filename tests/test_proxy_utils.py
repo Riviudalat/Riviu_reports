@@ -11,6 +11,7 @@ from proxy_utils import (
     pick_session_proxy,
     playwright_proxy_settings,
     proxy_status,
+    release_thread_proxy,
     resolve_proxy_configs,
     set_session_proxies,
     set_session_proxy,
@@ -153,6 +154,22 @@ def test_pick_session_proxy_random_from_pool():
     try:
         picked = {pick_session_proxy()["host"] for _ in range(20)}
         assert len(picked) >= 1
+    finally:
+        set_session_proxies([])
+
+
+def test_release_thread_proxy_clears_sticky():
+    configs = [
+        normalize_proxy_config({"host": "1.1.1.1", "port": 8080}),
+        normalize_proxy_config({"host": "2.2.2.2", "port": 8080}),
+    ]
+    set_session_proxies(configs)
+    try:
+        first = pick_session_proxy()
+        release_thread_proxy()
+        second = pick_session_proxy()
+        assert first is not None
+        assert second is not None
     finally:
         set_session_proxies([])
 

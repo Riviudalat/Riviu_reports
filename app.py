@@ -778,10 +778,13 @@ async def save_proxy_list(data: dict):
 @app.get("/api/version")
 async def api_version():
     from proxy_utils import PROXY_TEST_BUILD
+    from scraper import DIRECT_MAX_WORKERS, MAX_WORKERS
 
     return {
         "proxyTestBuild": PROXY_TEST_BUILD,
         "app": "riviu-reports",
+        "directMaxWorkers": DIRECT_MAX_WORKERS,
+        "proxyMaxWorkers": MAX_WORKERS,
     }
 
 
@@ -1059,6 +1062,10 @@ async def websocket_endpoint(websocket: WebSocket):
                     await manager.broadcast_log(proxy_error)
                     await manager.broadcast_status({"total": 0, "processed": 0, "success": 0, "error": 1, "done": True})
                     continue
+                from scraper import clamp_worker_count
+                from proxy_utils import resolve_proxy_configs
+                has_proxy = bool(resolve_proxy_configs(EXCEL_DIR, proxy_text=proxy_text)) if use_proxy else False
+                worker_count = clamp_worker_count(worker_count, has_proxy=has_proxy)
                 SCRAPE_TASK = asyncio.create_task(
                     run_scraper_safely(
                         target_path,

@@ -500,3 +500,28 @@ def test_is_tiktok_error_page_detects_visible_error_text():
     </body></html>
     """
     assert is_tiktok_error_page(content) is True
+
+
+def test_configure_request_concurrency_caps_direct_ip():
+    import scraper
+    from scraper import DIRECT_MAX_WORKERS, configure_request_concurrency
+
+    configure_request_concurrency(20, has_proxy=False)
+    assert scraper._request_semaphore._value == DIRECT_MAX_WORKERS
+    configure_request_concurrency(20, has_proxy=True)
+    assert scraper._request_semaphore._value == 20
+
+
+def test_clamp_worker_count():
+    from scraper import DIRECT_MAX_WORKERS, clamp_worker_count
+
+    assert clamp_worker_count(50, has_proxy=False) == DIRECT_MAX_WORKERS
+    assert clamp_worker_count(30, has_proxy=True) == 30
+
+
+def test_is_request_rate_limited_status():
+    from scraper import is_request_rate_limited_status
+
+    assert is_request_rate_limited_status("Error: HTTP 403") is True
+    assert is_request_rate_limited_status("Error: HTTP 429") is True
+    assert is_request_rate_limited_status("Error: HTTP 404") is False

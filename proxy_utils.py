@@ -360,6 +360,13 @@ def pick_session_proxy():
     return chosen
 
 
+def release_thread_proxy():
+    """Drop sticky proxy on this worker so the next request can pick another IP."""
+    _thread_local.proxy_key = None
+    _thread_local.proxy_config = None
+    _thread_local.socks_key = None
+
+
 def urlopen_with_config(request, config, timeout=30):
     if not config or not config.get("enabled"):
         return _direct_opener().open(request, timeout=timeout)

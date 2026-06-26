@@ -34,8 +34,11 @@ from workbook_utils import (
     worksheet_row_partners,
 )
 from proxy_utils import (
+    get_session_proxies,
+    pick_session_proxy,
     playwright_proxy_settings,
     proxy_label,
+    release_thread_proxy,
     resolve_proxy_configs,
     set_session_proxies,
     urlopen_request,
@@ -100,15 +103,64 @@ EMBEDDED_STATE_SCRIPT_PATTERNS = (
 )
 
 MAX_CONCURRENT_REQUESTS = 20
+DIRECT_MAX_WORKERS = 10
 REQUEST_SHELL_RETRY_DELAY = 0.35
+REQUEST_SHELL_RETRY_DELAY_PROXY = 0.12
+REQUEST_CANDIDATE_LIMIT_DIRECT = 4
+REQUEST_CANDIDATE_LIMIT_PROXY = 2
 REQUEST_METRIC_HINT_PATTERN = re.compile(r'"(?:playCount|diggCount)"\s*:\s*"?(\d+)"?')
 _request_semaphore = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
+_request_block_lock = threading.Lock()
+_request_block_until = 0.0
 
 
-def configure_request_concurrency(worker_count):
+def session_uses_proxy():
+    return bool(get_session_proxies())
+
+
+def clamp_worker_count(worker_count, has_proxy=False):
+    count = clamp_int(worker_count, DEFAULT_WORKERS, 1, MAX_WORKERS)
+    if not has_proxy:
+        count = min(count, DIRECT_MAX_WORKERS)
+    return count
+
+
+def configure_request_concurrency(worker_count, has_proxy=False):
     global _request_semaphore
-    limit = max(1, min(int(worker_count or MAX_CONCURRENT_REQUESTS), MAX_WORKERS))
+    limit = clamp_worker_count(worker_count, has_proxy=has_proxy)
     _request_semaphore = threading.Semaphore(limit)
+
+
+def is_request_rate_limited_status(status):
+    text = str(status or "")
+    return "HTTP 403" in text or "HTTP 429" in text
+
+
+def wait_if_request_blocked():
+    if session_uses_proxy():
+        return
+    with _request_block_lock:
+        until = _request_block_until
+    remaining = until - time.time()
+    if remaining > 0:
+        time.sleep(remaining)
+
+
+def note_request_rate_limit(http_code):
+    global _request_block_until
+    if http_code not in (403, 429) or session_uses_proxy():
+        return
+    pause = 8.0 if http_code == 403 else 4.0
+    with _request_block_lock:
+        _request_block_until = max(_request_block_until, time.time() + pause)
+
+
+def request_shell_retry_delay():
+    return REQUEST_SHELL_RETRY_DELAY_PROXY if session_uses_proxy() else REQUEST_SHELL_RETRY_DELAY
+
+
+def request_candidate_limit():
+    return REQUEST_CANDIDATE_LIMIT_PROXY if session_uses_proxy() else REQUEST_CANDIDATE_LIMIT_DIRECT
 
 # Phân biệt hai loại "không có số liệu":
 # - METRICS_UNREADABLE: HTML có dấu hiệu số liệu nhưng đọc lỗi (hiếm, đáng retry).
@@ -1214,7 +1266,7 @@ def enrich_channel_name(
     if username and not profile_already_tried():
         mark_profile_tried()
         fetched = fetch_profile_channel_name_request(username, timeout=timeout)
-        if not fetched and is_generated_username_channel(username):
+        if not fetched and is_generated_username_channel(username) and not session_uses_proxy():
             alt_handle = author_unique_id_from_post(source_url, lookup_url, timeout=timeout)
             if alt_handle and alt_handle.casefold() != username.casefold():
                 fetched = fetch_profile_channel_name_request(alt_handle, timeout=timeout)
@@ -1517,10 +1569,11 @@ def hybrid_browser_worker_count(request_workers, total_links):
 
 
 def fetch_tiktok_html(url, timeout=DEFAULT_REQUEST_TIMEOUT):
+    wait_if_request_blocked()
     request = urllib.request.Request(
         url,
         headers={
-            "User-Agent": DEFAULT_USER_AGENT,
+            "User-Agent": random.choice(USER_AGENTS),
             "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8",
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Referer": "https://www.tiktok.com/",
@@ -1548,7 +1601,7 @@ def _scrape_link_request_impl(url, timeout=DEFAULT_REQUEST_TIMEOUT):
     saw_metric_hints = False
 
     try:
-        candidates = build_request_url_candidates(url)[:4]
+        candidates = build_request_url_candidates(url)[:request_candidate_limit()]
         best_success = None
 
         for candidate in candidates:
@@ -1556,6 +1609,9 @@ def _scrape_link_request_impl(url, timeout=DEFAULT_REQUEST_TIMEOUT):
                 final_url, content = fetch_tiktok_html(candidate, timeout=timeout)
             except urllib.error.HTTPError as error:
                 last_status = f"Error: HTTP {error.code}"
+                if error.code in (403, 429):
+                    note_request_rate_limit(error.code)
+                    release_thread_proxy()
                 continue
             except Exception as error:
                 last_status = f"Error: {str(error)}"
@@ -1574,7 +1630,7 @@ def _scrape_link_request_impl(url, timeout=DEFAULT_REQUEST_TIMEOUT):
                     return data, channel_name, status, saw_metric_hints, final_url
 
             if request_html_has_metric_hints(content):
-                time.sleep(REQUEST_SHELL_RETRY_DELAY)
+                time.sleep(request_shell_retry_delay())
                 try:
                     final_url, content = fetch_tiktok_html(candidate, timeout=timeout)
                 except Exception:
@@ -1621,12 +1677,20 @@ def scrape_link_with_retries_request(
     last_channel = ""
     last_resolved_url = ""
 
+    attempts_used = 0
     for attempt in range(retries + 1):
         if attempt > 0:
-            time.sleep(1.0 + attempt * 0.75 + random.uniform(0.2, 0.8))
+            if is_request_rate_limited_status(last_status):
+                if session_uses_proxy():
+                    time.sleep(0.4 + attempt * 0.35 + random.uniform(0.1, 0.25))
+                else:
+                    time.sleep(2.5 + attempt * 2.0 + random.uniform(0.5, 2.0))
+            else:
+                time.sleep(1.0 + attempt * 0.75 + random.uniform(0.2, 0.8))
         data, channel_name, status, saw_metric_hints, resolved_url = _scrape_link_request_impl(
             url, timeout=timeout
         )
+        attempts_used = attempt + 1
         if resolved_url:
             last_resolved_url = resolved_url
         channel_name = enrich_channel_name(
@@ -1641,11 +1705,14 @@ def scrape_link_with_retries_request(
         )
         last_data, last_channel, last_status = data, channel_name, status
         if status == "Success":
-            return data, channel_name, status, attempt + 1, last_resolved_url
+            return data, channel_name, status, attempts_used, last_resolved_url
+        if is_request_rate_limited_status(status):
+            release_thread_proxy()
+            continue
         if not saw_metric_hints:
             break
 
-    return last_data, last_channel, last_status, retries + 1, last_resolved_url
+    return last_data, last_channel, last_status, attempts_used or 1, last_resolved_url
 
 
 async def block_heavy_resources(route):
@@ -1908,6 +1975,7 @@ async def request_worker_loop(
     current_item = None
 
     try:
+        await loop.run_in_executor(None, pick_session_proxy)
         while True:
             item = await scrape_queue.get()
             current_item = item
@@ -2123,11 +2191,14 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             await websocket_manager.broadcast_log(f"Lỗi: Không tìm thấy file {file_path}")
         return
 
-    worker_count = clamp_int(worker_count, DEFAULT_WORKERS, 1, MAX_WORKERS)
     retries = clamp_int(retries, DEFAULT_RETRIES, 0, 5)
     save_every = clamp_int(save_every, DEFAULT_SAVE_EVERY, 5, 100)
     selected_names = normalize_selected_partners(selected_partner, selected_partners)
     partner_label = selected_partner_label(selected_names)
+    scrape_base_dir = base_dir or os.path.dirname(os.path.abspath(file_path))
+    proxy_configs = resolve_proxy_configs(scrape_base_dir, proxy_text=proxy_text) if use_proxy else []
+    has_proxy = bool(proxy_configs)
+    worker_count = clamp_worker_count(worker_count, has_proxy=has_proxy)
 
     workbook = openpyxl.load_workbook(file_path)
     clear_existing_total_rows(workbook)
@@ -2164,11 +2235,8 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     total = len(bucket_order)
     started_at = time.perf_counter()
     mode = "partner" if selected_names else "full"
-    scrape_base_dir = base_dir or os.path.dirname(os.path.abspath(file_path))
-    proxy_configs = resolve_proxy_configs(scrape_base_dir, proxy_text=proxy_text) if use_proxy else []
-
     if use_request:
-        configure_request_concurrency(worker_count)
+        configure_request_concurrency(worker_count, has_proxy=has_proxy)
 
     # Adaptive save_every: file lớn save thưa hơn để giảm I/O
     if total > 500:
@@ -2213,6 +2281,14 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                         proxy_note = f" • {len(proxy_configs)} proxy (random)"
                 elif use_proxy:
                     proxy_note = " • proxy: chưa cấu hình"
+                if not has_proxy:
+                    await websocket_manager.broadcast_log(
+                        f"Không proxy — giới hạn {DIRECT_MAX_WORKERS} luồng để tránh TikTok chặn IP. Bật Proxy xoay để chọn nhiều luồng hơn."
+                    )
+                elif total > 500 and worker_count < 25:
+                    await websocket_manager.broadcast_log(
+                        f"Gợi ý: Sheet lớn + proxy — thử 25–30 luồng để quét nhanh hơn (hiện {worker_count} luồng)."
+                    )
                 await websocket_manager.broadcast_log(
                     f"Bắt đầu quét {total} URL bằng Request (HTTP), {worker_count} luồng, retry {retries} lần, lưu mỗi {save_every} kết quả{proxy_note}."
                 )
