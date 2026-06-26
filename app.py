@@ -587,7 +587,13 @@ def build_export_payload(target_path, selected_partners, apply_min_views, min_vi
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    return templates.TemplateResponse(request=request, name="index.html")
+    app_js_path = os.path.join(EXCEL_DIR, "static", "app.js")
+    asset_version = str(int(os.path.getmtime(app_js_path))) if os.path.exists(app_js_path) else "1"
+    return templates.TemplateResponse(
+        request=request,
+        name="index.html",
+        context={"asset_version": asset_version},
+    )
 
 
 @app.get("/favicon.ico", include_in_schema=False)

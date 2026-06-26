@@ -3,10 +3,11 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
     <title>Riviu Reports</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">
-    <link rel="stylesheet" href="/static/styles.css">
+    <link rel="stylesheet" href="/static/styles.css?v={{ asset_version }}">
 </head>
 <body>
     <div class="toast-stack" id="toastStack" aria-live="assertive"></div>
@@ -395,6 +396,6 @@
         </div>
     </div>
 
-    <script src="/static/app.js"></script>
+    <script src="/static/app.js?v={{ asset_version }}"></script>
 </body>
 </html>

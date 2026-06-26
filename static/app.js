@@ -357,19 +357,26 @@ function renderProxyTestResult(data, isError = false) {
         proxyTestResult.textContent = String(data || 'Test thất bại');
         return;
     }
-    const okCount = Number(data.okCount || 0);
+    ok_count = Number(data.okCount ?? 0);
     const total = Number(data.count || 0);
-    const lines = [data.message || `${okCount}/${total} proxy OK`];
+    const lines = [];
+    if (total > 0) {
+        lines.push(data.message || `${okCount}/${total} proxy OK`);
+    } else {
+        lines.push(data.message || 'Không đọc được proxy');
+    }
     if (Array.isArray(data.results) && data.results.length) {
         data.results.forEach(item => {
-            const name = item.name || item.host || `Dòng ${item.line || '?'}`;
+            const name = item.name || `Dòng ${item.line || '?'}`;
             if (item.ok && item.ip) {
                 lines.push(`${name} → ${item.ip}`);
             } else {
-                const reason = item.error || item.tiktokError || 'không kết nối được';
                 lines.push(`${name} → lỗi`);
             }
         });
+    } else if (data.uniqueIps) {
+        lines.length = 0;
+        lines.push('Phiên bản cũ — tắt Khoidong.bat, chạy capnhat.bat rồi mở lại.');
     }
     proxyTestResult.className = `proxy-test-result ${okCount > 0 ? 'ok' : 'error'}`;
     proxyTestResult.textContent = lines.join('\n');

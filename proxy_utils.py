@@ -311,14 +311,22 @@ def urlopen_request(request, timeout=30):
     return urlopen_with_config(request, config, timeout=timeout)
 
 
-def fetch_ip_via_config(config, timeout=25):
+def fetch_ip_via_config(config, timeout=25, retries=2):
     request = urllib.request.Request(
         IP_CHECK_URL,
         headers={"User-Agent": "Mozilla/5.0"},
     )
-    with urlopen_with_config(request, config, timeout=timeout) as response:
-        payload = json.loads(response.read().decode("utf-8"))
-        return str(payload.get("ip") or "").strip()
+    last_error = ""
+    for attempt in range(max(retries, 1)):
+        try:
+            with urlopen_with_config(request, config, timeout=timeout) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+                return str(payload.get("ip") or "").strip()
+        except Exception as error:
+            last_error = str(error)
+            if attempt + 1 >= retries:
+                break
+    raise urllib.error.URLError(last_error or "Không lấy được IP")
 
 
 def tiktok_html_looks_valid(body):
@@ -367,7 +375,7 @@ def test_proxy_config(config, timeout=8, *, check_tiktok=False):
         "error": "",
     }
     try:
-        result["ip"] = fetch_ip_via_config(config, timeout=timeout)
+        result["ip"] = fetch_ip_via_config(config, timeout=timeout, retries=2)
         result["ok"] = bool(result["ip"])
     except Exception as error:
         result["error"] = str(error)
