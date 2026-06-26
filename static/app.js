@@ -357,7 +357,7 @@ function renderProxyTestResult(data, isError = false) {
         proxyTestResult.textContent = String(data || 'Test thất bại');
         return;
     }
-    ok_count = Number(data.okCount ?? 0);
+    const okCount = Number(data.okCount ?? 0);
     const total = Number(data.count || 0);
     const lines = [];
     if (total > 0) {
