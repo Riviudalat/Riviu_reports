@@ -99,10 +99,16 @@ EMBEDDED_STATE_SCRIPT_PATTERNS = (
     r'<script[^>]+id="SIGI_STATE"[^>]*>(.*?)</script>',
 )
 
-MAX_CONCURRENT_REQUESTS = 12
-REQUEST_SHELL_RETRY_DELAY = 1.25
+MAX_CONCURRENT_REQUESTS = 20
+REQUEST_SHELL_RETRY_DELAY = 0.35
 REQUEST_METRIC_HINT_PATTERN = re.compile(r'"(?:playCount|diggCount)"\s*:\s*"?(\d+)"?')
 _request_semaphore = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
+
+
+def configure_request_concurrency(worker_count):
+    global _request_semaphore
+    limit = max(1, min(int(worker_count or MAX_CONCURRENT_REQUESTS), MAX_WORKERS))
+    _request_semaphore = threading.Semaphore(limit)
 
 # Phân biệt hai loại "không có số liệu":
 # - METRICS_UNREADABLE: HTML có dấu hiệu số liệu nhưng đọc lỗi (hiếm, đáng retry).
@@ -2160,6 +2166,9 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     mode = "partner" if selected_names else "full"
     scrape_base_dir = base_dir or os.path.dirname(os.path.abspath(file_path))
     proxy_configs = resolve_proxy_configs(scrape_base_dir, proxy_text=proxy_text) if use_proxy else []
+
+    if use_request:
+        configure_request_concurrency(worker_count)
 
     # Adaptive save_every: file lớn save thưa hơn để giảm I/O
     if total > 500:

@@ -35,6 +35,63 @@ TIKTOK_HTML_MARKERS = (
 
 _session_proxies = []
 _session_proxy_lock = threading.Lock()
+_thread_local = threading.local()
+_opener_cache = {}
+_opener_cache_lock = threading.Lock()
+
+
+def _config_cache_key(config):
+    if not config:
+        return None
+    return (
+        config.get("type"),
+        config.get("host"),
+        config.get("port"),
+        config.get("socks_port"),
+        config.get("username"),
+    )
+
+
+def _direct_opener():
+    with _opener_cache_lock:
+        opener = _opener_cache.get("direct")
+        if opener is None:
+            opener = urllib.request.build_opener()
+            _opener_cache["direct"] = opener
+        return opener
+
+
+def _http_proxy_opener(config):
+    key = _config_cache_key(config)
+    with _opener_cache_lock:
+        opener = _opener_cache.get(key)
+        if opener is None:
+            proxy_url = build_http_proxy_url(config)
+            handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
+            opener = urllib.request.build_opener(handler)
+            _opener_cache[key] = opener
+        return opener
+
+
+def _socks_urlopen(request, config, timeout):
+    try:
+        import socks  # PySocks
+    except ImportError as error:
+        raise RuntimeError("Chưa cài PySocks. Chạy: pip install PySocks") from error
+
+    key = _config_cache_key(config)
+    if getattr(_thread_local, "socks_key", None) != key:
+        socks.set_default_proxy(
+            socks.SOCKS5,
+            config["host"],
+            config["socks_port"],
+            True,
+            config.get("username") or None,
+            config.get("password") or None,
+        )
+        socket.socket = socks.socksocket
+        _thread_local.socks_key = key
+    return urllib.request.urlopen(request, timeout=timeout)
 
 
 def proxy_list_path(base_dir):
@@ -270,6 +327,11 @@ def set_session_proxies(configs):
             for item in (configs or [])
             if isinstance(item, dict) and item.get("enabled", True)
         ]
+    with _opener_cache_lock:
+        _opener_cache.clear()
+    _thread_local.socks_key = None
+    _thread_local.proxy_key = None
+    _thread_local.proxy_config = None
 
 
 def set_session_proxy(config):
@@ -283,40 +345,29 @@ def get_session_proxies():
 
 def pick_session_proxy():
     with _session_proxy_lock:
-        if not _session_proxies:
-            return None
-        return random.choice(_session_proxies)
+        pool = list(_session_proxies)
+    if not pool:
+        return None
+    sticky = getattr(_thread_local, "proxy_config", None)
+    sticky_key = getattr(_thread_local, "proxy_key", None)
+    if sticky and sticky_key == _config_cache_key(sticky):
+        for item in pool:
+            if _config_cache_key(item) == sticky_key:
+                return item
+    chosen = random.choice(pool)
+    _thread_local.proxy_config = chosen
+    _thread_local.proxy_key = _config_cache_key(chosen)
+    return chosen
 
 
 def urlopen_with_config(request, config, timeout=30):
     if not config or not config.get("enabled"):
-        return urllib.request.urlopen(request, timeout=timeout)
+        return _direct_opener().open(request, timeout=timeout)
 
     if config.get("type") == "socks5":
-        try:
-            import socks  # PySocks
-        except ImportError as error:
-            raise RuntimeError("Chưa cài PySocks. Chạy: pip install PySocks") from error
+        return _socks_urlopen(request, config, timeout)
 
-        default_socket = socket.socket
-        try:
-            socks.set_default_proxy(
-                socks.SOCKS5,
-                config["host"],
-                config["socks_port"],
-                True,
-                config.get("username") or None,
-                config.get("password") or None,
-            )
-            socket.socket = socks.socksocket
-            return urllib.request.urlopen(request, timeout=timeout)
-        finally:
-            socket.socket = default_socket
-
-    proxy_url = build_http_proxy_url(config)
-    handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-    opener = urllib.request.build_opener(handler)
-    return opener.open(request, timeout=timeout)
+    return _http_proxy_opener(config).open(request, timeout=timeout)
 
 
 def urlopen_request(request, timeout=30):
