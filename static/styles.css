@@ -34,7 +34,7 @@ body { font-family: 'Inter', sans-serif; background: #f0f2f5; color: #1c1e21; li
     flex: 1 1 0;
 }
 .toolbar-config { flex: 0 1 auto; }
-.toolbar-proxy { flex: 1 1 0; max-width: 300px; }
+.toolbar-proxy { flex: 0 0 auto; max-width: 220px; min-width: 180px; }
 .toolbar-sheet { flex: 1 1 0; max-width: 220px; }
 .toolbar-actions { flex: 0 1 auto; gap: 8px; margin-left: 0; }
 .toolbar-divider {
@@ -48,6 +48,19 @@ body { font-family: 'Inter', sans-serif; background: #f0f2f5; color: #1c1e21; li
 .toolbar-field-grow { flex: 1 1 auto; width: 100%; max-width: 200px; }
 .toolbar-label { display: inline-flex; align-items: center; justify-content: center; gap: 4px; font-size: 10px; color: #64748b; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; line-height: 1; width: 100%; text-align: center; }
 .toolbar-label-icon { font-size: 13px !important; color: #94a3b8; }
+.material-icons-outlined {
+    font-family: 'Material Icons Outlined';
+    font-weight: normal;
+    font-style: normal;
+    font-size: 24px;
+    line-height: 1;
+    letter-spacing: normal;
+    text-transform: none;
+    display: inline-block;
+    white-space: nowrap;
+    direction: ltr;
+    -webkit-font-smoothing: antialiased;
+}
 .toolbar-select {
     width: 100%;
     min-width: 88px;
@@ -72,9 +85,10 @@ body { font-family: 'Inter', sans-serif; background: #f0f2f5; color: #1c1e21; li
 .proxy-card {
     display: flex;
     align-items: center;
-    justify-content: center;
+    justify-content: flex-start;
     gap: 8px;
     width: 100%;
+    min-width: 172px;
     min-height: 38px;
     padding: 6px 10px;
     border-radius: 10px;
@@ -82,21 +96,32 @@ body { font-family: 'Inter', sans-serif; background: #f0f2f5; color: #1c1e21; li
     background: #fff;
     box-shadow: inset 0 1px 0 rgba(255,255,255,0.7);
     transition: border-color 0.15s, box-shadow 0.15s;
+    overflow: visible;
 }
 .proxy-card.ready { border-color: #bbf7d0; background: linear-gradient(180deg, #fff 0%, #f6fff9 100%); }
 .proxy-card.active { border-color: #fdba74; box-shadow: 0 0 0 3px rgba(255, 107, 0, 0.1); }
-.proxy-toggle { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; cursor: pointer; user-select: none; }
-.proxy-toggle-input { position: absolute; opacity: 0; width: 0; height: 0; pointer-events: none; }
+.proxy-toggle { position: relative; display: inline-flex; align-items: center; gap: 8px; flex: 0 0 auto; flex-shrink: 0; cursor: pointer; user-select: none; }
+.proxy-toggle-input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    padding: 0;
+    margin: -1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    white-space: nowrap;
+    border: 0;
+}
 .proxy-switch { position: relative; width: 38px; height: 22px; border-radius: 999px; background: #cbd5e1; flex: 0 0 auto; transition: background 0.2s; }
 .proxy-switch-knob { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(15, 23, 42, 0.25); transition: transform 0.2s; }
 .proxy-toggle-input:checked + .proxy-switch { background: #ff6b00; }
 .proxy-toggle-input:checked + .proxy-switch .proxy-switch-knob { transform: translateX(16px); }
 .proxy-toggle-input:focus-visible + .proxy-switch { box-shadow: 0 0 0 3px rgba(255, 107, 0, 0.25); }
-.toolbar-field-proxy { width: 100%; max-width: 220px; }
+.toolbar-field-proxy { width: 100%; max-width: 220px; min-width: 180px; }
 .proxy-status-dot { width: 8px; height: 8px; border-radius: 50%; background: #cbd5e1; flex: 0 0 auto; }
 .proxy-card.ready .proxy-status-dot { background: #22c55e; box-shadow: 0 0 0 3px rgba(34, 197, 94, 0.18); }
 .proxy-card.active .proxy-status-dot { background: #ff6b00; box-shadow: 0 0 0 3px rgba(255, 107, 0, 0.18); }
-.proxy-setup-btn { display: inline-flex; align-items: center; gap: 4px; padding: 7px 10px; border-radius: 8px; border: 1px solid #e2e8f0; background: #f8fafc; color: #475569; font-size: 12px; font-weight: 700; cursor: pointer; flex: 0 0 auto; transition: 0.15s; white-space: nowrap; }
+.proxy-setup-btn { display: inline-flex; align-items: center; gap: 4px; padding: 7px 10px; border-radius: 8px; border: 1px solid #e2e8f0; background: #f8fafc; color: #475569; font-size: 12px; font-weight: 700; cursor: pointer; flex: 1 1 auto; min-width: 0; transition: 0.15s; white-space: nowrap; }
 .proxy-setup-btn .material-icons-outlined { font-size: 16px; }
 .proxy-setup-btn:hover { background: #fff7ed; border-color: #fdba74; color: #c2410c; }
 .proxy-setup-btn:disabled { opacity: 0.45; cursor: not-allowed; }
