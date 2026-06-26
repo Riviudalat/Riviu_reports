@@ -23,6 +23,7 @@ from openpyxl.utils.units import pixels_to_EMU
 
 from scraper import run_scraper, read_scrape_history
 from google_sheets_sync import authorize_google, oauth_status, push_rows_to_new_sheet, save_oauth_client
+from proxy_utils import proxy_status
 from workbook_utils import (
     GOOGLE_SHEET_LABEL,
     LEGACY_GOOGLE_SHEET_FILE_ID,
@@ -439,7 +440,7 @@ def content_disposition(filename):
     return f"attachment; filename*=UTF-8''{quote(filename)}"
 
 
-async def run_scraper_safely(target_path, worker_count, partner=None, partners=None, create_result_sheet=False, push_to_google=False, sheet_name="", use_request=True, browser_fallback=False):
+async def run_scraper_safely(target_path, worker_count, partner=None, partners=None, create_result_sheet=False, push_to_google=False, sheet_name="", use_request=True, browser_fallback=False, use_proxy=False):
     try:
         scan_sheet, _ = resolve_scan_sheet(sheet_name)
         await run_scraper(
@@ -454,6 +455,7 @@ async def run_scraper_safely(target_path, worker_count, partner=None, partners=N
             sheet_name=scan_sheet,
             use_request=use_request,
             browser_fallback=browser_fallback,
+            use_proxy=use_proxy,
         )
         if push_to_google:
             source = current_google_sheet_source()
@@ -692,6 +694,11 @@ async def google_oauth_status():
         "connectedSheetUrl": target_url,
         "connectedSpreadsheetId": target_id,
     }
+
+
+@app.get("/proxy-status")
+async def proxy_status_endpoint():
+    return proxy_status(EXCEL_DIR)
 
 
 @app.post("/google-oauth-client")
@@ -952,6 +959,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 else:
                     use_request = True
                     browser_fallback = False
+                use_proxy = bool(payload.get("use_proxy", False))
                 SCRAPE_TASK = asyncio.create_task(
                     run_scraper_safely(
                         target_path,
@@ -963,6 +971,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         sheet_name=sheet_name,
                         use_request=use_request,
                         browser_fallback=browser_fallback,
+                        use_proxy=use_proxy,
                     )
                 )
             elif action == "cancel":

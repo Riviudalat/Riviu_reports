@@ -1,0 +1,8 @@
+{
+  "enabled": true,
+  "type": "http",
+  "host": "us.cliproxy.io",
+  "port": 3010,
+  "username": "YOUR_USERNAME-region-VN",
+  "password": "YOUR_PASSWORD_HERE"
+}

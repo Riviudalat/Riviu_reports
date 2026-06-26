@@ -16,6 +16,8 @@ const startBtn = document.getElementById('startBtn');
 const cancelBtn = document.getElementById('cancelBtn');
 const workerCountSelect = document.getElementById('workerCountSelect');
 const scrapeModeSelect = document.getElementById('scrapeModeSelect');
+const proxyUseCheckbox = document.getElementById('proxyUseCheckbox');
+const proxyUseLabel = document.getElementById('proxyUseLabel');
 const scanSheetSelect = document.getElementById('scanSheetSelect');
 const pushSheetSelect = document.getElementById('pushSheetSelect');
 const googleSheetUrlInput = document.getElementById('googleSheetUrlInput');
@@ -302,6 +304,27 @@ function setGooglePushState() {
     button.title = enabled
         ? ''
         : 'Chỉ bật sau khi đã có file local, URL sheet đích, đăng nhập Google và chọn sheet nguồn.';
+}
+
+async function refreshProxyStatus() {
+    if (!proxyUseCheckbox || !proxyUseLabel) return;
+    try {
+        const res = await fetch('/proxy-status');
+        const data = await res.json();
+        if (data.configured && data.enabled) {
+            proxyUseLabel.textContent = `Proxy xoay (${data.host}:${data.port || ''})`;
+            proxyUseCheckbox.title = `HTTP proxy ${data.host}:${data.port || ''} — IP đổi theo từng kết nối`;
+        } else if (data.configured) {
+            proxyUseLabel.textContent = 'Proxy (tắt trong config)';
+            proxyUseCheckbox.disabled = true;
+            proxyUseCheckbox.title = 'Mở data/proxy_config.json và đặt enabled: true';
+        } else {
+            proxyUseLabel.textContent = 'Proxy xoay (chưa cấu hình)';
+            proxyUseCheckbox.title = 'Tạo data/proxy_config.json từ proxy_config.example.json';
+        }
+    } catch (error) {
+        proxyUseLabel.textContent = 'Proxy xoay';
+    }
 }
 
 async function refreshGoogleOauthStatus() {
@@ -759,17 +782,20 @@ function startScraping(partners = []) {
     const selected = Array.isArray(partners) ? partners : (partners ? [partners] : []);
     const workers = Number(workerCountSelect.value || 20);
     const scrapeMode = scrapeModeSelect.value === 'browser' ? 'browser' : 'request';
+    const useProxy = Boolean(proxyUseCheckbox && proxyUseCheckbox.checked);
     currentScanSheetName = scanSheetSelect.value || currentScanSheetName || currentSheetName;
     if (!currentScanSheetName) {
         notify('Vui lòng chọn sheet để quét.', 'warn');
         return;
     }
     const modeLabel = scrapeMode === 'request' ? 'Request (HTTP)' : 'trình duyệt';
-    addLog(`Bắt đầu quét sheet "${currentScanSheetName}" • file: ${currentFileId || 'chưa rõ'} • ${modeLabel} • luồng: ${workers} • đối tác: ${selected.length ? selected.join(', ') : 'tất cả'}.`);
+    const proxyLabel = useProxy ? ' • proxy bật' : '';
+    addLog(`Bắt đầu quét sheet "${currentScanSheetName}" • file: ${currentFileId || 'chưa rõ'} • ${modeLabel}${proxyLabel} • luồng: ${workers} • đối tác: ${selected.length ? selected.join(', ') : 'tất cả'}.`);
     ws.send(JSON.stringify({
         action: 'start',
         workers,
         scrape_mode: scrapeMode,
+        use_proxy: useProxy,
         sheet_name: currentScanSheetName,
         partners: selected,
         partner: selected.length === 1 ? selected[0] : ''
@@ -779,6 +805,7 @@ function startScraping(partners = []) {
     cancelBtn.innerHTML = '<span class="material-icons-outlined">stop_circle</span> HỦY QUÉT';
     workerCountSelect.disabled = true;
     scrapeModeSelect.disabled = true;
+    if (proxyUseCheckbox) proxyUseCheckbox.disabled = true;
     scanSheetSelect.disabled = true;
     document.getElementById('refreshPartnerBtn').disabled = true;
     startBtn.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> ĐANG QUÉT...';
@@ -901,6 +928,7 @@ function updateProgress(data) {
         cancelBtn.innerHTML = '<span class="material-icons-outlined">stop_circle</span> HỦY QUÉT';
         workerCountSelect.disabled = false;
         scrapeModeSelect.disabled = false;
+        if (proxyUseCheckbox) proxyUseCheckbox.disabled = false;
         scanSheetSelect.disabled = false;
         startBtn.innerHTML = '<span class="material-icons-outlined">play_circle</span> BẮT ĐẦU QUÉT';
         addLog(data.cancelled ? '--- ĐÃ HỦY QUÉT ---' : '--- QUÉT HOÀN TẤT ---');
@@ -1353,5 +1381,6 @@ pushSheetSelect.addEventListener('change', () => {
 window.onload = async () => {
     await updateFileList({ applyGoogleSheetUrl: true });
     await loadPreview();
+    await refreshProxyStatus();
     connectWS();
 };

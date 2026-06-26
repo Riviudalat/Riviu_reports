@@ -33,6 +33,12 @@ from workbook_utils import (
     worksheet_partner_column_indexes,
     worksheet_row_partners,
 )
+from proxy_utils import (
+    load_proxy_config,
+    playwright_proxy_settings,
+    set_session_proxy,
+    urlopen_request,
+)
 
 
 USER_AGENTS = [
@@ -1517,7 +1523,7 @@ def fetch_tiktok_html(url, timeout=DEFAULT_REQUEST_TIMEOUT):
         },
     )
     with _request_semaphore:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with urlopen_request(request, timeout=timeout) as response:
             return response.geturl(), response.read().decode("utf-8", errors="replace")
 
 
@@ -1642,15 +1648,18 @@ async def block_heavy_resources(route):
         await route.continue_()
 
 
-async def make_browser_context(browser):
-    context = await browser.new_context(
-        user_agent=DEFAULT_USER_AGENT,
-        viewport={"width": 390, "height": 844},
-        locale=BROWSER_LOCALE,
-        timezone_id=BROWSER_TIMEZONE,
-        geolocation=BROWSER_GEOLOCATION,
-        permissions=["geolocation"],
-    )
+async def make_browser_context(browser, proxy_config=None):
+    context_kwargs = {
+        "user_agent": DEFAULT_USER_AGENT,
+        "viewport": {"width": 390, "height": 844},
+        "locale": BROWSER_LOCALE,
+        "timezone_id": BROWSER_TIMEZONE,
+        "geolocation": BROWSER_GEOLOCATION,
+        "permissions": ["geolocation"],
+    }
+    if proxy_config and proxy_config.get("enabled"):
+        context_kwargs["proxy"] = playwright_proxy_settings(proxy_config)
+    context = await browser.new_context(**context_kwargs)
     await context.route("**/*", block_heavy_resources)
     return context
 
@@ -1769,12 +1778,13 @@ async def worker_loop(
     startup_semaphore=None,
     websocket_manager=None,
     worker_label=None,
+    proxy_config=None,
 ):
     RECYCLE_AFTER = 100
     display_worker = worker_label if worker_label is not None else worker_id
 
     async def make_context():
-        return await make_browser_context(browser)
+        return await make_browser_context(browser, proxy_config=proxy_config)
 
     current_item = None
 
@@ -2096,7 +2106,7 @@ def progress_payload(total, processed, success_count, error_count, worker_count,
     }
 
 
-async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None, create_result_sheet=False, base_dir=None, file_label="", sheet_name=None, use_request=True, browser_fallback=False):
+async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None, create_result_sheet=False, base_dir=None, file_label="", sheet_name=None, use_request=True, browser_fallback=False, use_proxy=False):
     if not os.path.exists(file_path):
         if websocket_manager:
             await websocket_manager.broadcast_log(f"Lỗi: Không tìm thấy file {file_path}")
@@ -2143,6 +2153,8 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     total = len(bucket_order)
     started_at = time.perf_counter()
     mode = "partner" if selected_names else "full"
+    scrape_base_dir = base_dir or os.path.dirname(os.path.abspath(file_path))
+    proxy_config = load_proxy_config(scrape_base_dir, enabled_only=True) if use_proxy else None
 
     # Adaptive save_every: file lớn save thưa hơn để giảm I/O
     if total > 500:
@@ -2179,8 +2191,14 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                     f"Bắt đầu quét hybrid {total} URL: {worker_count} luồng Request + {fallback_count} luồng trình duyệt fallback, retry {retries} lần, lưu mỗi {save_every} kết quả."
                 )
             else:
+                proxy_note = ""
+                if proxy_config:
+                    proxy_port = proxy_config["socks_port"] if proxy_config.get("type") == "socks5" else proxy_config["port"]
+                    proxy_note = f" • proxy {proxy_config['type'].upper()} {proxy_config['host']}:{proxy_port}"
+                elif use_proxy:
+                    proxy_note = " • proxy: chưa cấu hình"
                 await websocket_manager.broadcast_log(
-                    f"Bắt đầu quét {total} URL bằng Request (HTTP), {worker_count} luồng, retry {retries} lần, lưu mỗi {save_every} kết quả."
+                    f"Bắt đầu quét {total} URL bằng Request (HTTP), {worker_count} luồng, retry {retries} lần, lưu mỗi {save_every} kết quả{proxy_note}."
                 )
         else:
             await websocket_manager.broadcast_log(
@@ -2223,6 +2241,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     active_worker_count = request_worker_count + browser_worker_count
 
     async with async_playwright() as playwright:
+        set_session_proxy(proxy_config if proxy_config and proxy_config.get("enabled") else None)
         if websocket_manager:
             if use_request and browser_fallback:
                 await websocket_manager.broadcast_log(
@@ -2285,6 +2304,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                         startup_semaphore=startup_semaphore,
                         websocket_manager=websocket_manager,
                         worker_label=f"B{index + 1}" if use_request else None,
+                        proxy_config=proxy_config,
                     )
                 )
                 for index in range(browser_worker_count)
@@ -2466,6 +2486,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 await asyncio.sleep(0.3)
             except Exception:
                 pass
+            set_session_proxy(None)
 
     try:
         append_sheet_total_rows(workbook)
