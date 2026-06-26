@@ -119,6 +119,18 @@ def test_proxy_status_not_configured(tmp_path):
     assert status["count"] == 0
 
 
+def test_proxy_display_name_uses_region():
+    from proxy_utils import proxy_display_name
+
+    config = normalize_proxy_config({
+        "host": "us.cliproxy.io",
+        "port": 3010,
+        "username": "dmt61183931-region-VN",
+        "password": "secret",
+    })
+    assert proxy_display_name(config) == "VN"
+
+
 def test_tiktok_html_looks_valid():
     from proxy_utils import tiktok_html_looks_valid
 

@@ -357,17 +357,21 @@ function renderProxyTestResult(data, isError = false) {
         proxyTestResult.textContent = String(data || 'Test thất bại');
         return;
     }
-    const lines = [data.message || ''];
+    const okCount = Number(data.okCount || 0);
+    const total = Number(data.count || 0);
+    const lines = [data.message || `${okCount}/${total} proxy OK`];
     if (Array.isArray(data.results) && data.results.length) {
         data.results.forEach(item => {
-            const ip = item.ip ? `IP ${item.ip}` : 'không lấy được IP';
-            const tiktok = item.tiktokOk ? 'TikTok OK' : 'TikTok chưa OK';
-            const tiktokErr = item.tiktokError ? ` • ${item.tiktokError}` : '';
-            const err = item.error ? ` • ${item.error}` : '';
-            lines.push(`#${item.attempt || '?'} ${item.label || item.host || 'proxy'} — ${ip} • ${tiktok}${tiktokErr}${err}`);
+            const name = item.name || item.host || `Dòng ${item.line || '?'}`;
+            if (item.ok && item.ip) {
+                lines.push(`${name} → ${item.ip}`);
+            } else {
+                const reason = item.error || item.tiktokError || 'không kết nối được';
+                lines.push(`${name} → lỗi`);
+            }
         });
     }
-    proxyTestResult.className = `proxy-test-result ${data.uniqueIps ? 'ok' : 'error'}`;
+    proxyTestResult.className = `proxy-test-result ${okCount > 0 ? 'ok' : 'error'}`;
     proxyTestResult.textContent = lines.join('\n');
 }
 
@@ -461,7 +465,7 @@ async function testProxyList() {
         const res = await fetch('/proxy-test', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text, attempts: 3, save: true }),
+            body: JSON.stringify({ text, save: true }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || data.message || 'Test thất bại');
@@ -469,7 +473,7 @@ async function testProxyList() {
         renderProxyTestResult(data);
         updateProxyModalSummary(Number(data.count || 0));
         await refreshProxyStatus();
-        notify(data.message || 'Test xong', data.uniqueIps ? 'success' : 'warn');
+        notify(data.message || 'Test xong', Number(data.okCount || 0) > 0 ? 'success' : 'warn');
     } catch (error) {
         renderProxyTestResult(error.message || 'Test thất bại', true);
         notify(error.message || 'Test proxy thất bại', 'error');

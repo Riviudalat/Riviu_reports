@@ -344,9 +344,20 @@ def probe_tiktok_via_config(config, timeout=25, retries=2):
     return 0, 0, False, last_error
 
 
-def test_proxy_config(config, timeout=25):
+def proxy_display_name(config):
+    username = str(config.get("username") or "").strip()
+    region_match = re.search(r"region-([A-Za-z0-9_-]+)", username, re.IGNORECASE)
+    if region_match:
+        return region_match.group(1).upper()
+    if username:
+        return username if len(username) <= 28 else username[:25] + "..."
+    return f"{config['host']}:{config['port']}"
+
+
+def test_proxy_config(config, timeout=8, *, check_tiktok=False):
     result = {
         "label": proxy_label(config),
+        "name": proxy_display_name(config),
         "host": config.get("host", ""),
         "port": config.get("port"),
         "ok": False,
@@ -362,11 +373,11 @@ def test_proxy_config(config, timeout=25):
         result["error"] = str(error)
         return result
 
-    if not result["ok"]:
+    if not result["ok"] or not check_tiktok:
         return result
 
     try:
-        _, _, tiktok_ok, tiktok_error = probe_tiktok_via_config(config, timeout=timeout)
+        _, _, tiktok_ok, tiktok_error = probe_tiktok_via_config(config, timeout=timeout, retries=1)
         result["tiktokOk"] = tiktok_ok
         if tiktok_error:
             result["tiktokError"] = tiktok_error
@@ -377,39 +388,34 @@ def test_proxy_config(config, timeout=25):
     return result
 
 
-def test_proxy_text(text, attempts=3, timeout=25):
+def test_proxy_text(text, timeout=8):
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
     configs = parse_proxy_text(text)
     if not configs:
         return {
             "count": 0,
-            "uniqueIps": 0,
+            "okCount": 0,
             "results": [],
             "message": "Không đọc được proxy nào. Mỗi dòng 1 proxy.",
         }
 
-    results = []
-    ips = []
-    rotation_configs = configs if len(configs) > 1 else configs * max(attempts, 1)
-    sample_count = min(max(attempts, 1), 5)
-    for index in range(sample_count):
-        config = rotation_configs[index % len(configs)]
-        item = test_proxy_config(config, timeout=timeout)
-        item["attempt"] = index + 1
-        results.append(item)
-        if item.get("ip"):
-            ips.append(item["ip"])
+    results = [None] * len(configs)
+    with ThreadPoolExecutor(max_workers=min(len(configs), 6)) as pool:
+        future_map = {
+            pool.submit(test_proxy_config, config, timeout): index
+            for index, config in enumerate(configs)
+        }
+        for future in as_completed(future_map):
+            index = future_map[future]
+            item = future.result()
+            item["line"] = index + 1
+            results[index] = item
 
-    unique_ips = sorted(set(ips))
-    tiktok_hits = sum(1 for item in results if item.get("tiktokOk"))
+    ok_count = sum(1 for item in results if item and item.get("ok"))
     return {
         "count": len(configs),
-        "attempts": sample_count,
-        "uniqueIps": len(unique_ips),
-        "ips": unique_ips,
+        "okCount": ok_count,
         "results": results,
-        "message": (
-            f"Đọc được {len(configs)} proxy • {len(unique_ips)} IP khác • TikTok OK {tiktok_hits}/{len(results)}"
-            if ips
-            else f"Đọc được {len(configs)} proxy nhưng chưa test thành công"
-        ),
+        "message": f"{ok_count}/{len(configs)} proxy OK" if ok_count else f"0/{len(configs)} proxy OK",
     }

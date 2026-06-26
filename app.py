@@ -734,14 +734,9 @@ async def save_proxy_list(data: dict):
 async def test_proxy_list(data: dict | None = None):
     payload = data or {}
     text = str(payload.get("text") or load_proxy_list_text(EXCEL_DIR))
-    attempts = payload.get("attempts", 5)
-    try:
-        attempts = max(1, min(int(attempts), 5))
-    except (TypeError, ValueError):
-        attempts = 5
     if payload.get("save"):
         save_proxy_list_text(EXCEL_DIR, text)
-    return test_proxy_text(text, attempts=attempts)
+    return test_proxy_text(text)
 
 
 @app.post("/google-oauth-client")
