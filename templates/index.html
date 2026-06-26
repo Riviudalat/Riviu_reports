@@ -11,6 +11,7 @@
 </head>
 <body>
     <div class="toast-stack" id="toastStack" aria-live="assertive"></div>
+    <div class="server-banner" id="serverBanner" hidden>Server đã cập nhật — restart Khoidong.bat rồi F5 trang này.</div>
     <div class="container">
         <div class="header">
             <div class="header-brand">
@@ -41,6 +42,7 @@
                         </label>
                         <select id="scrapeModeSelect" class="toolbar-select">
                             <option value="request" selected>Request</option>
+                            <option value="hybrid">Hybrid (Request + trình duyệt)</option>
                             <option value="browser">Trình duyệt</option>
                         </select>
                     </div>

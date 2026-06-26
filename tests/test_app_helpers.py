@@ -8,6 +8,20 @@ from app import build_google_push_rows, build_partner_report
 from workbook_utils import is_failed_channel_name, metric_number
 
 
+def test_validate_proxy_start_blocks_empty(tmp_path):
+    from app import validate_proxy_start
+
+    msg = validate_proxy_start(True, "", str(tmp_path))
+    assert msg is not None
+    assert "proxy" in msg.lower()
+
+
+def test_validate_proxy_start_allows_disabled(tmp_path):
+    from app import validate_proxy_start
+
+    assert validate_proxy_start(False, "", str(tmp_path)) is None
+
+
 def test_build_google_push_rows_includes_total_row():
     rows = [
         {

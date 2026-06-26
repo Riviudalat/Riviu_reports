@@ -253,6 +253,28 @@ def token_path(base_dir):
     return os.path.join(base_dir, "data", TOKEN_FILENAME)
 
 
+def try_load_credentials(base_dir):
+    token_file = token_path(base_dir)
+    if not os.path.exists(token_file):
+        return None
+    try:
+        with open(token_file, "r", encoding="utf-8") as file_obj:
+            token_data = json.load(file_obj)
+        if not token_has_required_scopes(token_data):
+            return None
+        creds = Credentials.from_authorized_user_file(token_file, SCOPES)
+        if creds.valid:
+            return creds
+        if creds.expired and creds.refresh_token and creds.has_scopes(SCOPES):
+            creds.refresh(Request())
+            with open(token_file, "w", encoding="utf-8") as file_obj:
+                file_obj.write(creds.to_json())
+            return creds
+        return creds
+    except Exception:
+        return None
+
+
 def oauth_status(base_dir):
     token_file = token_path(base_dir)
     account_email = ""
@@ -269,9 +291,11 @@ def oauth_status(base_dir):
                         json.dump(token_data, file_obj, ensure_ascii=False, indent=2)
         except (OSError, json.JSONDecodeError):
             account_email = ""
+    creds = try_load_credentials(base_dir)
     return {
         "configured": os.path.exists(client_secret_path(base_dir)),
         "authorized": os.path.exists(token_file),
+        "valid": bool(creds and creds.valid),
         "accountEmail": account_email,
     }
 
@@ -285,23 +309,12 @@ def save_oauth_client(base_dir, payload):
 
 
 def load_credentials(base_dir):
-    creds = None
-    token_file = token_path(base_dir)
-    client_file = client_secret_path(base_dir)
-
-    if os.path.exists(token_file):
-        token_data = json.loads(open(token_file, "r", encoding="utf-8").read())
-        if token_has_required_scopes(token_data):
-            creds = Credentials.from_authorized_user_file(token_file, SCOPES)
-
+    creds = try_load_credentials(base_dir)
     if creds and creds.valid:
         return creds
 
-    if creds and creds.expired and creds.refresh_token and creds.has_scopes(SCOPES):
-        creds.refresh(Request())
-        with open(token_file, "w", encoding="utf-8") as file_obj:
-            file_obj.write(creds.to_json())
-        return creds
+    token_file = token_path(base_dir)
+    client_file = client_secret_path(base_dir)
 
     if not os.path.exists(client_file):
         raise FileNotFoundError("Chưa có file OAuth client Google.")
@@ -321,6 +334,36 @@ def authorize_google(base_dir):
 def sheets_service(base_dir):
     credentials = load_credentials(base_dir)
     return build("sheets", "v4", credentials=credentials, cache_discovery=False)
+
+
+def download_google_sheet_authenticated(base_dir, spreadsheet_id, destination_path):
+    from openpyxl import Workbook
+
+    creds = try_load_credentials(base_dir)
+    if not creds or not creds.valid:
+        raise RuntimeError("Chưa đăng nhập Google hợp lệ.")
+    service = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+    workbook = Workbook()
+    workbook.remove(workbook.active)
+    sheets = spreadsheet.get("sheets", [])
+    if not sheets:
+        workbook.create_sheet("Sheet1")
+    else:
+        for sheet_meta in sheets:
+            title = sheet_meta["properties"]["title"]
+            escaped = title.replace("'", "''")
+            values = service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=f"'{escaped}'!A:ZZ",
+            ).execute().get("values", [])
+            worksheet = workbook.create_sheet(title=title[:31])
+            for row_index, row in enumerate(values, start=1):
+                for col_index, value in enumerate(row, start=1):
+                    worksheet.cell(row=row_index, column=col_index, value=value)
+    os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+    workbook.save(destination_path)
+    return destination_path
 
 
 def create_result_sheet_title():
@@ -345,45 +388,6 @@ def list_google_sheet_titles(base_dir, spreadsheet_id):
         fields="sheets.properties.title",
     ).execute()
     return [item["properties"]["title"] for item in spreadsheet.get("sheets", [])]
-
-
-def push_rows_to_sheet(base_dir, spreadsheet_id, rows, sheet_title=""):
-    service = sheets_service(base_dir)
-    existing_titles = list_google_sheet_titles(base_dir, spreadsheet_id)
-    requested_title = str(sheet_title or "").strip()
-    title = requested_title if requested_title in existing_titles else ensure_unique_sheet_title(existing_titles, create_result_sheet_title())
-
-    if title not in existing_titles:
-        add_sheet_response = service.spreadsheets().batchUpdate(
-            spreadsheetId=spreadsheet_id,
-            body={"requests": [{"addSheet": {"properties": {"title": title}}}]},
-        ).execute()
-        sheet_id = add_sheet_response["replies"][0]["addSheet"]["properties"]["sheetId"]
-    else:
-        spreadsheet = service.spreadsheets().get(
-            spreadsheetId=spreadsheet_id,
-            fields="sheets.properties(title,sheetId)",
-        ).execute()
-        sheet_id = next(
-            item["properties"]["sheetId"]
-            for item in spreadsheet.get("sheets", [])
-            if item["properties"]["title"] == title
-        )
-        service.spreadsheets().values().clear(
-            spreadsheetId=spreadsheet_id,
-            range=f"'{title}'!A:ZZ",
-            body={},
-        ).execute()
-
-    service.spreadsheets().values().update(
-        spreadsheetId=spreadsheet_id,
-        range=f"'{title}'!A1",
-        valueInputOption="USER_ENTERED",
-        body={"values": rows},
-    ).execute()
-    format_result_sheet(service, spreadsheet_id, sheet_id, len(rows), max(len(row) for row in rows))
-    apply_link_formatting(service, spreadsheet_id, sheet_id, rows)
-    return title
 
 
 def push_rows_to_new_sheet(base_dir, spreadsheet_id, rows):

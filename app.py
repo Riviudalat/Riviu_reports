@@ -9,6 +9,7 @@ import os
 import re
 import zipfile
 from datetime import datetime
+import urllib.error
 from urllib.parse import quote
 
 import pandas as pd
@@ -22,11 +23,18 @@ from openpyxl.utils.cell import coordinate_from_string
 from openpyxl.utils.units import pixels_to_EMU
 
 from scraper import run_scraper, read_scrape_history
-from google_sheets_sync import authorize_google, oauth_status, push_rows_to_new_sheet, save_oauth_client
+from google_sheets_sync import (
+    authorize_google,
+    download_google_sheet_authenticated,
+    oauth_status,
+    push_rows_to_new_sheet,
+    save_oauth_client,
+    try_load_credentials,
+)
 from proxy_utils import (
     load_proxy_list_text,
     parse_proxy_text,
-    proxy_status,
+    resolve_proxy_configs,
     save_proxy_list_text,
     test_proxy_text,
 )
@@ -446,6 +454,44 @@ def content_disposition(filename):
     return f"attachment; filename*=UTF-8''{quote(filename)}"
 
 
+def validate_proxy_start(use_proxy: bool, proxy_text: str, base_dir: str) -> str | None:
+    if not use_proxy:
+        return None
+    if resolve_proxy_configs(base_dir, proxy_text):
+        return None
+    return "Bật proxy nhưng chưa có proxy hợp lệ. Mở Cấu hình và dán proxy."
+
+
+def static_asset_version(base_dir: str) -> str:
+    paths = [
+        os.path.join(base_dir, "static", "app.js"),
+        os.path.join(base_dir, "static", "styles.css"),
+    ]
+    mtimes = [int(os.path.getmtime(path)) for path in paths if os.path.exists(path)]
+    return str(max(mtimes)) if mtimes else "1"
+
+
+def sync_download_google_sheet(base_dir, source_url, spreadsheet_id, destination_path):
+    creds = try_load_credentials(base_dir)
+    if creds and creds.valid:
+        try:
+            download_google_sheet_authenticated(base_dir, spreadsheet_id, destination_path)
+            return
+        except Exception:
+            pass
+    try:
+        download_google_sheet(source_url, destination_path)
+    except Exception as public_error:
+        if creds and creds.valid:
+            raise public_error
+        message = str(public_error)
+        if isinstance(public_error, urllib.error.HTTPError) and public_error.code in (401, 403):
+            raise ValueError("Sheet riêng tư — cần đăng nhập Google hợp lệ.") from public_error
+        if "401" in message or "403" in message or "private" in message.lower():
+            raise ValueError("Sheet riêng tư — cần đăng nhập Google hợp lệ.") from public_error
+        raise
+
+
 async def run_scraper_safely(target_path, worker_count, partner=None, partners=None, create_result_sheet=False, push_to_google=False, sheet_name="", use_request=True, browser_fallback=False, use_proxy=False, proxy_text=""):
     try:
         scan_sheet, _ = resolve_scan_sheet(sheet_name)
@@ -587,12 +633,10 @@ def build_export_payload(target_path, selected_partners, apply_min_views, min_vi
 
 @app.get("/", response_class=HTMLResponse)
 async def index(request: Request):
-    app_js_path = os.path.join(EXCEL_DIR, "static", "app.js")
-    asset_version = str(int(os.path.getmtime(app_js_path))) if os.path.exists(app_js_path) else "1"
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"asset_version": asset_version},
+        context={"asset_version": static_asset_version(EXCEL_DIR)},
     )
 
 
@@ -633,9 +677,9 @@ async def list_files():
         "sheets": sheets_for_current_file(),
         "scanSheet": CURRENT_SCAN_SHEET or CURRENT_SELECTED_SHEET,
         "googleSheetUrl": target_sheet_url,
-        "googlePushReady": bool(target_spreadsheet_id) and oauth.get("authorized"),
+        "googlePushReady": bool(target_spreadsheet_id) and oauth.get("valid"),
         "googleOAuthConfigured": oauth.get("configured"),
-        "googleOAuthAuthorized": oauth.get("authorized"),
+        "googleOAuthAuthorized": oauth.get("valid"),
     }
 
 
@@ -667,7 +711,7 @@ async def sync_google_sheet(data: dict):
         file_id = google_sheet_file_id_from_title(spreadsheet_title, timestamp_filename)
         target_path = resolve_file_path(file_id)
         os.makedirs(os.path.dirname(target_path), exist_ok=True)
-        download_google_sheet(source_url, target_path)
+        sync_download_google_sheet(EXCEL_DIR, source_url, spreadsheet_id, target_path)
         preview = read_sheet_preview(target_path)
         GOOGLE_SHEET_SOURCE_URL = source_url
         CURRENT_SELECTED_FILE = file_id
@@ -707,11 +751,6 @@ async def google_oauth_status():
         "connectedSheetUrl": target_url,
         "connectedSpreadsheetId": target_id,
     }
-
-
-@app.get("/proxy-status")
-async def proxy_status_endpoint():
-    return proxy_status(EXCEL_DIR)
 
 
 @app.get("/proxy-list")
@@ -1015,6 +1054,11 @@ async def websocket_endpoint(websocket: WebSocket):
                     browser_fallback = False
                 use_proxy = bool(payload.get("use_proxy", False))
                 proxy_text = str(payload.get("proxy_text") or "")
+                proxy_error = validate_proxy_start(use_proxy, proxy_text, EXCEL_DIR)
+                if proxy_error:
+                    await manager.broadcast_log(proxy_error)
+                    await manager.broadcast_status({"total": 0, "processed": 0, "success": 0, "error": 1, "done": True})
+                    continue
                 SCRAPE_TASK = asyncio.create_task(
                     run_scraper_safely(
                         target_path,

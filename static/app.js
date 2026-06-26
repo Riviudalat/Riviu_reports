@@ -24,6 +24,7 @@ const proxyCard = document.getElementById('proxyCard');
 const proxyConfigBtn = document.getElementById('proxyConfigBtn');
 let proxyListText = '';
 let proxySavedCount = 0;
+const SERVER_BUILD_KEY = 'serverProxyBuild';
 
 const BTN_START_IDLE = '<span class="material-icons-outlined">play_arrow</span><span>Bắt đầu quét</span>';
 const BTN_START_BUSY = '<span class="material-icons-outlined">hourglass_top</span><span>Đang quét...</span>';
@@ -321,11 +322,46 @@ function hasGoogleTargetUrl() {
 function setGooglePushState() {
     const button = document.getElementById('pushGoogleBtn');
     if (!button) return;
-    const enabled = Boolean(googleOAuthAuthorized && hasGoogleTargetUrl() && currentFileId && (pushSheetSelect.value || currentPushSheetName));
+    const enabled = Boolean(
+        googlePushReady
+        && currentFileId
+        && (pushSheetSelect.value || currentPushSheetName)
+    );
     button.disabled = !enabled;
     button.title = enabled
         ? ''
-        : 'Chỉ bật sau khi đã có file local, URL sheet đích, đăng nhập Google và chọn sheet nguồn.';
+        : 'Chỉ bật sau khi đã có file local, URL sheet đích, đăng nhập Google hợp lệ và chọn sheet nguồn.';
+}
+
+function rememberServerBuild(build) {
+    const value = String(build || '').trim();
+    if (value) {
+        localStorage.setItem(SERVER_BUILD_KEY, value);
+    }
+}
+
+async function checkServerVersion() {
+    const banner = document.getElementById('serverBanner');
+    try {
+        const res = await fetch('/api/version');
+        const data = await res.json();
+        const build = String(data.proxyTestBuild || '').trim();
+        if (!build) return;
+        const stored = localStorage.getItem(SERVER_BUILD_KEY);
+        if (stored && stored !== build && banner) {
+            banner.hidden = false;
+            banner.textContent = 'Server đã cập nhật code (build '
+                + build
+                + '). Restart Khoidong.bat (Ctrl+C → chạy lại) rồi F5 trang này.';
+        } else if (banner) {
+            banner.hidden = true;
+        }
+        if (!stored) {
+            rememberServerBuild(build);
+        }
+    } catch (error) {
+        console.error(error);
+    }
 }
 
 async function loadProxyList() {
@@ -339,6 +375,7 @@ async function loadProxyList() {
         }
         return data;
     } catch (error) {
+        notify(error.message || 'Không tải được danh sách proxy', 'error');
         return { text: '', count: 0, samples: [] };
     }
 }
@@ -406,6 +443,7 @@ function renderProxyTestResult(data, isError = false) {
     });
     proxyTestResult.className = `proxy-test-result ${okCount > 0 ? 'ok' : 'error'}`;
     proxyTestResult.textContent = lines.join('\n');
+    rememberServerBuild(data.build);
 }
 
 async function refreshProxyStatus() {
@@ -498,14 +536,11 @@ async function testProxyList() {
         const res = await fetch(`/proxy-test?_=${Date.now()}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text, save: true }),
+            body: JSON.stringify({ text, save: false }),
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || data.message || 'Test thất bại');
-        proxyListText = text;
         renderProxyTestResult(data);
-        updateProxyModalSummary(Number(data.count || 0));
-        await refreshProxyStatus();
         notify(data.message || 'Test xong', Number(data.okCount || 0) > 0 ? 'success' : 'warn');
     } catch (error) {
         renderProxyTestResult(error.message || 'Test thất bại', true);
@@ -524,11 +559,13 @@ async function refreshGoogleOauthStatus() {
         const data = await res.json();
         const loginBtn = document.getElementById('googleLoginBtn');
         const oauthBtn = document.getElementById('googleOauthBtn');
-        googleOAuthAuthorized = Boolean(data.authorized);
+        googleOAuthAuthorized = Boolean(data.valid ?? data.authorized);
         if (loginBtn) {
             const accountEmail = String(data.accountEmail || '').trim();
             loginBtn.disabled = !data.configured;
-            const loginLabel = data.authorized ? 'Đã đăng nhập' : 'Chưa đăng nhập';
+            const loginLabel = data.valid
+                ? 'Đã đăng nhập'
+                : (data.authorized ? 'Token hết hạn' : 'Chưa đăng nhập');
             loginBtn.title = data.configured
                 ? (accountEmail ? `Tài khoản: ${accountEmail}` : loginLabel)
                 : 'Cần nạp file OAuth trước khi đăng nhập';
@@ -613,6 +650,7 @@ async function updateFileList({ applyGoogleSheetUrl = false } = {}) {
         currentPushSheetName = currentPushSheetName || currentScanSheetName;
         renderScanSheetOptions(data.sheets || [], currentScanSheetName);
         renderPushSheetOptions(data.sheets || [], currentPushSheetName);
+        googlePushReady = Boolean(data.googlePushReady);
         googleOAuthAuthorized = Boolean(data.googleOAuthAuthorized);
         await refreshGoogleOauthStatus();
         setGooglePushState();
@@ -972,7 +1010,7 @@ function startScraping(partners = []) {
     setGooglePushState();
     const selected = Array.isArray(partners) ? partners : (partners ? [partners] : []);
     const workers = Number(workerCountSelect.value || 20);
-    const scrapeMode = scrapeModeSelect.value === 'browser' ? 'browser' : 'request';
+    const scrapeMode = scrapeModeSelect.value || 'request';
     const useProxy = Boolean(proxyUseCheckbox && proxyUseCheckbox.checked);
     const proxyText = useProxy ? currentProxyText() : '';
     if (useProxy && !proxyText.trim()) {
@@ -985,7 +1023,11 @@ function startScraping(partners = []) {
         notify('Vui lòng chọn sheet để quét.', 'warn');
         return;
     }
-    const modeLabel = scrapeMode === 'request' ? 'Request (HTTP)' : 'trình duyệt';
+    const modeLabel = scrapeMode === 'browser'
+        ? 'trình duyệt'
+        : scrapeMode === 'hybrid'
+            ? 'Hybrid (Request + trình duyệt)'
+            : 'Request (HTTP)';
     const proxyLabel = useProxy ? ' • proxy bật' : '';
     addLog(`Bắt đầu quét sheet "${currentScanSheetName}" • file: ${currentFileId || 'chưa rõ'} • ${modeLabel}${proxyLabel} • luồng: ${workers} • đối tác: ${selected.length ? selected.join(', ') : 'tất cả'}.`);
     ws.send(JSON.stringify({
@@ -1586,6 +1628,7 @@ if (proxyUseCheckbox) {
 }
 
 window.onload = async () => {
+    await checkServerVersion();
     await updateFileList({ applyGoogleSheetUrl: true });
     await loadPreview();
     await refreshProxyStatus();

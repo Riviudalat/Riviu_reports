@@ -24,6 +24,7 @@ call .venv\Scripts\activate.bat
 set "VENV_PY=%~dp0.venv\Scripts\python.exe"
 
 echo [OK] Da ket noi moi truong ao.
+"%VENV_PY%" -c "from proxy_utils import PROXY_TEST_BUILD; print('[OK] Proxy test build:', PROXY_TEST_BUILD)"
 echo [OK] Dang kiem tra thu vien...
 echo.
 

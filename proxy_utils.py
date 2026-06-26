@@ -2,13 +2,14 @@ import json
 import os
 import random
 import re
+import socket
 import threading
 import urllib.error
 import urllib.request
 from urllib.parse import quote, urlparse
 
 PROXY_LIST_FILENAME = "proxy_list.txt"
-PROXY_TEST_BUILD = "4"
+PROXY_TEST_BUILD = "5"
 IP_CHECK_URL = "https://api.ipify.org?format=json"
 # Link mẫu ổn định — probe phải giống luồng quét (trang chủ TikTok thường không có số liệu).
 TIKTOK_PROBE_URL = "https://www.tiktok.com/@demo/photo/764002"
@@ -206,7 +207,8 @@ def load_proxy_list_text(base_dir):
     if not os.path.exists(path):
         return ""
     try:
-        return open(path, "r", encoding="utf-8").read()
+        with open(path, "r", encoding="utf-8") as file_obj:
+            return file_obj.read()
     except OSError:
         return ""
 
@@ -296,10 +298,20 @@ def urlopen_with_config(request, config, timeout=30):
         except ImportError as error:
             raise RuntimeError("Chưa cài PySocks. Chạy: pip install PySocks") from error
 
-        proxy_url = build_http_proxy_url({**config, "port": config["socks_port"]})
-        handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})
-        opener = urllib.request.build_opener(handler)
-        return opener.open(request, timeout=timeout)
+        default_socket = socket.socket
+        try:
+            socks.set_default_proxy(
+                socks.SOCKS5,
+                config["host"],
+                config["socks_port"],
+                True,
+                config.get("username") or None,
+                config.get("password") or None,
+            )
+            socket.socket = socks.socksocket
+            return urllib.request.urlopen(request, timeout=timeout)
+        finally:
+            socket.socket = default_socket
 
     proxy_url = build_http_proxy_url(config)
     handler = urllib.request.ProxyHandler({"http": proxy_url, "https": proxy_url})

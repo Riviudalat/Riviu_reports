@@ -69,6 +69,11 @@ def test_parse_proxy_line_formats():
     assert url_form["host"] == "proxy.test"
     assert url_form["type"] == "http"
 
+    socks_form = parse_proxy_line("socks5://1.2.3.4:1080")
+    assert socks_form["type"] == "socks5"
+    assert socks_form["host"] == "1.2.3.4"
+    assert socks_form["socks_port"] == 1080
+
     plain = parse_proxy_line("9.9.9.9:80")
     assert plain["host"] == "9.9.9.9"
     assert plain["port"] == 80

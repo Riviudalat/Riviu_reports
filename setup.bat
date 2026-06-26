@@ -95,7 +95,7 @@ if errorlevel 1 (
 
 echo.
 echo Dang kiem tra lai moi truong...
-"%VENV_PY%" -c "import fastapi, uvicorn, pandas, openpyxl, playwright, PIL, jinja2, multipart, googleapiclient, google.auth, google_auth_oauthlib"
+"%VENV_PY%" -c "import fastapi, uvicorn, pandas, openpyxl, playwright, PIL, jinja2, multipart, googleapiclient, google.auth, google_auth_oauthlib, socks"
 if errorlevel 1 (
     echo.
     echo [!] Moi truong da cai xong nhung van import loi.
