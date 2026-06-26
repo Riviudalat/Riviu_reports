@@ -119,6 +119,14 @@ def test_proxy_status_not_configured(tmp_path):
     assert status["count"] == 0
 
 
+def test_tiktok_html_looks_valid():
+    from proxy_utils import tiktok_html_looks_valid
+
+    assert tiktok_html_looks_valid("<html>" + ("x" * 600) + "playCount</html>") is True
+    assert tiktok_html_looks_valid("<html>" + ("x" * 600) + "pumbaa-rule</html>") is False
+    assert tiktok_html_looks_valid("short") is False
+
+
 def test_pick_session_proxy_random_from_pool():
     configs = [
         normalize_proxy_config({"host": "1.1.1.1", "port": 8080}),

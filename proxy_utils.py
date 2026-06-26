@@ -9,7 +9,27 @@ from urllib.parse import quote, urlparse
 
 PROXY_LIST_FILENAME = "proxy_list.txt"
 IP_CHECK_URL = "https://api.ipify.org?format=json"
-TIKTOK_PROBE_URL = "https://www.tiktok.com/"
+# Link mẫu ổn định — probe phải giống luồng quét (trang chủ TikTok thường không có số liệu).
+TIKTOK_PROBE_URL = "https://www.tiktok.com/@demo/photo/764002"
+TIKTOK_PROBE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) "
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1"
+    ),
+    "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Referer": "https://www.tiktok.com/",
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+}
+TIKTOK_HTML_MARKERS = (
+    "SIGI_STATE",
+    "__UNIVERSAL_DATA_FOR_REHYDRATION__",
+    "itemStruct",
+    "playCount",
+    "statsV2",
+)
 
 _session_proxies = []
 _session_proxy_lock = threading.Lock()
@@ -301,17 +321,27 @@ def fetch_ip_via_config(config, timeout=25):
         return str(payload.get("ip") or "").strip()
 
 
-def probe_tiktok_via_config(config, timeout=25):
-    request = urllib.request.Request(
-        TIKTOK_PROBE_URL,
-        headers={
-            "User-Agent": "Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15",
-            "Accept-Language": "vi-VN,vi;q=0.9",
-        },
-    )
-    with urlopen_with_config(request, config, timeout=timeout) as response:
-        body = response.read(800).decode("utf-8", errors="replace")
-        return response.status, len(body), "tiktok" in body.lower()
+def tiktok_html_looks_valid(body):
+    text = str(body or "")
+    if len(text) < 500:
+        return False
+    if any(marker in text for marker in TIKTOK_HTML_MARKERS):
+        return True
+    lowered = text.lower()
+    return "tiktok.com" in lowered and ("webapp" in lowered or "pumbaa-rule" in lowered)
+
+
+def probe_tiktok_via_config(config, timeout=25, retries=2):
+    last_error = ""
+    for attempt in range(max(retries, 1)):
+        try:
+            request = urllib.request.Request(TIKTOK_PROBE_URL, headers=TIKTOK_PROBE_HEADERS)
+            with urlopen_with_config(request, config, timeout=timeout) as response:
+                body = response.read(65536).decode("utf-8", errors="replace")
+                return response.status, len(body), tiktok_html_looks_valid(body), ""
+        except Exception as error:
+            last_error = str(error)
+    return 0, 0, False, last_error
 
 
 def test_proxy_config(config, timeout=25):
@@ -322,16 +352,28 @@ def test_proxy_config(config, timeout=25):
         "ok": False,
         "ip": "",
         "tiktokOk": False,
+        "tiktokError": "",
         "error": "",
     }
     try:
         result["ip"] = fetch_ip_via_config(config, timeout=timeout)
         result["ok"] = bool(result["ip"])
-        if result["ok"]:
-            _, _, tiktok_ok = probe_tiktok_via_config(config, timeout=timeout)
-            result["tiktokOk"] = tiktok_ok
     except Exception as error:
         result["error"] = str(error)
+        return result
+
+    if not result["ok"]:
+        return result
+
+    try:
+        _, _, tiktok_ok, tiktok_error = probe_tiktok_via_config(config, timeout=timeout)
+        result["tiktokOk"] = tiktok_ok
+        if tiktok_error:
+            result["tiktokError"] = tiktok_error
+        elif not tiktok_ok:
+            result["tiktokError"] = "Không đọc được HTML TikTok có số liệu"
+    except Exception as error:
+        result["tiktokError"] = str(error)
     return result
 
 
@@ -358,6 +400,7 @@ def test_proxy_text(text, attempts=3, timeout=25):
             ips.append(item["ip"])
 
     unique_ips = sorted(set(ips))
+    tiktok_hits = sum(1 for item in results if item.get("tiktokOk"))
     return {
         "count": len(configs),
         "attempts": sample_count,
@@ -365,7 +408,7 @@ def test_proxy_text(text, attempts=3, timeout=25):
         "ips": unique_ips,
         "results": results,
         "message": (
-            f"Đọc được {len(configs)} proxy • {len(unique_ips)} IP khác / {len(ips)} lần test thành công"
+            f"Đọc được {len(configs)} proxy • {len(unique_ips)} IP khác • TikTok OK {tiktok_hits}/{len(results)}"
             if ips
             else f"Đọc được {len(configs)} proxy nhưng chưa test thành công"
         ),

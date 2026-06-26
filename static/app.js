@@ -362,8 +362,9 @@ function renderProxyTestResult(data, isError = false) {
         data.results.forEach(item => {
             const ip = item.ip ? `IP ${item.ip}` : 'không lấy được IP';
             const tiktok = item.tiktokOk ? 'TikTok OK' : 'TikTok chưa OK';
+            const tiktokErr = item.tiktokError ? ` • ${item.tiktokError}` : '';
             const err = item.error ? ` • ${item.error}` : '';
-            lines.push(`#${item.attempt || '?'} ${item.label || item.host || 'proxy'} — ${ip} • ${tiktok}${err}`);
+            lines.push(`#${item.attempt || '?'} ${item.label || item.host || 'proxy'} — ${ip} • ${tiktok}${tiktokErr}${err}`);
         });
     }
     proxyTestResult.className = `proxy-test-result ${data.uniqueIps ? 'ok' : 'error'}`;
