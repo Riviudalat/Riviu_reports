@@ -100,6 +100,8 @@ echo.
 echo ============================================
 echo    CAP NHAT HOAN TAT
 echo ============================================
-echo Bay gio ban co the chay Khoidong.bat de su dung ban moi.
+echo Bay gio:
+echo   1. TAT cua so Khoidong.bat cu (Ctrl+C)
+echo   2. Chay lai Khoidong.bat
 echo.
 pause

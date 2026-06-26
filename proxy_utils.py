@@ -8,6 +8,7 @@ import urllib.request
 from urllib.parse import quote, urlparse
 
 PROXY_LIST_FILENAME = "proxy_list.txt"
+PROXY_TEST_BUILD = "4"
 IP_CHECK_URL = "https://api.ipify.org?format=json"
 # Link mẫu ổn định — probe phải giống luồng quét (trang chủ TikTok thường không có số liệu).
 TIKTOK_PROBE_URL = "https://www.tiktok.com/@demo/photo/764002"
@@ -422,8 +423,9 @@ def test_proxy_text(text, timeout=8):
 
     ok_count = sum(1 for item in results if item and item.get("ok"))
     return {
+        "build": PROXY_TEST_BUILD,
         "count": len(configs),
         "okCount": ok_count,
         "results": results,
-        "message": f"{ok_count}/{len(configs)} proxy OK" if ok_count else f"0/{len(configs)} proxy OK",
+        "message": f"{ok_count}/{len(configs)} proxy OK",
     }

@@ -350,6 +350,30 @@ function currentProxyText() {
     return proxyListText || '';
 }
 
+function isLegacyProxyTestResponse(data) {
+    if (!data || typeof data !== 'object') return true;
+    if (String(data.build || '').trim()) return false;
+    if (data.uniqueIps != null) return true;
+    if (String(data.message || '').includes('IP khác')) return true;
+    const total = Number(data.count || 0);
+    const rows = Array.isArray(data.results) ? data.results.length : 0;
+    if (total > 0 && rows > total) return true;
+    return data.okCount == null && rows > 0;
+}
+
+function proxyResultName(item, index) {
+    if (item?.name) return item.name;
+    const label = String(item?.label || '');
+    const region = label.match(/region-([A-Za-z0-9_-]+)/i);
+    if (region) return region[1].toUpperCase();
+    const userMatch = label.match(/^HTTP ([^@]+)@/);
+    if (userMatch) {
+        const user = userMatch[1];
+        return user.length <= 28 ? user : `${user.slice(0, 25)}...`;
+    }
+    return `Dòng ${item?.line || index + 1}`;
+}
+
 function renderProxyTestResult(data, isError = false) {
     if (!proxyTestResult) return;
     if (isError) {
@@ -357,27 +381,29 @@ function renderProxyTestResult(data, isError = false) {
         proxyTestResult.textContent = String(data || 'Test thất bại');
         return;
     }
-    const okCount = Number(data.okCount ?? 0);
-    const total = Number(data.count || 0);
-    const lines = [];
-    if (total > 0) {
-        lines.push(data.message || `${okCount}/${total} proxy OK`);
-    } else {
-        lines.push(data.message || 'Không đọc được proxy');
+    if (isLegacyProxyTestResponse(data)) {
+        proxyTestResult.className = 'proxy-test-result error';
+        proxyTestResult.textContent = [
+            'Server đang chạy code cũ (chưa restart sau cập nhật).',
+            '',
+            '1. Vào cửa sổ Khoidong.bat → nhấn Ctrl+C',
+            '2. Chạy lại Khoidong.bat',
+            '3. Test proxy lại',
+        ].join('\n');
+        return;
     }
-    if (Array.isArray(data.results) && data.results.length) {
-        data.results.forEach(item => {
-            const name = item.name || `Dòng ${item.line || '?'}`;
-            if (item.ok && item.ip) {
-                lines.push(`${name} → ${item.ip}`);
-            } else {
-                lines.push(`${name} → lỗi`);
-            }
-        });
-    } else if (data.uniqueIps) {
-        lines.length = 0;
-        lines.push('Phiên bản cũ — tắt Khoidong.bat, chạy capnhat.bat rồi mở lại.');
-    }
+    const results = Array.isArray(data.results) ? data.results : [];
+    const total = Number(data.count || results.length || 0);
+    const okCount = Number(data.okCount ?? results.filter(item => item && item.ok && item.ip).length);
+    const lines = [`${okCount}/${total} proxy OK`];
+    results.forEach((item, index) => {
+        const name = proxyResultName(item, index);
+        if (item && item.ok && item.ip) {
+            lines.push(`${name} → ${item.ip}`);
+        } else {
+            lines.push(`${name} → lỗi`);
+        }
+    });
     proxyTestResult.className = `proxy-test-result ${okCount > 0 ? 'ok' : 'error'}`;
     proxyTestResult.textContent = lines.join('\n');
 }
@@ -469,7 +495,7 @@ async function testProxyList() {
         proxyTestResult.textContent = 'Đang kiểm tra proxy...';
     }
     try {
-        const res = await fetch('/proxy-test', {
+        const res = await fetch(`/proxy-test?_=${Date.now()}`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ text, save: true }),

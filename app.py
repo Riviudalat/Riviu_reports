@@ -736,6 +736,16 @@ async def save_proxy_list(data: dict):
     }
 
 
+@app.get("/api/version")
+async def api_version():
+    from proxy_utils import PROXY_TEST_BUILD
+
+    return {
+        "proxyTestBuild": PROXY_TEST_BUILD,
+        "app": "riviu-reports",
+    }
+
+
 @app.post("/proxy-test")
 async def test_proxy_list(data: dict | None = None):
     payload = data or {}
