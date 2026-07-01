@@ -9,8 +9,11 @@ import urllib.request
 from urllib.parse import quote, urlparse
 
 PROXY_LIST_FILENAME = "proxy_list.txt"
-PROXY_TEST_BUILD = "5"
+PROXY_TEST_BUILD = "6"
 IP_CHECK_URL = "https://api.ipify.org?format=json"
+# Google, không đi qua Cloudflare -> dùng làm baseline "proxy còn sống" độc lập
+# với IP_CHECK_URL, để không nhầm "proxy chết" khi thực ra chỉ Cloudflare bị chặn.
+ALIVE_CHECK_URL = "http://www.google.com/generate_204"
 # Link mẫu ổn định — probe phải giống luồng quét (trang chủ TikTok thường không có số liệu).
 TIKTOK_PROBE_URL = "https://www.tiktok.com/@demo/photo/764002"
 TIKTOK_PROBE_HEADERS = {
@@ -435,6 +438,29 @@ def fetch_ip_via_config(config, timeout=25, retries=2):
     raise urllib.error.URLError(last_error or "Không lấy được IP")
 
 
+def check_proxy_alive_via_config(config, timeout=15):
+    """Kiểm tra proxy có ra được Internet không, độc lập với IP_CHECK_URL.
+
+    IP_CHECK_URL (api.ipify.org) đi qua Cloudflare — một số proxy 4G/nhà mạng
+    chặn nguyên dải Cloudflare (chặn luôn cả TikTok) dù proxy vẫn sống bình
+    thường với các site khác. Dùng Google làm baseline "proxy alive" để không
+    bị nhầm "proxy chết" khi thực ra chỉ Cloudflare/TikTok bị chặn.
+    """
+    request = urllib.request.Request(
+        ALIVE_CHECK_URL,
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    try:
+        with urlopen_with_config(request, config, timeout=timeout):
+            return True
+    except urllib.error.HTTPError:
+        # Có phản hồi HTTP (dù không phải 2xx) nghĩa là proxy đã kết nối được
+        # tới đích — vẫn tính là "sống".
+        return True
+    except Exception:
+        return False
+
+
 def tiktok_html_looks_valid(body):
     text = str(body or "")
     if len(text) < 500:
@@ -468,7 +494,7 @@ def proxy_display_name(config):
     return f"{config['host']}:{config['port']}"
 
 
-def test_proxy_config(config, timeout=8, *, check_tiktok=False):
+def test_proxy_config(config, timeout=8, *, check_tiktok=True):
     result = {
         "label": proxy_label(config),
         "name": proxy_display_name(config),
@@ -480,14 +506,21 @@ def test_proxy_config(config, timeout=8, *, check_tiktok=False):
         "tiktokError": "",
         "error": "",
     }
+    ip_error = ""
     try:
         result["ip"] = fetch_ip_via_config(config, timeout=timeout, retries=2)
         result["ok"] = bool(result["ip"])
     except Exception as error:
-        result["error"] = str(error)
-        return result
+        ip_error = str(error)
 
-    if not result["ok"] or not check_tiktok:
+    if not result["ok"]:
+        # api.ipify.org đi qua Cloudflare, có thể bị proxy chặn dù proxy vẫn
+        # sống — dùng Google làm fallback để không báo sai "proxy chết".
+        result["ok"] = check_proxy_alive_via_config(config, timeout=timeout)
+        if not result["ok"]:
+            result["error"] = ip_error or "Không kết nối được qua proxy"
+
+    if not check_tiktok:
         return result
 
     try:
@@ -515,7 +548,7 @@ def test_proxy_text(text, timeout=8):
         }
 
     results = [None] * len(configs)
-    with ThreadPoolExecutor(max_workers=min(len(configs), 6)) as pool:
+    with ThreadPoolExecutor(max_workers=min(len(configs), 15)) as pool:
         future_map = {
             pool.submit(test_proxy_config, config, timeout): index
             for index, config in enumerate(configs)
@@ -526,11 +559,14 @@ def test_proxy_text(text, timeout=8):
             item["line"] = index + 1
             results[index] = item
 
-    ok_count = sum(1 for item in results if item and item.get("ok"))
+    alive_count = sum(1 for item in results if item and item.get("ok"))
+    tiktok_ok_count = sum(1 for item in results if item and item.get("tiktokOk"))
     return {
         "build": PROXY_TEST_BUILD,
         "count": len(configs),
-        "okCount": ok_count,
+        "okCount": tiktok_ok_count,
+        "aliveCount": alive_count,
+        "tiktokOkCount": tiktok_ok_count,
         "results": results,
-        "message": f"{ok_count}/{len(configs)} proxy OK",
+        "message": f"{tiktok_ok_count}/{len(configs)} proxy quét được TikTok ({alive_count}/{len(configs)} proxy sống)",
     }
