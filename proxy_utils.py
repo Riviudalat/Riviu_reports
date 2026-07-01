@@ -360,11 +360,46 @@ def pick_session_proxy():
     return chosen
 
 
+def assign_worker_proxy(worker_index):
+    """Gán proxy theo round-robin cho luồng worker_index (0-based).
+
+    Đảm bảo chia đều: N luồng / M proxy -> mỗi proxy được ~N/M luồng dùng,
+    thay vì random.choice() có thể dồn nhiều luồng vào cùng 1 proxy do may rủi.
+    """
+    with _session_proxy_lock:
+        pool = list(_session_proxies)
+    _thread_local.worker_index = worker_index
+    _thread_local.proxy_rotation = 0
+    if not pool:
+        _thread_local.proxy_config = None
+        _thread_local.proxy_key = None
+        return None
+    chosen = pool[worker_index % len(pool)]
+    _thread_local.proxy_config = chosen
+    _thread_local.proxy_key = _config_cache_key(chosen)
+    return chosen
+
+
 def release_thread_proxy():
-    """Drop sticky proxy on this worker so the next request can pick another IP."""
-    _thread_local.proxy_key = None
-    _thread_local.proxy_config = None
-    _thread_local.socks_key = None
+    """Chuyển luồng hiện tại sang proxy kế tiếp trong pool (round-robin xoay vòng).
+
+    Dùng khi proxy hiện tại bị 403/429 - xoay sang proxy khác thay vì random,
+    vẫn giữ việc chia tải đều giữa các luồng.
+    """
+    worker_index = getattr(_thread_local, "worker_index", None)
+    with _session_proxy_lock:
+        pool = list(_session_proxies)
+    if worker_index is None or not pool:
+        _thread_local.proxy_key = None
+        _thread_local.proxy_config = None
+        _thread_local.socks_key = None
+        return None
+    rotation = getattr(_thread_local, "proxy_rotation", 0) + 1
+    _thread_local.proxy_rotation = rotation
+    chosen = pool[(worker_index + rotation) % len(pool)]
+    _thread_local.proxy_config = chosen
+    _thread_local.proxy_key = _config_cache_key(chosen)
+    return chosen
 
 
 def urlopen_with_config(request, config, timeout=30):

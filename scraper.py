@@ -34,8 +34,8 @@ from workbook_utils import (
     worksheet_row_partners,
 )
 from proxy_utils import (
+    assign_worker_proxy,
     get_session_proxies,
-    pick_session_proxy,
     playwright_proxy_settings,
     proxy_label,
     release_thread_proxy,
@@ -1957,6 +1957,29 @@ async def worker_loop(
             pass
 
 
+def _run_request_scrape(
+    worker_index,
+    url,
+    retries=DEFAULT_RETRIES,
+    channel_cache=None,
+    channel_overrides=None,
+    profile_lookup_attempted=None,
+    cache_lock=None,
+):
+    # Gán proxy round-robin ngay trên thread thực thi hiện tại (thread pool của
+    # asyncio có thể đổi thread giữa các item, nên phải gán lại mỗi lần, không
+    # chỉ 1 lần khi worker khởi động).
+    assign_worker_proxy(worker_index)
+    return scrape_link_with_retries_request(
+        url,
+        retries=retries,
+        channel_cache=channel_cache,
+        channel_overrides=channel_overrides,
+        profile_lookup_attempted=profile_lookup_attempted,
+        cache_lock=cache_lock,
+    )
+
+
 async def request_worker_loop(
     worker_id,
     scrape_queue,
@@ -1972,10 +1995,10 @@ async def request_worker_loop(
 ):
     loop = asyncio.get_running_loop()
     worker_label = f"R{worker_id}"
+    worker_index = worker_id - 1
     current_item = None
 
     try:
-        await loop.run_in_executor(None, pick_session_proxy)
         while True:
             item = await scrape_queue.get()
             current_item = item
@@ -1988,7 +2011,8 @@ async def request_worker_loop(
             try:
                 data, channel_name, status, attempts, resolved_url = await loop.run_in_executor(
                     None,
-                    lambda url=item["url"]: scrape_link_with_retries_request(
+                    lambda url=item["url"]: _run_request_scrape(
+                        worker_index,
                         url,
                         retries=retries,
                         channel_cache=channel_cache,
@@ -2278,7 +2302,10 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                     if len(proxy_configs) == 1:
                         proxy_note = f" • proxy {proxy_label(proxy_configs[0])}"
                     else:
-                        proxy_note = f" • {len(proxy_configs)} proxy (random)"
+                        per_proxy = worker_count / len(proxy_configs)
+                        proxy_note = (
+                            f" • {len(proxy_configs)} proxy, chia đều ~{per_proxy:.1f} luồng/proxy"
+                        )
                 elif use_proxy:
                     proxy_note = " • proxy: chưa cấu hình"
                 if not has_proxy:

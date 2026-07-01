@@ -4,6 +4,7 @@ from unittest.mock import patch
 import urllib.request
 
 from proxy_utils import (
+    assign_worker_proxy,
     build_http_proxy_url,
     normalize_proxy_config,
     parse_proxy_line,
@@ -170,6 +171,48 @@ def test_release_thread_proxy_clears_sticky():
         second = pick_session_proxy()
         assert first is not None
         assert second is not None
+    finally:
+        set_session_proxies([])
+
+
+def test_assign_worker_proxy_round_robin_even_split():
+    configs = [
+        normalize_proxy_config({"host": f"1.1.1.{i}", "port": 8080})
+        for i in range(10)
+    ]
+    set_session_proxies(configs)
+    try:
+        # 20 luồng / 10 proxy -> mỗi proxy đúng 2 luồng (worker_index và worker_index+10).
+        assigned_hosts = [assign_worker_proxy(i)["host"] for i in range(20)]
+        from collections import Counter
+
+        counts = Counter(assigned_hosts)
+        assert len(counts) == 10
+        assert all(count == 2 for count in counts.values())
+        assert assign_worker_proxy(0)["host"] == assign_worker_proxy(10)["host"]
+    finally:
+        set_session_proxies([])
+
+
+def test_assign_worker_proxy_no_pool_returns_none():
+    set_session_proxies([])
+    assert assign_worker_proxy(0) is None
+
+
+def test_release_thread_proxy_rotates_after_worker_assignment():
+    configs = [
+        normalize_proxy_config({"host": "1.1.1.1", "port": 8080}),
+        normalize_proxy_config({"host": "2.2.2.2", "port": 8080}),
+        normalize_proxy_config({"host": "3.3.3.3", "port": 8080}),
+    ]
+    set_session_proxies(configs)
+    try:
+        first = assign_worker_proxy(0)
+        second = release_thread_proxy()
+        third = release_thread_proxy()
+        assert first["host"] == "1.1.1.1"
+        assert second["host"] == "2.2.2.2"
+        assert third["host"] == "3.3.3.3"
     finally:
         set_session_proxies([])
 
