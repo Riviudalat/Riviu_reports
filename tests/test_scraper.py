@@ -502,20 +502,21 @@ def test_is_tiktok_error_page_detects_visible_error_text():
     assert is_tiktok_error_page(content) is True
 
 
-def test_configure_request_concurrency_caps_direct_ip():
+def test_configure_request_concurrency_never_reduces_worker_count():
     import scraper
-    from scraper import DIRECT_MAX_WORKERS, configure_request_concurrency
+    from scraper import configure_request_concurrency
 
     configure_request_concurrency(20, proxy_count=0)
-    assert scraper._request_semaphore._value == DIRECT_MAX_WORKERS
+    assert scraper._request_semaphore._value == 20
     configure_request_concurrency(20, proxy_count=10)
     assert scraper._request_semaphore._value == 20
 
 
-def test_clamp_worker_count_no_proxy_caps_to_direct_max():
-    from scraper import DIRECT_MAX_WORKERS, clamp_worker_count
+def test_clamp_worker_count_no_proxy_keeps_requested():
+    from scraper import clamp_worker_count
 
-    assert clamp_worker_count(50, proxy_count=0) == DIRECT_MAX_WORKERS
+    # Không proxy vẫn chạy đúng số luồng đã chọn, không tự giảm.
+    assert clamp_worker_count(50, proxy_count=0) == 50
 
 
 def test_clamp_worker_count_plenty_of_proxies_keeps_requested():
@@ -530,6 +531,13 @@ def test_clamp_worker_count_few_proxies_keeps_requested_and_distributes_evenly()
     # 50 luồng chỉ có 3 proxy -> vẫn chạy đủ 50 luồng, chia đều cho 3 proxy
     # (round-robin ở assign_worker_proxy), không tự giảm số luồng.
     assert clamp_worker_count(50, proxy_count=3) == 50
+
+
+def test_clamp_worker_count_bounds_to_valid_range():
+    from scraper import MAX_WORKERS, clamp_worker_count
+
+    assert clamp_worker_count(0, proxy_count=0) == 1
+    assert clamp_worker_count(999, proxy_count=0) == MAX_WORKERS
 
 
 def test_is_request_rate_limited_status():

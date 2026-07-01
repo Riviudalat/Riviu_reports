@@ -778,13 +778,12 @@ async def save_proxy_list(data: dict):
 @app.get("/api/version")
 async def api_version():
     from proxy_utils import PROXY_TEST_BUILD
-    from scraper import DIRECT_MAX_WORKERS, MAX_WORKERS
+    from scraper import MAX_WORKERS
 
     return {
         "proxyTestBuild": PROXY_TEST_BUILD,
         "app": "riviu-reports",
-        "directMaxWorkers": DIRECT_MAX_WORKERS,
-        "proxyMaxWorkers": MAX_WORKERS,
+        "maxWorkers": MAX_WORKERS,
     }
 
 

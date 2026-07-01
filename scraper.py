@@ -120,17 +120,13 @@ def session_uses_proxy():
 
 
 def clamp_worker_count(worker_count, proxy_count=0):
-    """Giới hạn số luồng theo IP thực tế đang dùng.
+    """Chỉ bó số luồng vào khoảng hợp lệ (1..MAX_WORKERS).
 
-    Không proxy -> tối đa DIRECT_MAX_WORKERS (chỉ 1 IP máy, dễ bị TikTok chặn
-    nếu chạy nhiều luồng). Có proxy (bất kể bao nhiêu proxy) -> luôn dùng đúng
-    số luồng đã chọn, hệ thống tự chia đều luồng cho các proxy hiện có
-    (xem assign_worker_proxy) — không tự giảm số luồng.
+    Không tự giảm luồng dù không có proxy hay ít proxy — luôn chạy đúng số
+    luồng người dùng chọn. proxy_count hiện chỉ dùng cho log/cảnh báo, không
+    còn ảnh hưởng tới số luồng thực chạy.
     """
-    count = clamp_int(worker_count, DEFAULT_WORKERS, 1, MAX_WORKERS)
-    if proxy_count <= 0:
-        return min(count, DIRECT_MAX_WORKERS)
-    return count
+    return clamp_int(worker_count, DEFAULT_WORKERS, 1, MAX_WORKERS)
 
 
 def configure_request_concurrency(worker_count, proxy_count=0):
@@ -2317,9 +2313,10 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                         )
                 elif use_proxy:
                     proxy_note = " • proxy: chưa cấu hình"
-                if not has_proxy:
+                if not has_proxy and worker_count > DIRECT_MAX_WORKERS:
                     await websocket_manager.broadcast_log(
-                        f"Không proxy — giới hạn {DIRECT_MAX_WORKERS} luồng để tránh TikTok chặn IP. Bật Proxy xoay để chọn nhiều luồng hơn."
+                        f"Lưu ý: Không dùng proxy nhưng chạy {worker_count} luồng — tất cả dùng chung 1 IP máy, "
+                        f"dễ bị TikTok chặn (khuyến nghị ≤{DIRECT_MAX_WORKERS} luồng khi không có proxy)."
                     )
                 elif heavy_proxy_load:
                     await websocket_manager.broadcast_log(
