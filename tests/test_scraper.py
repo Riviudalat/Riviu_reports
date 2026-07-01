@@ -524,11 +524,12 @@ def test_clamp_worker_count_plenty_of_proxies_keeps_requested():
     assert clamp_worker_count(30, proxy_count=10) == 30
 
 
-def test_clamp_worker_count_few_proxies_caps_by_pool_size():
-    from scraper import MAX_WORKERS_PER_PROXY, clamp_worker_count
+def test_clamp_worker_count_few_proxies_keeps_requested_and_distributes_evenly():
+    from scraper import clamp_worker_count
 
-    # 50 luồng nhưng chỉ có 3 proxy -> giới hạn về 3 * MAX_WORKERS_PER_PROXY.
-    assert clamp_worker_count(50, proxy_count=3) == 3 * MAX_WORKERS_PER_PROXY
+    # 50 luồng chỉ có 3 proxy -> vẫn chạy đủ 50 luồng, chia đều cho 3 proxy
+    # (round-robin ở assign_worker_proxy), không tự giảm số luồng.
+    assert clamp_worker_count(50, proxy_count=3) == 50
 
 
 def test_is_request_rate_limited_status():
