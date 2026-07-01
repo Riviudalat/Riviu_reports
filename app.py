@@ -1064,8 +1064,8 @@ async def websocket_endpoint(websocket: WebSocket):
                     continue
                 from scraper import clamp_worker_count
                 from proxy_utils import resolve_proxy_configs
-                has_proxy = bool(resolve_proxy_configs(EXCEL_DIR, proxy_text=proxy_text)) if use_proxy else False
-                worker_count = clamp_worker_count(worker_count, has_proxy=has_proxy)
+                proxy_count = len(resolve_proxy_configs(EXCEL_DIR, proxy_text=proxy_text)) if use_proxy else 0
+                worker_count = clamp_worker_count(worker_count, proxy_count=proxy_count)
                 SCRAPE_TASK = asyncio.create_task(
                     run_scraper_safely(
                         target_path,

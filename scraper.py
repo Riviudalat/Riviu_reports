@@ -104,6 +104,7 @@ EMBEDDED_STATE_SCRIPT_PATTERNS = (
 
 MAX_CONCURRENT_REQUESTS = 20
 DIRECT_MAX_WORKERS = 10
+MAX_WORKERS_PER_PROXY = 10
 REQUEST_SHELL_RETRY_DELAY = 0.35
 REQUEST_SHELL_RETRY_DELAY_PROXY = 0.12
 REQUEST_CANDIDATE_LIMIT_DIRECT = 4
@@ -118,16 +119,24 @@ def session_uses_proxy():
     return bool(get_session_proxies())
 
 
-def clamp_worker_count(worker_count, has_proxy=False):
+def clamp_worker_count(worker_count, proxy_count=0):
+    """Giới hạn số luồng theo số IP thực tế đang dùng.
+
+    Không proxy -> tối đa DIRECT_MAX_WORKERS (1 IP máy).
+    Có proxy -> tối đa proxy_count * MAX_WORKERS_PER_PROXY, để mỗi proxy
+    không phải gánh quá nhiều luồng đồng thời (dễ bị TikTok chặn IP đó).
+    Ví dụ: 50 luồng nhưng chỉ 3 proxy -> giới hạn về 30 luồng (10 luồng/proxy).
+    """
     count = clamp_int(worker_count, DEFAULT_WORKERS, 1, MAX_WORKERS)
-    if not has_proxy:
-        count = min(count, DIRECT_MAX_WORKERS)
-    return count
+    if proxy_count <= 0:
+        return min(count, DIRECT_MAX_WORKERS)
+    cap = min(MAX_WORKERS, proxy_count * MAX_WORKERS_PER_PROXY)
+    return min(count, cap)
 
 
-def configure_request_concurrency(worker_count, has_proxy=False):
+def configure_request_concurrency(worker_count, proxy_count=0):
     global _request_semaphore
-    limit = clamp_worker_count(worker_count, has_proxy=has_proxy)
+    limit = clamp_worker_count(worker_count, proxy_count=proxy_count)
     _request_semaphore = threading.Semaphore(limit)
 
 
@@ -2222,7 +2231,9 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     scrape_base_dir = base_dir or os.path.dirname(os.path.abspath(file_path))
     proxy_configs = resolve_proxy_configs(scrape_base_dir, proxy_text=proxy_text) if use_proxy else []
     has_proxy = bool(proxy_configs)
-    worker_count = clamp_worker_count(worker_count, has_proxy=has_proxy)
+    requested_worker_count = clamp_int(worker_count, DEFAULT_WORKERS, 1, MAX_WORKERS)
+    worker_count = clamp_worker_count(worker_count, proxy_count=len(proxy_configs))
+    capped_by_proxy_count = has_proxy and worker_count < requested_worker_count
 
     workbook = openpyxl.load_workbook(file_path)
     clear_existing_total_rows(workbook)
@@ -2260,7 +2271,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     started_at = time.perf_counter()
     mode = "partner" if selected_names else "full"
     if use_request:
-        configure_request_concurrency(worker_count, has_proxy=has_proxy)
+        configure_request_concurrency(worker_count, proxy_count=len(proxy_configs))
 
     # Adaptive save_every: file lớn save thưa hơn để giảm I/O
     if total > 500:
@@ -2311,6 +2322,13 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 if not has_proxy:
                     await websocket_manager.broadcast_log(
                         f"Không proxy — giới hạn {DIRECT_MAX_WORKERS} luồng để tránh TikTok chặn IP. Bật Proxy xoay để chọn nhiều luồng hơn."
+                    )
+                elif capped_by_proxy_count:
+                    await websocket_manager.broadcast_log(
+                        f"Chỉ có {len(proxy_configs)} proxy — giới hạn {worker_count} luồng (tối đa "
+                        f"{MAX_WORKERS_PER_PROXY} luồng/proxy) để mỗi proxy không bị quá tải và bị TikTok chặn. "
+                        f"Muốn chạy {requested_worker_count} luồng thật, cần thêm proxy (tối thiểu "
+                        f"{-(-requested_worker_count // MAX_WORKERS_PER_PROXY)} proxy)."
                     )
                 elif total > 500 and worker_count < 25:
                     await websocket_manager.broadcast_log(

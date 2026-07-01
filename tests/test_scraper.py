@@ -506,17 +506,29 @@ def test_configure_request_concurrency_caps_direct_ip():
     import scraper
     from scraper import DIRECT_MAX_WORKERS, configure_request_concurrency
 
-    configure_request_concurrency(20, has_proxy=False)
+    configure_request_concurrency(20, proxy_count=0)
     assert scraper._request_semaphore._value == DIRECT_MAX_WORKERS
-    configure_request_concurrency(20, has_proxy=True)
+    configure_request_concurrency(20, proxy_count=10)
     assert scraper._request_semaphore._value == 20
 
 
-def test_clamp_worker_count():
+def test_clamp_worker_count_no_proxy_caps_to_direct_max():
     from scraper import DIRECT_MAX_WORKERS, clamp_worker_count
 
-    assert clamp_worker_count(50, has_proxy=False) == DIRECT_MAX_WORKERS
-    assert clamp_worker_count(30, has_proxy=True) == 30
+    assert clamp_worker_count(50, proxy_count=0) == DIRECT_MAX_WORKERS
+
+
+def test_clamp_worker_count_plenty_of_proxies_keeps_requested():
+    from scraper import clamp_worker_count
+
+    assert clamp_worker_count(30, proxy_count=10) == 30
+
+
+def test_clamp_worker_count_few_proxies_caps_by_pool_size():
+    from scraper import MAX_WORKERS_PER_PROXY, clamp_worker_count
+
+    # 50 luồng nhưng chỉ có 3 proxy -> giới hạn về 3 * MAX_WORKERS_PER_PROXY.
+    assert clamp_worker_count(50, proxy_count=3) == 3 * MAX_WORKERS_PER_PROXY
 
 
 def test_is_request_rate_limited_status():
