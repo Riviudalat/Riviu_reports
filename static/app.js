@@ -431,20 +431,17 @@ function renderProxyTestResult(data, isError = false) {
     }
     const results = Array.isArray(data.results) ? data.results : [];
     const total = Number(data.count || results.length || 0);
-    const tiktokOkCount = Number(data.tiktokOkCount ?? data.okCount ?? results.filter(item => item && item.tiktokOk).length);
-    const aliveCount = Number(data.aliveCount ?? results.filter(item => item && item.ok).length);
-    const lines = [`${tiktokOkCount}/${total} proxy quét được TikTok (${aliveCount}/${total} proxy sống)`];
+    const okCount = Number(data.okCount ?? results.filter(item => item && item.ok && item.ip).length);
+    const lines = [`${okCount}/${total} proxy OK`];
     results.forEach((item, index) => {
         const name = proxyResultName(item, index);
-        if (item && item.tiktokOk) {
-            lines.push(`${name} → OK${item.ip ? ` (${item.ip})` : ''}`);
-        } else if (item && item.ok) {
-            lines.push(`${name} → Sống nhưng TikTok bị chặn`);
+        if (item && item.ok && item.ip) {
+            lines.push(`${name} → ${item.ip}`);
         } else {
-            lines.push(`${name} → Chết/không kết nối`);
+            lines.push(`${name} → lỗi`);
         }
     });
-    proxyTestResult.className = `proxy-test-result ${tiktokOkCount > 0 ? 'ok' : 'error'}`;
+    proxyTestResult.className = `proxy-test-result ${okCount > 0 ? 'ok' : 'error'}`;
     proxyTestResult.textContent = lines.join('\n');
     rememberServerBuild(data.build);
 }

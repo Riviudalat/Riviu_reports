@@ -1,7 +1,6 @@
 import json
 from unittest.mock import patch
 
-import urllib.error
 import urllib.request
 
 from proxy_utils import (
@@ -17,7 +16,6 @@ from proxy_utils import (
     resolve_proxy_configs,
     set_session_proxies,
     set_session_proxy,
-    test_proxy_config as check_proxy_config,  # tránh pytest thu thập nhầm thành test case
 )
 
 
@@ -243,81 +241,3 @@ def test_set_session_proxy_used_by_urlopen_request():
             assert isinstance(handler, urllib.request.ProxyHandler)
     finally:
         set_session_proxy(None)
-
-
-class _FakeResponse:
-    def __init__(self, status=200, body=b""):
-        self.status = status
-        self._body = body
-
-    def read(self, size=None):
-        return self._body if size is None else self._body[:size]
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc_info):
-        return False
-
-
-def test_test_proxy_config_falls_back_to_google_when_ipify_blocked():
-    from proxy_utils import ALIVE_CHECK_URL, IP_CHECK_URL, TIKTOK_PROBE_URL
-
-    config = normalize_proxy_config({"host": "1.1.1.1", "port": 8080})
-
-    def fake_urlopen(request, cfg, timeout=30):
-        url = request.full_url
-        if url == IP_CHECK_URL:
-            raise urllib.error.URLError("Tunnel connection failed: 502 Bad Gateway")
-        if url == ALIVE_CHECK_URL:
-            return _FakeResponse(status=204)
-        if url == TIKTOK_PROBE_URL:
-            return _FakeResponse(status=200, body=("x" * 600 + "playCount").encode())
-        raise AssertionError(f"unexpected url {url}")
-
-    with patch("proxy_utils.urlopen_with_config", side_effect=fake_urlopen):
-        result = check_proxy_config(config, timeout=2)
-
-    # ipify (api.ipify.org, đi qua Cloudflare) bị chặn nhưng proxy vẫn sống
-    # (Google trả lời được) và vẫn thử TikTok bình thường -> không báo sai "lỗi".
-    assert result["ok"] is True
-    assert result["ip"] == ""
-    assert result["tiktokOk"] is True
-
-
-def test_test_proxy_config_dead_proxy_reports_not_ok_and_skips_tiktok_success():
-    config = normalize_proxy_config({"host": "1.1.1.1", "port": 8080})
-
-    def fake_urlopen(request, cfg, timeout=30):
-        raise OSError("connection refused")
-
-    with patch("proxy_utils.urlopen_with_config", side_effect=fake_urlopen):
-        result = check_proxy_config(config, timeout=2)
-
-    assert result["ok"] is False
-    assert result["tiktokOk"] is False
-    assert result["error"]
-
-
-def test_test_proxy_config_alive_but_tiktok_blocked():
-    from proxy_utils import IP_CHECK_URL, TIKTOK_PROBE_URL
-
-    config = normalize_proxy_config({"host": "1.1.1.1", "port": 8080})
-
-    def fake_urlopen(request, cfg, timeout=30):
-        url = request.full_url
-        if url == IP_CHECK_URL:
-            return _FakeResponse(status=200, body=json.dumps({"ip": "9.9.9.9"}).encode())
-        if url == TIKTOK_PROBE_URL:
-            raise urllib.error.URLError("Tunnel connection failed: 502 Bad Gateway")
-        raise AssertionError(f"unexpected url {url}")
-
-    with patch("proxy_utils.urlopen_with_config", side_effect=fake_urlopen):
-        result = check_proxy_config(config, timeout=2)
-
-    # Proxy sống, IP lấy được bình thường, nhưng riêng TikTok bị chặn -> phải
-    # phân biệt rõ với "proxy chết", đúng kịch bản 51 proxy 4G VN gặp phải.
-    assert result["ok"] is True
-    assert result["ip"] == "9.9.9.9"
-    assert result["tiktokOk"] is False
-    assert result["tiktokError"]
