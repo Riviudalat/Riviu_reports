@@ -24,6 +24,8 @@ SUMMARY_SHEET_TITLE_PREFIX = "Tổng kết "
 LAST_UPDATE_COLUMN = "Cập nhật lần cuối"
 SUMMARY_COLUMNS = ["Stt", "ĐỐI TÁC", "TỔNG LINK", "TỔNG LƯỢT XEM", "TỔNG TIM", "TỔNG BÌNH LUẬN", "TỔNG LƯỢT LƯU", "TỔNG CHIA SẺ", LAST_UPDATE_COLUMN]
 SUMMARY_TOTAL_LABEL = "TỔNG"
+# Cam cảnh báo đối tác chỉ có đúng 1 link — cần chú ý khi báo cáo/nghiệm thu.
+SINGLE_LINK_FILL_COLOR = "FFC000"
 METRIC_COLUMNS = ["LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"]
 SUMMARY_METRIC_COLUMNS = ["TỔNG LƯỢT XEM", "TỔNG TIM", "TỔNG BÌNH LUẬN", "TỔNG LƯỢT LƯU", "TỔNG CHIA SẺ"]
 PARTNER_HEADING_MARKERS = ("DANH SÁCH", "DANH SACH", "BỘ ẢNH", "BO ANH")
@@ -560,6 +562,7 @@ def read_sheet_preview(file_path, sheet_name=None, limit=None):
         link_column = find_link_column_name(frame)
         channel_column = find_column_name(frame, ["TÊN KÊNH", "Tên Kênh"])
         date_column = find_column_name(frame, ["NGÀY AIR", "Ngày"])
+        partner_columns = dataframe_partner_columns(frame)
         metric_columns = [
             find_column_name(frame, ["LƯỢT XEM"]),
             find_column_name(frame, ["TIM"]),
@@ -600,6 +603,10 @@ def read_sheet_preview(file_path, sheet_name=None, limit=None):
                     record.get(link_column, ""),
                     preview_row.get(channel_column, ""),
                 )
+            if link_column and partner_columns and is_tiktok_link(record.get(link_column, "")):
+                row_partners = extract_row_partners(record, partner_columns)
+                if len(row_partners) == 1:
+                    preview_row["_singlePartner"] = True
             data.append(preview_row)
 
         return {
@@ -1281,6 +1288,59 @@ def rebuild_summary_sheet(
         worksheet.column_dimensions[get_column_letter(index)].width = width
 
     return len(rows)
+
+
+def _cell_has_single_link_fill(cell):
+    fill = cell.fill
+    if fill is None or fill.fill_type != "solid":
+        return False
+    return str(fill.fgColor.rgb or "").upper().endswith(SINGLE_LINK_FILL_COLOR)
+
+
+def highlight_single_partner_link_rows(workbook, data_sheet_name):
+    """Bôi cam các dòng có link TikTok mà dòng đó chỉ gắn đúng 1 đối tác (link độc quyền).
+
+    Dọn sạch highlight cam cũ (chỉ xóa đúng màu SINGLE_LINK_FILL_COLOR) trên các
+    dòng không còn thỏa điều kiện (ví dụ dòng vừa được gắn thêm đối tác thứ 2),
+    để lần quét sau không để sót màu cam.
+    """
+    source_sheet = clean_text(data_sheet_name)
+    if not source_sheet or source_sheet not in workbook.sheetnames:
+        return 0
+
+    worksheet = workbook[source_sheet]
+    link_column = worksheet_find_link_column_index(worksheet)
+    if not link_column:
+        return 0
+
+    partner_columns = worksheet_partner_column_indexes(worksheet)
+    if not partner_columns:
+        return 0
+
+    max_row = worksheet.max_row or 0
+    max_column = worksheet.max_column or 0
+    if max_row < 2 or max_column < 1:
+        return 0
+
+    highlight_fill = PatternFill("solid", fgColor=SINGLE_LINK_FILL_COLOR)
+    clear_fill = PatternFill(fill_type=None)
+    highlighted_count = 0
+    for row_index in range(2, max_row + 1):
+        link = clean_text(worksheet.cell(row=row_index, column=link_column).value)
+        should_highlight = False
+        if link and ("tiktok.com" in link or "vt.tiktok.com" in link):
+            partners = worksheet_row_partners(worksheet, row_index, partner_columns)
+            should_highlight = len(partners) == 1
+        if should_highlight:
+            highlighted_count += 1
+        for column_index in range(1, max_column + 1):
+            cell = worksheet.cell(row=row_index, column=column_index)
+            if should_highlight:
+                cell.fill = highlight_fill
+            elif _cell_has_single_link_fill(cell):
+                cell.fill = clear_fill
+
+    return highlighted_count
 
 
 def workbook_file_entries(base_dir):

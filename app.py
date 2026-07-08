@@ -42,6 +42,7 @@ from workbook_utils import (
     GOOGLE_SHEET_LABEL,
     LEGACY_GOOGLE_SHEET_FILE_ID,
     REPORT_COLUMNS,
+    SINGLE_LINK_FILL_COLOR,
     build_workbook_rows,
     clean_text,
     download_google_sheet,
@@ -383,6 +384,7 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = border
 
+    single_link_fill = PatternFill("solid", fgColor=SINGLE_LINK_FILL_COLOR)
     for row_index, (_, source_row) in enumerate(frame.iterrows(), start=data_start_row):
         for col_index, header in enumerate(REPORT_COLUMNS, start=1):
             value = source_row.get(header, "")
@@ -413,6 +415,13 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
             elif header not in {"LINK AIR", "TÊN KÊNH"}:
                 cell.number_format = "#,##0"
                 cell.alignment = Alignment(horizontal="right", vertical="top")
+
+        row_partners = source_row.get("partners")
+        if not isinstance(row_partners, (list, tuple)):
+            row_partners = []
+        if len(row_partners) == 1:
+            for col_index in range(1, len(REPORT_COLUMNS) + 1):
+                ws.cell(row=row_index, column=col_index).fill = single_link_fill
 
     total_row = None
     if len(frame) > 0:

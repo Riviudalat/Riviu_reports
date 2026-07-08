@@ -907,13 +907,18 @@ async function loadPreview(sheetName = '') {
             return;
         }
 
-        body.innerHTML = data.data.map(row => `<tr>${data.columns.map(column => {
-            let val = row[column] || '';
-            if (typeof val === 'string' && val.startsWith('http')) {
-                return `<td title="${escapeHtml(val)}"><a href="${escapeHtml(val)}" target="_blank" style="color: #ff6b00; text-decoration: none;">${escapeHtml(val)}</a></td>`;
-            }
-            return `<td title="${escapeHtml(val)}">${escapeHtml(val)}</td>`;
-        }).join('')}</tr>`).join('');
+        body.innerHTML = data.data.map(row => {
+            const isSinglePartner = Boolean(row._singlePartner);
+            const rowClass = isSinglePartner ? ' class="single-partner-row"' : '';
+            const linkColor = isSinglePartner ? '#9a3412' : '#ff6b00';
+            return `<tr${rowClass}>${data.columns.map(column => {
+                let val = row[column] || '';
+                if (typeof val === 'string' && val.startsWith('http')) {
+                    return `<td title="${escapeHtml(val)}"><a href="${escapeHtml(val)}" target="_blank" style="color: ${linkColor}; text-decoration: none;">${escapeHtml(val)}</a></td>`;
+                }
+                return `<td title="${escapeHtml(val)}">${escapeHtml(val)}</td>`;
+            }).join('')}</tr>`;
+        }).join('');
     } catch (error) {
         console.error(error);
         addLog(`Lỗi preview: ${error.message}`);
@@ -1188,6 +1193,7 @@ function appendData(row) {
     const tbody = document.getElementById('dataFeed');
     if (tbody.innerText.includes('Chưa có kết quả')) tbody.innerHTML = '';
     const tr = document.createElement('tr');
+    if (row.singlePartner) tr.classList.add('single-partner-row');
     const views = formatNumber(row.views);
     const likes = formatNumber(row.likes);
     const comments = formatNumber(row.comments);

@@ -212,6 +212,9 @@ th { text-align: left; padding: 14px 18px; background: #f9fafb; font-size: 12px;
 td { padding: 14px 18px; border-bottom: 1px solid #f3f4f6; font-size: 14px; color: #374151; white-space: nowrap; max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
 tbody tr:nth-child(even) { background-color: #f9fafb; }
 tbody tr:hover { background-color: #fff7ed; }
+tr.single-partner-row td { background-color: #ffe3bd; }
+tr.single-partner-row:hover td { background-color: #ffd699; }
+tr.single-partner-row .col-url { color: #9a3412; }
 #previewTable th:nth-child(3), #previewTable td:nth-child(3) { max-width: 260px; width: 260px; }
 #previewTable th:nth-child(4), #previewTable td:nth-child(4) { max-width: 160px; width: 160px; }
 

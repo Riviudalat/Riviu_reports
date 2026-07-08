@@ -16,6 +16,7 @@ from playwright.async_api import async_playwright
 
 from workbook_utils import (
     clean_text,
+    highlight_single_partner_link_rows,
     is_generated_username_channel,
     is_generic_tiktok_channel_name,
     is_numeric_channel_garbage,
@@ -2530,6 +2531,9 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
 
                 if websocket_manager:
                     primary_target = bucket_rows[0] if bucket_rows else {"sheet_name": ""}
+                    single_partner = any(
+                        len(target.get("partners") or []) == 1 for target in bucket_rows
+                    )
                     await websocket_manager.broadcast_data({
                         "id": result["sequence"],
                         "url": result["url"],
@@ -2551,6 +2555,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                             cache_lock=cache_lock,
                         ),
                         "sheetName": primary_target.get("sheet_name", ""),
+                        "singlePartner": single_partner,
                     })
                     now = time.perf_counter()
                     if processed == total or now - last_status_broadcast > 0.25:
@@ -2619,6 +2624,9 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 pass
             set_session_proxies([])
 
+    scan_sheet_for_summary = clean_text(sheet_name) or (
+        clean_text(rows_to_process[0].get("sheet_name", "")) if rows_to_process else ""
+    )
     try:
         append_sheet_total_rows(workbook)
         summary_update_time = format_display_datetime()
@@ -2627,9 +2635,6 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             created_sheet_name = build_result_sheet(workbook, rows_to_process, summary_update_time)
             if websocket_manager and created_sheet_name:
                 await websocket_manager.broadcast_log(f"Đã tạo sheet kết quả mới: {created_sheet_name}.")
-        scan_sheet_for_summary = clean_text(sheet_name) or (
-            clean_text(rows_to_process[0].get("sheet_name", "")) if rows_to_process else ""
-        )
         summary_count = rebuild_summary_sheet(
             workbook,
             summary_update_time=summary_update_time,
@@ -2644,6 +2649,19 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     except Exception as error:
         if websocket_manager:
             await websocket_manager.broadcast_log(f"CẢNH BÁO: Không cập nhật được sheet Tổng kết ({str(error)})")
+
+    try:
+        if scan_sheet_for_summary:
+            highlighted_count = highlight_single_partner_link_rows(workbook, scan_sheet_for_summary)
+            if websocket_manager and highlighted_count:
+                await websocket_manager.broadcast_log(
+                    f"Đã bôi cam {highlighted_count} dòng link chỉ có 1 đối tác."
+                )
+    except Exception as error:
+        if websocket_manager:
+            await websocket_manager.broadcast_log(
+                f"CẢNH BÁO: Không bôi cam được dòng link 1 đối tác ({str(error)})"
+            )
 
     await save_workbook(workbook, file_path, websocket_manager)
     duration_seconds = max(int(time.perf_counter() - started_at), 0)

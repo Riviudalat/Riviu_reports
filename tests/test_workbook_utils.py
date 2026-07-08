@@ -9,6 +9,7 @@ from workbook_utils import (
     format_filename_datetime,
     google_sheet_filename_to_label,
     google_sheet_sync_label,
+    highlight_single_partner_link_rows,
     is_internal_workbook_filename,
     parse_filename_datetime_stamp,
     result_sheet_display_name,
@@ -23,9 +24,11 @@ from workbook_utils import (
     metric_number,
     normalize_tiktok_url,
     build_summary_totals_row,
+    read_sheet_preview,
     rebuild_summary_sheet,
     safe_join,
     safe_workbook_filename,
+    SINGLE_LINK_FILL_COLOR,
     split_partner_value,
     summary_sheet_title_for_data_sheet,
     to_number,
@@ -197,6 +200,79 @@ def test_rebuild_summary_sheet_only_one_data_sheet(tmp_path):
     assert partner_names == ["Partner June"]
     assert wb.sheetnames.index("Tổng kết tháng 6") == wb.sheetnames.index("Tháng 6") + 1
     wb.close()
+
+
+def test_highlight_single_partner_link_rows_marks_rows_with_exactly_one_partner():
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "Tháng 6"
+    sheet.append(["LINK AIR", "Đối tác", "Đối tác 2", "LƯỢT XEM"])
+    sheet.append(["https://www.tiktok.com/@a/video/1", "Partner A", "", 10])
+    sheet.append(["https://www.tiktok.com/@b/video/2", "Partner A", "Partner B", 20])
+    sheet.append(["https://www.tiktok.com/@c/video/3", "Partner B", "", 30])
+
+    count = highlight_single_partner_link_rows(wb, "Tháng 6")
+
+    assert count == 2
+    single_fill_row2 = sheet.cell(row=2, column=1).fill
+    multi_fill_row3 = sheet.cell(row=3, column=1).fill
+    single_fill_row4 = sheet.cell(row=4, column=1).fill
+    assert str(single_fill_row2.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
+    assert not str(multi_fill_row3.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
+    assert str(single_fill_row4.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
+
+
+def test_highlight_single_partner_link_rows_clears_stale_highlight_once_row_gains_partner():
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "Tháng 6"
+    sheet.append(["LINK AIR", "Đối tác", "Đối tác 2", "LƯỢT XEM"])
+    sheet.append(["https://www.tiktok.com/@a/video/1", "Partner A", "", 10])
+
+    first_count = highlight_single_partner_link_rows(wb, "Tháng 6")
+    assert first_count == 1
+    assert str(sheet.cell(row=2, column=1).fill.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
+
+    # Dòng vừa được gắn thêm 1 đối tác nữa -> highlight cũ phải được xóa.
+    sheet.cell(row=2, column=3, value="Partner B")
+    second_count = highlight_single_partner_link_rows(wb, "Tháng 6")
+
+    assert second_count == 0
+    assert not str(sheet.cell(row=2, column=1).fill.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
+
+
+def test_highlight_single_partner_link_rows_missing_sheet_returns_zero():
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    wb.active.title = "Tháng 6"
+    assert highlight_single_partner_link_rows(wb, "Tháng 7") == 0
+
+
+def test_read_sheet_preview_flags_single_partner_rows(tmp_path):
+    import openpyxl
+
+    file_path = tmp_path / "preview.xlsx"
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "Tháng 6"
+    sheet.append(["LINK AIR", "TÊN KÊNH", "Đối tác", "Đối tác 2", "LƯỢT XEM"])
+    sheet.append(["https://www.tiktok.com/@a/video/1", "Kenh A", "Partner A", "", 10])
+    sheet.append(["https://www.tiktok.com/@b/video/2", "Kenh B", "Partner A", "Partner B", 20])
+    sheet.append(["", "Kenh C", "Partner A", "", 0])
+    wb.save(file_path)
+    wb.close()
+
+    preview = read_sheet_preview(str(file_path), sheet_name="Tháng 6")
+
+    rows = preview["data"]
+    assert rows[0].get("_singlePartner") is True
+    assert not rows[1].get("_singlePartner")
+    assert not rows[2].get("_singlePartner")
 
 
 def test_build_summary_totals_row_sums_partner_metrics():

@@ -5,7 +5,7 @@ from unittest.mock import patch
 from openpyxl import load_workbook
 
 from app import build_google_push_rows, build_partner_report
-from workbook_utils import is_failed_channel_name, metric_number
+from workbook_utils import SINGLE_LINK_FILL_COLOR, is_failed_channel_name, metric_number
 
 
 def test_validate_proxy_start_blocks_empty(tmp_path):
@@ -109,6 +109,82 @@ def test_build_partner_report_total_row_has_numeric_sums():
     assert worksheet.cell(row=total_row, column=6).value == 3
     assert worksheet.cell(row=total_row, column=7).value == 5
     assert worksheet.cell(row=total_row, column=8).value == 5
+
+
+def test_build_partner_report_highlights_row_with_single_partner():
+    rows = [
+        {
+            "NGÀY AIR": "",
+            "TÊN KÊNH": "Solo",
+            "LINK AIR": "https://www.tiktok.com/@a/video/1",
+            "LƯỢT XEM": 200,
+            "TIM": 1,
+            "BÌNH LUẬN": 1,
+            "LƯỢT LƯU": 1,
+            "CHIA SẺ": 1,
+            "partners": ["Partner A"],
+        },
+    ]
+    report_bytes = build_partner_report("Partner A", rows, apply_min_views=False)
+    workbook = load_workbook(io.BytesIO(report_bytes))
+    worksheet = workbook.active
+    data_row = 7  # table_header_row (6) + 1
+    fill = worksheet.cell(row=data_row, column=1).fill
+    assert str(fill.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
+
+
+def test_build_partner_report_only_highlights_single_partner_rows():
+    rows = [
+        {
+            "NGÀY AIR": "",
+            "TÊN KÊNH": "A",
+            "LINK AIR": "https://www.tiktok.com/@a/video/1",
+            "LƯỢT XEM": 200,
+            "TIM": 1,
+            "BÌNH LUẬN": 1,
+            "LƯỢT LƯU": 1,
+            "CHIA SẺ": 1,
+            "partners": ["Partner A"],
+        },
+        {
+            "NGÀY AIR": "",
+            "TÊN KÊNH": "B",
+            "LINK AIR": "https://www.tiktok.com/@b/video/2",
+            "LƯỢT XEM": 300,
+            "TIM": 1,
+            "BÌNH LUẬN": 1,
+            "LƯỢT LƯU": 1,
+            "CHIA SẺ": 1,
+            "partners": ["Partner A", "Partner B"],
+        },
+    ]
+    report_bytes = build_partner_report("Partner A", rows, apply_min_views=False)
+    workbook = load_workbook(io.BytesIO(report_bytes))
+    worksheet = workbook.active
+    single_partner_fill = worksheet.cell(row=7, column=1).fill
+    multi_partner_fill = worksheet.cell(row=8, column=1).fill
+    assert str(single_partner_fill.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
+    assert not str(multi_partner_fill.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
+
+
+def test_build_partner_report_no_highlight_when_partners_key_missing():
+    rows = [
+        {
+            "NGÀY AIR": "",
+            "TÊN KÊNH": "A",
+            "LINK AIR": "https://www.tiktok.com/@a/video/1",
+            "LƯỢT XEM": 200,
+            "TIM": 1,
+            "BÌNH LUẬN": 1,
+            "LƯỢT LƯU": 1,
+            "CHIA SẺ": 1,
+        },
+    ]
+    report_bytes = build_partner_report("Partner", rows, apply_min_views=False)
+    workbook = load_workbook(io.BytesIO(report_bytes))
+    worksheet = workbook.active
+    fill = worksheet.cell(row=7, column=1).fill
+    assert not str(fill.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
 
 
 def test_build_partner_report_works_when_logo_image_unavailable():
