@@ -114,6 +114,9 @@ REQUEST_METRIC_HINT_PATTERN = re.compile(r'"(?:playCount|diggCount)"\s*:\s*"?(\d
 _request_semaphore = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
 _request_block_lock = threading.Lock()
 _request_block_until = 0.0
+_network_fail_streak = 0
+NETWORK_FAIL_STREAK_PAUSE = 3
+NETWORK_FAIL_PAUSE_SECONDS = 5.0
 
 
 def session_uses_proxy():
@@ -131,9 +134,12 @@ def clamp_worker_count(worker_count, proxy_count=0):
 
 
 def configure_request_concurrency(worker_count, proxy_count=0):
-    global _request_semaphore
+    global _request_semaphore, _network_fail_streak, _request_block_until
     limit = clamp_worker_count(worker_count, proxy_count=proxy_count)
     _request_semaphore = threading.Semaphore(limit)
+    with _request_block_lock:
+        _network_fail_streak = 0
+        _request_block_until = 0.0
 
 
 def is_request_rate_limited_status(status):
@@ -141,9 +147,28 @@ def is_request_rate_limited_status(status):
     return "HTTP 403" in text or "HTTP 429" in text
 
 
+def is_transient_network_status(status):
+    """DNS / connection reset / timeout — lỗi tạm, nên retry đủ số lần."""
+    text = str(status or "").casefold()
+    markers = (
+        "getaddrinfo failed",
+        "errno 11001",
+        "winerror 10054",
+        "connection was forcibly closed",
+        "connection reset",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "name or service not known",
+        "nodename nor servname",
+        "network is unreachable",
+        "connection aborted",
+        "broken pipe",
+    )
+    return any(marker in text for marker in markers)
+
+
 def wait_if_request_blocked():
-    if session_uses_proxy():
-        return
     with _request_block_lock:
         until = _request_block_until
     remaining = until - time.time()
@@ -158,6 +183,25 @@ def note_request_rate_limit(http_code):
     pause = 8.0 if http_code == 403 else 4.0
     with _request_block_lock:
         _request_block_until = max(_request_block_until, time.time() + pause)
+
+
+def note_network_failure():
+    """Tạm dừng toàn phiên khi DNS/mạng fail hàng loạt (tránh đốt hết queue)."""
+    global _request_block_until, _network_fail_streak
+    with _request_block_lock:
+        _network_fail_streak += 1
+        if _network_fail_streak >= NETWORK_FAIL_STREAK_PAUSE:
+            _request_block_until = max(
+                _request_block_until,
+                time.time() + NETWORK_FAIL_PAUSE_SECONDS,
+            )
+            _network_fail_streak = 0
+
+
+def note_network_success():
+    global _network_fail_streak
+    with _request_block_lock:
+        _network_fail_streak = 0
 
 
 def request_shell_retry_delay():
@@ -1620,8 +1664,11 @@ def _scrape_link_request_impl(url, timeout=DEFAULT_REQUEST_TIMEOUT):
                 continue
             except Exception as error:
                 last_status = f"Error: {str(error)}"
+                if is_transient_network_status(last_status):
+                    note_network_failure()
                 continue
 
+            note_network_success()
             last_resolved_url = final_url or last_resolved_url
             if request_html_has_metric_hints(content):
                 saw_metric_hints = True
@@ -1713,6 +1760,8 @@ def scrape_link_with_retries_request(
             return data, channel_name, status, attempts_used, last_resolved_url
         if is_request_rate_limited_status(status):
             release_thread_proxy()
+            continue
+        if is_transient_network_status(status):
             continue
         if not saw_metric_hints:
             break
@@ -2098,7 +2147,8 @@ def write_result(
             channel_value = existing
         sheet.cell(row=row_index, column=columns["channel"]).value = channel_value
 
-    if columns.get("last_update"):
+    # Chỉ cập nhật timestamp khi quét thành công — tránh hiểu nhầm đã quét OK.
+    if status == "Success" and columns.get("last_update"):
         sheet.cell(row=row_index, column=columns["last_update"]).value = update_time
 
 
@@ -2193,7 +2243,7 @@ def format_scrape_result_log(result, processed, total):
     return message, "ERROR", details
 
 
-def progress_payload(total, processed, success_count, error_count, worker_count, started_at, done=False, mode="full", partner="", phase="scanning", uses_browser=False):
+def progress_payload(total, processed, success_count, error_count, worker_count, started_at, done=False, mode="full", partner="", phase="scanning", uses_browser=False, hidden_count=0):
     elapsed = max(time.perf_counter() - started_at, 0.001)
     rate = processed / elapsed * 60 if processed else 0
     remaining = max(total - processed, 0)
@@ -2203,6 +2253,7 @@ def progress_payload(total, processed, success_count, error_count, worker_count,
         "processed": processed,
         "success": success_count,
         "error": error_count,
+        "hidden": hidden_count,
         "workers": worker_count,
         "rate": round(rate, 1),
         "etaSeconds": eta_seconds,
@@ -2367,10 +2418,12 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     processed = 0
     success_count = 0
     error_count = 0
+    hidden_count = 0
     pending_save_count = 0
     save_skip_until_processed = 0
     last_status_broadcast = 0.0
     active_worker_count = request_worker_count + browser_worker_count
+    completed_sequences = set()
 
     async with async_playwright() as playwright:
         set_session_proxies(proxy_configs if use_proxy else [])
@@ -2469,15 +2522,32 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                     stalled_seconds += 30
                     alive_workers = sum(1 for task in workers if not task.done())
                     if alive_workers == 0:
+                        remaining_buckets = [
+                            bucket for bucket in bucket_order
+                            if bucket["sequence"] not in completed_sequences
+                        ]
                         if websocket_manager:
                             await websocket_manager.broadcast_log(
-                                f"Tất cả worker đã dừng, hủy {total - processed} link còn lại."
+                                f"Tất cả worker đã dừng, hủy {len(remaining_buckets)} link còn lại."
                             )
-                        # All workers are dead, mark remaining as errors
-                        remaining = total - processed
-                        for _ in range(remaining):
+                        empty_data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
+                        for bucket in remaining_buckets:
                             error_count += 1
                             processed += 1
+                            completed_sequences.add(bucket["sequence"])
+                            for target in bucket.get("rows") or []:
+                                write_result(
+                                    sheet_contexts,
+                                    {
+                                        "sheet_name": target["sheet_name"],
+                                        "row": target["row"],
+                                        "url": bucket["url"],
+                                    },
+                                    empty_data,
+                                    "",
+                                    "Error: Worker đã dừng",
+                                )
+                            pending_save_count += max(len(bucket.get("rows") or []), 1)
                         break
                     if websocket_manager and stalled_seconds % 60 == 0:
                         await websocket_manager.broadcast_log(
@@ -2489,6 +2559,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 data = result["data"]
                 status = result["status"]
                 bucket_rows = result.get("rows") or []
+                completed_sequences.add(result.get("sequence"))
                 resolved_url = clean_text(result.get("resolved_url", ""))
                 result["channel_name"] = enrich_channel_name(
                     result["url"],
@@ -2502,6 +2573,8 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
 
                 if status == "Success":
                     success_count += 1
+                elif status == STATUS_TIKTOK_NO_STATS:
+                    hidden_count += 1
                 else:
                     error_count += 1
 
@@ -2531,9 +2604,8 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
 
                 if websocket_manager:
                     primary_target = bucket_rows[0] if bucket_rows else {"sheet_name": ""}
-                    single_partner = any(
-                        len(target.get("partners") or []) == 1 for target in bucket_rows
-                    )
+                    # Chỉ tô cam khi dòng chính (primary) đúng 1 đối tác — khớp Excel/preview.
+                    single_partner = len(primary_target.get("partners") or []) == 1
                     await websocket_manager.broadcast_data({
                         "id": result["sequence"],
                         "url": result["url"],
@@ -2570,6 +2642,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                                 mode=mode,
                                 partner=partner_label,
                                 phase="scanning",
+                                hidden_count=hidden_count,
                             )
                         )
                         last_status_broadcast = now
@@ -2678,6 +2751,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
         "scrapedRows": total_rows,
         "success": success_count,
         "error": error_count,
+        "hidden": hidden_count,
         "workers": active_worker_count if use_request else worker_count,
         "durationSeconds": duration_seconds,
         "sheetTotalLinks": sheet_totals["totalLinks"],
@@ -2697,18 +2771,20 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 mode=mode,
                 partner=partner_label,
                 phase="done",
+                hidden_count=hidden_count,
             )
         )
         duration_seconds = max(int(time.perf_counter() - started_at), 0)
+        hidden_part = f", ẩn số liệu {hidden_count}" if hidden_count else ""
         if selected_names:
             await websocket_manager.broadcast_log(
                 f"HOÀN THÀNH: Đã cập nhật {partner_label} với {processed} URL ({total_rows} dòng), "
-                f"thành công {success_count}, lỗi {error_count}, thời lượng {duration_seconds}s, file={os.path.basename(file_path)}.",
+                f"thành công {success_count}, lỗi {error_count}{hidden_part}, thời lượng {duration_seconds}s, file={os.path.basename(file_path)}.",
                 level="OK",
             )
         else:
             await websocket_manager.broadcast_log(
                 f"HOÀN THÀNH: Đã quét {processed}/{total} URL ({total_rows} dòng), "
-                f"thành công {success_count}, lỗi {error_count}, thời lượng {duration_seconds}s, file={os.path.basename(file_path)}.",
+                f"thành công {success_count}, lỗi {error_count}{hidden_part}, thời lượng {duration_seconds}s, file={os.path.basename(file_path)}.",
                 level="OK",
             )

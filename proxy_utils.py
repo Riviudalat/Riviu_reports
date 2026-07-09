@@ -9,7 +9,7 @@ import urllib.request
 from urllib.parse import quote, urlparse
 
 PROXY_LIST_FILENAME = "proxy_list.txt"
-PROXY_TEST_BUILD = "5"
+PROXY_TEST_BUILD = "6"
 IP_CHECK_URL = "https://api.ipify.org?format=json"
 # Link mẫu ổn định — probe phải giống luồng quét (trang chủ TikTok thường không có số liệu).
 TIKTOK_PROBE_URL = "https://www.tiktok.com/@demo/photo/764002"
@@ -38,6 +38,14 @@ _session_proxy_lock = threading.Lock()
 _thread_local = threading.local()
 _opener_cache = {}
 _opener_cache_lock = threading.Lock()
+_ORIGINAL_SOCKET_CLASS = socket.socket
+
+
+def _restore_thread_socket():
+    """Khôi phục socket gốc trên thread hiện tại sau khi dùng SOCKS."""
+    if getattr(_thread_local, "socks_key", None) is not None or socket.socket is not _ORIGINAL_SOCKET_CLASS:
+        socket.socket = _ORIGINAL_SOCKET_CLASS
+    _thread_local.socks_key = None
 
 
 def _config_cache_key(config):
@@ -53,6 +61,7 @@ def _config_cache_key(config):
 
 
 def _direct_opener():
+    _restore_thread_socket()
     with _opener_cache_lock:
         opener = _opener_cache.get("direct")
         if opener is None:
@@ -62,6 +71,7 @@ def _direct_opener():
 
 
 def _http_proxy_opener(config):
+    _restore_thread_socket()
     key = _config_cache_key(config)
     with _opener_cache_lock:
         opener = _opener_cache.get(key)
@@ -329,9 +339,11 @@ def set_session_proxies(configs):
         ]
     with _opener_cache_lock:
         _opener_cache.clear()
-    _thread_local.socks_key = None
+    _restore_thread_socket()
     _thread_local.proxy_key = None
     _thread_local.proxy_config = None
+    _thread_local.worker_index = None
+    _thread_local.proxy_rotation = 0
 
 
 def set_session_proxy(config):
@@ -390,13 +402,16 @@ def release_thread_proxy():
     with _session_proxy_lock:
         pool = list(_session_proxies)
     if worker_index is None or not pool:
+        _restore_thread_socket()
         _thread_local.proxy_key = None
         _thread_local.proxy_config = None
-        _thread_local.socks_key = None
         return None
     rotation = getattr(_thread_local, "proxy_rotation", 0) + 1
     _thread_local.proxy_rotation = rotation
     chosen = pool[(worker_index + rotation) % len(pool)]
+    # Chuyển SOCKS -> HTTP: phải bỏ monkeypatch socket trước khi mở HTTP.
+    if chosen.get("type") != "socks5":
+        _restore_thread_socket()
     _thread_local.proxy_config = chosen
     _thread_local.proxy_key = _config_cache_key(chosen)
     return chosen

@@ -241,3 +241,38 @@ def test_set_session_proxy_used_by_urlopen_request():
             assert isinstance(handler, urllib.request.ProxyHandler)
     finally:
         set_session_proxy(None)
+
+
+def test_restore_thread_socket_after_socks_session():
+    import proxy_utils
+    import socket
+
+    class FakeSocksSocket:
+        pass
+
+    socket.socket = FakeSocksSocket
+    proxy_utils._thread_local.socks_key = ("socks5", "1.1.1.1", 1080)
+    try:
+        proxy_utils._restore_thread_socket()
+        assert socket.socket is proxy_utils._ORIGINAL_SOCKET_CLASS
+        assert getattr(proxy_utils._thread_local, "socks_key", None) is None
+    finally:
+        socket.socket = proxy_utils._ORIGINAL_SOCKET_CLASS
+        proxy_utils._thread_local.socks_key = None
+
+
+def test_set_session_proxies_restores_socket():
+    import proxy_utils
+    import socket
+
+    class FakeSocksSocket:
+        pass
+
+    socket.socket = FakeSocksSocket
+    proxy_utils._thread_local.socks_key = ("socks5", "1.1.1.1", 1080)
+    try:
+        set_session_proxies([])
+        assert socket.socket is proxy_utils._ORIGINAL_SOCKET_CLASS
+    finally:
+        socket.socket = proxy_utils._ORIGINAL_SOCKET_CLASS
+        proxy_utils._thread_local.socks_key = None

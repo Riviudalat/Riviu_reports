@@ -546,3 +546,127 @@ def test_is_request_rate_limited_status():
     assert is_request_rate_limited_status("Error: HTTP 403") is True
     assert is_request_rate_limited_status("Error: HTTP 429") is True
     assert is_request_rate_limited_status("Error: HTTP 404") is False
+
+
+def test_is_transient_network_status():
+    from scraper import is_transient_network_status
+
+    assert is_transient_network_status("Error: [Errno 11001] getaddrinfo failed") is True
+    assert is_transient_network_status("Error: [WinError 10054] connection was forcibly closed") is True
+    assert is_transient_network_status("Error: timed out") is True
+    assert is_transient_network_status("Error: HTTP 404") is False
+    assert is_transient_network_status("Lỗi: TikTok không trả số liệu") is False
+
+
+def test_scrape_link_retries_transient_network_errors(monkeypatch):
+    import scraper
+
+    calls = {"n": 0}
+
+    def fake_impl(url, timeout=30):
+        calls["n"] += 1
+        empty = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
+        return empty, "", "Error: [Errno 11001] getaddrinfo failed", False, ""
+
+    monkeypatch.setattr(scraper, "_scrape_link_request_impl", fake_impl)
+    monkeypatch.setattr(scraper.time, "sleep", lambda *_args, **_kwargs: None)
+
+    _data, _channel, status, attempts, _resolved = scraper.scrape_link_with_retries_request(
+        "https://www.tiktok.com/@demo/video/1",
+        retries=2,
+    )
+    assert attempts == 3
+    assert calls["n"] == 3
+    assert "11001" in status
+
+
+def test_scrape_link_breaks_early_on_no_stats(monkeypatch):
+    import scraper
+
+    calls = {"n": 0}
+
+    def fake_impl(url, timeout=30):
+        calls["n"] += 1
+        empty = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
+        return empty, "", scraper.STATUS_TIKTOK_NO_STATS, False, ""
+
+    monkeypatch.setattr(scraper, "_scrape_link_request_impl", fake_impl)
+    monkeypatch.setattr(scraper.time, "sleep", lambda *_args, **_kwargs: None)
+
+    _data, _channel, status, attempts, _resolved = scraper.scrape_link_with_retries_request(
+        "https://www.tiktok.com/@demo/video/1",
+        retries=2,
+    )
+    assert attempts == 1
+    assert calls["n"] == 1
+    assert status == scraper.STATUS_TIKTOK_NO_STATS
+
+
+def test_note_network_failure_pauses_after_streak(monkeypatch):
+    import scraper
+
+    scraper.configure_request_concurrency(5)
+    sleeps = []
+    monkeypatch.setattr(scraper.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(scraper.time, "time", lambda: 1000.0)
+
+    for _ in range(scraper.NETWORK_FAIL_STREAK_PAUSE):
+        scraper.note_network_failure()
+
+    scraper.wait_if_request_blocked()
+    assert sleeps
+    assert sleeps[0] >= scraper.NETWORK_FAIL_PAUSE_SECONDS - 0.01
+    scraper.configure_request_concurrency(5)
+
+
+def test_progress_payload_includes_hidden_count():
+    from scraper import progress_payload
+
+    payload = progress_payload(10, 5, 3, 1, 2, 1000.0, hidden_count=1)
+    assert payload["success"] == 3
+    assert payload["error"] == 1
+    assert payload["hidden"] == 1
+
+
+def test_write_result_updates_timestamp_only_on_success():
+    import openpyxl
+    from scraper import LAST_UPDATE_HEADER, write_result
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Tháng 7"
+    ws.append(["Link", "Tên Kênh", "LƯỢT XEM", "TIM", LAST_UPDATE_HEADER])
+    ws.append(["https://www.tiktok.com/@a/video/1", "", 0, 0, "01/01/2026-00:00"])
+    contexts = {
+        "Tháng 7": {
+            "worksheet": ws,
+            "columns": {
+                "views": 3,
+                "likes": 4,
+                "channel": 2,
+                "last_update": 5,
+            },
+        }
+    }
+    item = {"sheet_name": "Tháng 7", "row": 2, "url": "https://www.tiktok.com/@a/video/1"}
+    before = ws.cell(row=2, column=5).value
+
+    write_result(
+        contexts,
+        item,
+        {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"},
+        "",
+        "Error: Worker đã dừng",
+    )
+    assert ws.cell(row=2, column=5).value == before
+
+    write_result(
+        contexts,
+        item,
+        {"Views": "10", "Likes": "1", "Comments": "0", "Saves": "0", "Shares": "0"},
+        "@a",
+        "Success",
+    )
+    assert ws.cell(row=2, column=5).value != before
+    assert ws.cell(row=2, column=3).value == 10
+    wb.close()

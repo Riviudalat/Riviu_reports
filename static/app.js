@@ -322,15 +322,17 @@ function hasGoogleTargetUrl() {
 function setGooglePushState() {
     const button = document.getElementById('pushGoogleBtn');
     if (!button) return;
+    const hasUrl = hasGoogleTargetUrl();
     const enabled = Boolean(
-        googlePushReady
+        googleOAuthAuthorized
+        && hasUrl
         && currentFileId
         && (pushSheetSelect.value || currentPushSheetName)
     );
     button.disabled = !enabled;
     button.title = enabled
         ? ''
-        : 'Chỉ bật sau khi đã có file local, URL sheet đích, đăng nhập Google hợp lệ và chọn sheet nguồn.';
+        : 'Cần: đăng nhập Google, URL sheet đích, file local và sheet nguồn.';
 }
 
 function rememberServerBuild(build) {
@@ -353,10 +355,11 @@ async function checkServerVersion() {
             banner.textContent = 'Server đã cập nhật code (build '
                 + build
                 + '). Restart Khoidong.bat (Ctrl+C → chạy lại) rồi F5 trang này.';
+            rememberServerBuild(build);
         } else if (banner) {
             banner.hidden = true;
-        }
-        if (!stored) {
+            rememberServerBuild(build);
+        } else {
             rememberServerBuild(build);
         }
     } catch (error) {
@@ -793,18 +796,20 @@ async function connectGoogleOAuth() {
         if (!res.ok || !data.success) throw new Error(data.error || 'Đăng nhập Google thất bại');
         notify('Đăng nhập Google thành công.', 'success');
         await refreshGoogleOauthStatus();
+        await updateFileList();
     } catch (error) {
         notify(`Lỗi đăng nhập Google: ${error.message}`, 'error');
     } finally {
         btn.innerHTML = originalHtml;
         await refreshGoogleOauthStatus();
+        await updateFileList();
     }
 }
 
 async function pushCurrentSheetToGoogle(event) {
-        const button = event?.currentTarget;
+    const button = event?.currentTarget;
     if (button && button.disabled) {
-        addLog('Nút Tạo sheet chỉ bật sau khi nạp đúng Google Sheet, đăng nhập Google và quét dữ liệu xong.');
+        addLog('Nút Tạo sheet cần đăng nhập Google, URL sheet đích, file local và sheet nguồn.');
         return;
     }
     const url = googleSheetUrlInput.value.trim();
@@ -1134,6 +1139,8 @@ function updateProgress(data) {
     document.getElementById('totalLinks').textContent = data.total;
     document.getElementById('processedLinks').textContent = data.processed;
     document.getElementById('successLinks').textContent = data.success;
+    const hiddenEl = document.getElementById('hiddenLinks');
+    if (hiddenEl) hiddenEl.textContent = data.hidden || 0;
     document.getElementById('errorLinks').textContent = data.error;
     const pct = data.total > 0 ? (data.processed / data.total) * 100 : 0;
     document.getElementById('progressBar').style.width = `${pct}%`;
@@ -1204,16 +1211,18 @@ function appendData(row) {
         <td>${row.id}</td>
         <td>${escapeHtml(row.sheetName || '')}</td>
         <td title="${escapeHtml(row.channelName || '')}">${escapeHtml(row.channelName || '')}</td>
-        <td class="col-url" title="${escapeHtml(row.url)}"><a href="${escapeHtml(row.url)}" target="_blank" style="color: inherit; text-decoration: none;">${escapeHtml(row.url)}</a></td>
+        <td class="col-url" title="${escapeHtml(row.url)}"><a href="${escapeHtml(row.url)}" target="_blank" style="color: ${row.singlePartner ? '#9a3412' : 'inherit'}; text-decoration: none;">${escapeHtml(row.url)}</a></td>
         <td style="text-align:right; font-weight:bold">${views}</td>
         <td style="text-align:right; font-weight:bold">${likes}</td>
         <td style="text-align:right; font-weight:bold">${comments}</td>
         <td style="text-align:right; font-weight:bold">${saves}</td>
         <td style="text-align:right; font-weight:bold">${shares}</td>
-        <td><span class="col-status" title="${escapeHtml(row.status || '')}" style="color:${row.status === 'Success' ? '#16a34a' : '#dc2626'}">${row.status === 'Success' ? 'OK' : 'LỖI'}</span></td>
+        <td><span class="col-status" title="${escapeHtml(row.status || '')}" style="color:${row.status === 'Success' ? '#16a34a' : (String(row.status || '').includes('không trả số liệu') ? '#ca8a04' : '#dc2626')}">${row.status === 'Success' ? 'OK' : (String(row.status || '').includes('không trả số liệu') ? 'ẨN' : 'LỖI')}</span></td>
     `;
     tbody.prepend(tr);
-    if (row.status !== 'Success') appendFailedLink(row);
+    if (row.status !== 'Success' && !String(row.status || '').includes('không trả số liệu')) {
+        appendFailedLink(row);
+    }
 }
 
 function renderFailedLinks() {
@@ -1501,6 +1510,20 @@ function filenameFromDisposition(disposition, fallback) {
     return plainMatch ? plainMatch[1] : fallback;
 }
 
+function buildExportFallbackFilename(partners, sheetName) {
+    const now = new Date();
+    const pad = (value) => String(value).padStart(2, '0');
+    const stamp = `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()}-${pad(now.getHours())}-${pad(now.getMinutes())}`;
+    const sheet = String(sheetName || reportSheetName || '').trim();
+    if (partners.length === 1) {
+        const parts = [partners[0]];
+        if (sheet) parts.push(sheet);
+        parts.push(stamp);
+        return `${parts.join(' ')}.xlsx`;
+    }
+    return sheet ? `bao_cao_doi_tac ${sheet} ${stamp}.zip` : `bao_cao_doi_tac ${stamp}.zip`;
+}
+
 function downloadBlob(blob, filename) {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
@@ -1539,7 +1562,8 @@ async function exportPartnerReport() {
         }
 
         const blob = await res.blob();
-        const fallback = partners.length === 1 ? `${partners[0]}.xlsx` : 'bao_cao_doi_tac.zip';
+        const sheetName = reportSheetName || document.getElementById('reportSheetSelect')?.value || '';
+        const fallback = buildExportFallbackFilename(partners, sheetName);
         const filename = filenameFromDisposition(res.headers.get('Content-Disposition') || '', fallback);
         downloadBlob(blob, filename);
         notify(`Đã xuất báo cáo: ${filename}`, 'success');
