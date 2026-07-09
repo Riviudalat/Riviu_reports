@@ -595,6 +595,14 @@ def build_export_payload(target_path, selected_partners, apply_min_views, min_vi
     if not partners:
         raise ValueError("Không tìm thấy đối tác đã chọn trong file")
     export_timestamp = format_filename_datetime()
+    sheet_label = safe_report_name(report_sheet) if report_sheet else ""
+
+    def report_base_name(partner_name):
+        parts = [safe_report_name(partner_name)]
+        if sheet_label:
+            parts.append(sheet_label)
+        parts.append(export_timestamp)
+        return " ".join(parts)
 
     if len(partners) == 1:
         partner = partners[0]
@@ -605,7 +613,7 @@ def build_export_payload(target_path, selected_partners, apply_min_views, min_vi
             apply_min_views=apply_min_views,
             min_views=min_views,
         )
-        filename = f"{safe_report_name(partner)} {export_timestamp}.xlsx"
+        filename = f"{report_base_name(partner)}.xlsx"
         return {
             "content": report_bytes,
             "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -623,7 +631,7 @@ def build_export_payload(target_path, selected_partners, apply_min_views, min_vi
                 apply_min_views=apply_min_views,
                 min_views=min_views,
             )
-            base_name = f"{safe_report_name(partner)} {export_timestamp}"
+            base_name = report_base_name(partner)
             filename = f"{base_name}.xlsx"
             counter = 2
             while filename in used_names:
@@ -633,10 +641,14 @@ def build_export_payload(target_path, selected_partners, apply_min_views, min_vi
             zip_file.writestr(filename, report_bytes)
 
     archive.seek(0)
+    zip_parts = ["bao_cao_doi_tac"]
+    if sheet_label:
+        zip_parts.append(sheet_label)
+    zip_parts.append(export_timestamp)
     return {
         "content": archive.getvalue(),
         "media_type": "application/zip",
-        "filename": f"bao_cao_doi_tac {export_timestamp}.zip",
+        "filename": f"{' '.join(zip_parts)}.zip",
     }
 
 

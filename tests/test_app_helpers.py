@@ -204,3 +204,28 @@ def test_build_partner_report_works_when_logo_image_unavailable():
         report_bytes = build_partner_report("Partner", rows, apply_min_views=False)
     assert isinstance(report_bytes, bytes)
     assert len(report_bytes) > 0
+
+
+def test_build_export_payload_filename_includes_sheet_and_timestamp(tmp_path):
+    import openpyxl
+    from app import build_export_payload
+
+    file_path = tmp_path / "report.xlsx"
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "Tháng 7"
+    sheet.append(["LINK AIR", "Tên Kênh", "Đối tác", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"])
+    sheet.append(["https://www.tiktok.com/@a/video/1", "Kenh A", "1/2 Circle Coffee", 200, 1, 0, 0, 0])
+    wb.save(file_path)
+    wb.close()
+
+    with patch("app.format_filename_datetime", return_value="09-07-2026-13-47"):
+        payload = build_export_payload(
+            str(file_path),
+            ["1/2 Circle Coffee"],
+            apply_min_views=False,
+            min_views=0,
+            requested_sheet_name="Tháng 7",
+        )
+
+    assert payload["filename"] == "1-2 Circle Coffee Tháng 7 09-07-2026-13-47.xlsx"
