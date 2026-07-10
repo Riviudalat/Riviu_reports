@@ -103,7 +103,6 @@
             <div class="stat-card"><div class="label">TỔNG LINK</div><div class="value" id="totalLinks">0</div></div>
             <div class="stat-card"><div class="label">ĐÃ XỬ LÝ</div><div class="value" id="processedLinks" style="color:#ff6b00">0</div></div>
             <div class="stat-card"><div class="label">THÀNH CÔNG</div><div class="value" id="successLinks" style="color:#16a34a">0</div></div>
-            <div class="stat-card"><div class="label">ẨN SỐ LIỆU</div><div class="value" id="hiddenLinks" style="color:#ca8a04">0</div></div>
             <div class="stat-card"><div class="label">BỊ LỖI</div><div class="value" id="errorLinks" style="color:#dc2626">0</div></div>
         </div>
 
@@ -313,8 +312,22 @@
                     <input type="number" id="minViewInput" value="100" min="0" step="10" style="width:90px; padding:6px 8px; border:1px solid #d1d5db; border-radius:6px; font-size:13px;">
                     <span style="font-size:13px; color:#6b7280;">view</span>
                 </div>
-                <div class="partner-list" id="partnerList">
-                    <div class="empty-state">Đang tải danh sách đối tác...</div>
+                <div class="report-partner-layout">
+                    <div class="report-partner-pane">
+                        <div class="report-pane-label">Danh sách đối tác</div>
+                        <div class="partner-list" id="partnerList">
+                            <div class="empty-state">Đang tải danh sách đối tác...</div>
+                        </div>
+                    </div>
+                    <div class="report-partner-pane report-selected-pane">
+                        <div class="report-selected-head">
+                            <div class="report-pane-label">Đã chọn <span id="selectedPartnerCount">0</span></div>
+                            <button type="button" class="btn btn-outline btn-compact" id="clearSelectedPartnersBtn" onclick="clearAllPartners()" disabled>Xóa hết</button>
+                        </div>
+                        <div class="selected-partner-list" id="selectedPartnerList">
+                            <div class="empty-state">Chưa chọn đối tác nào.</div>
+                        </div>
+                    </div>
                 </div>
                 <div class="report-summary" id="reportSummary">Chưa chọn đối tác nào.</div>
             </div>

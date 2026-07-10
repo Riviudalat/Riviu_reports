@@ -170,7 +170,14 @@ function notify(message, level = 'info') {
 }
 
 function isNoStatsStatus(status) {
-    return String(status || '').includes('TikTok không trả số liệu');
+    const text = String(status || '');
+    return (
+        text.includes('Ẩn số liệu')
+        || text.includes('TikTok không trả số liệu')
+        || text.includes('TikTok không trả lượt xem')
+        || text.includes('không trả số liệu')
+        || text.includes('không trả lượt xem')
+    );
 }
 
 function getLogText() {
@@ -1139,9 +1146,9 @@ function updateProgress(data) {
     document.getElementById('totalLinks').textContent = data.total;
     document.getElementById('processedLinks').textContent = data.processed;
     document.getElementById('successLinks').textContent = data.success;
-    const hiddenEl = document.getElementById('hiddenLinks');
-    if (hiddenEl) hiddenEl.textContent = data.hidden || 0;
-    document.getElementById('errorLinks').textContent = data.error;
+    // Gộp ẩn số liệu + lỗi quét vào một ô BỊ LỖI; chi tiết xem ở tab link lỗi.
+    const combinedErrors = Number(data.error || 0) + Number(data.hidden || 0);
+    document.getElementById('errorLinks').textContent = combinedErrors;
     const pct = data.total > 0 ? (data.processed / data.total) * 100 : 0;
     document.getElementById('progressBar').style.width = `${pct}%`;
     const parts = [];
@@ -1217,10 +1224,10 @@ function appendData(row) {
         <td style="text-align:right; font-weight:bold">${comments}</td>
         <td style="text-align:right; font-weight:bold">${saves}</td>
         <td style="text-align:right; font-weight:bold">${shares}</td>
-        <td><span class="col-status" title="${escapeHtml(row.status || '')}" style="color:${row.status === 'Success' ? '#16a34a' : (String(row.status || '').includes('không trả số liệu') ? '#ca8a04' : '#dc2626')}">${row.status === 'Success' ? 'OK' : (String(row.status || '').includes('không trả số liệu') ? 'ẨN' : 'LỖI')}</span></td>
+        <td><span class="col-status" title="${escapeHtml(row.status || '')}" style="color:${row.status === 'Success' ? '#16a34a' : '#dc2626'}">${row.status === 'Success' ? 'OK' : 'LỖI'}</span></td>
     `;
     tbody.prepend(tr);
-    if (row.status !== 'Success' && !String(row.status || '').includes('không trả số liệu')) {
+    if (row.status !== 'Success') {
         appendFailedLink(row);
     }
 }
@@ -1242,15 +1249,17 @@ function renderFailedLinks() {
     if (note) {
         const parts = [];
         if (realErrorCount > 0) parts.push(`${realErrorCount} lỗi quét`);
-        if (noStatsCount > 0) parts.push(`${noStatsCount} post TikTok ẩn số liệu`);
+        if (noStatsCount > 0) parts.push(`${noStatsCount} không đọc được số liệu`);
         note.textContent = parts.length ? `(${parts.join(' • ')})` : '';
     }
 
     tbody.innerHTML = failedLinks.map(item => {
         const noStats = isNoStatsStatus(item.status);
         const reasonClass = noStats ? 'failed-reason soft-warn' : 'failed-reason';
-        const reasonText = noStats ? 'TikTok không trả số liệu (post có thể ẩn lượt xem)' : (item.status || 'Lỗi không xác định');
-        const tag = noStats ? '<span class="reason-tag">TikTok ẩn</span>' : '';
+        const reasonText = noStats
+            ? 'Không đọc được số liệu (TikTok ẩn / không trả lượt xem)'
+            : (item.status || 'Lỗi không xác định');
+        const tag = noStats ? '<span class="reason-tag">Ẩn số liệu</span>' : '';
         return `
         <tr>
             <td>${item.id}</td>
@@ -1465,6 +1474,7 @@ function renderPartnerList() {
 
     if (visiblePartners.length === 0) {
         list.innerHTML = '<div class="empty-state">Không tìm thấy đối tác phù hợp.</div>';
+        renderSelectedPartnerList();
         updateReportSummary();
         return;
     }
@@ -1476,7 +1486,40 @@ function renderPartnerList() {
             ${partnerShowsNoLinkStatus(item) ? '<span class="partner-link-status">Chưa có link</span>' : ''}
         </label>
     `).join('');
+    renderSelectedPartnerList();
     updateReportSummary();
+}
+
+function renderSelectedPartnerList() {
+    const list = document.getElementById('selectedPartnerList');
+    const countEl = document.getElementById('selectedPartnerCount');
+    const clearBtn = document.getElementById('clearSelectedPartnersBtn');
+    if (!list) return;
+
+    const selected = reportPartners.filter(item => selectedPartners.has(item.name));
+    if (countEl) countEl.textContent = String(selected.length);
+    if (clearBtn) clearBtn.disabled = selected.length === 0;
+
+    if (selected.length === 0) {
+        list.innerHTML = '<div class="empty-state">Chưa chọn đối tác nào.</div>';
+        return;
+    }
+
+    list.innerHTML = selected.map(item => `
+        <div class="selected-partner-item">
+            <span class="partner-name" title="${escapeHtml(item.name)}">${escapeHtml(item.name)}</span>
+            <button type="button" class="selected-partner-remove" data-partner="${escapeHtml(item.name)}" aria-label="Bỏ chọn ${escapeHtml(item.name)}" title="Bỏ chọn">
+                <span class="material-icons-outlined">close</span>
+            </button>
+        </div>
+    `).join('');
+}
+
+function removeSelectedPartner(name) {
+    const partnerName = String(name || '').trim();
+    if (!partnerName || !selectedPartners.has(partnerName)) return;
+    selectedPartners.delete(partnerName);
+    renderPartnerList();
 }
 
 function selectAllPartners() {
@@ -1501,6 +1544,7 @@ function updateReportSummary() {
         : `Đã chọn ${count}/${total} đối tác. Cập nhật lại và xuất báo cáo đều hỗ trợ một hoặc nhiều đối tác.`;
     exportBtn.disabled = count === 0;
     refreshBtn.disabled = count === 0;
+    renderSelectedPartnerList();
 }
 
 function filenameFromDisposition(disposition, fallback) {
@@ -1621,6 +1665,13 @@ document.getElementById('partnerList').addEventListener('change', (event) => {
     if (event.target.checked) selectedPartners.add(partner.name);
     else selectedPartners.delete(partner.name);
     updateReportSummary();
+});
+
+document.getElementById('selectedPartnerList').addEventListener('click', (event) => {
+    const button = event.target.closest('.selected-partner-remove');
+    if (!button) return;
+    event.preventDefault();
+    removeSelectedPartner(button.getAttribute('data-partner') || '');
 });
 
 document.getElementById('reportModal').addEventListener('click', (event) => {

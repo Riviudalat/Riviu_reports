@@ -554,8 +554,49 @@ def test_is_transient_network_status():
     assert is_transient_network_status("Error: [Errno 11001] getaddrinfo failed") is True
     assert is_transient_network_status("Error: [WinError 10054] connection was forcibly closed") is True
     assert is_transient_network_status("Error: timed out") is True
+    assert is_transient_network_status(
+        "Error: <urlopen error [SSL: UNEXPECTED_EOF_WHILE_READING] EOF occurred in violation of protocol (_ssl.c:1081)>"
+    ) is True
     assert is_transient_network_status("Error: HTTP 404") is False
+    assert is_transient_network_status("Ẩn số liệu: TikTok không trả lượt xem") is False
     assert is_transient_network_status("Lỗi: TikTok không trả số liệu") is False
+
+
+def test_is_hidden_stats_status_accepts_new_and_legacy():
+    from scraper import (
+        STATUS_TIKTOK_NO_STATS,
+        STATUS_TIKTOK_NO_STATS_LEGACY,
+        is_hidden_stats_status,
+    )
+
+    assert STATUS_TIKTOK_NO_STATS.startswith("Ẩn số liệu")
+    assert not STATUS_TIKTOK_NO_STATS.startswith("Lỗi:")
+    assert is_hidden_stats_status(STATUS_TIKTOK_NO_STATS) is True
+    assert is_hidden_stats_status(STATUS_TIKTOK_NO_STATS_LEGACY) is True
+    assert is_hidden_stats_status("Error: HTTP 403") is False
+    assert is_hidden_stats_status("Success") is False
+
+
+def test_format_scrape_result_log_hidden_is_warn():
+    from scraper import STATUS_TIKTOK_NO_STATS, format_scrape_result_log
+
+    message, level, details = format_scrape_result_log(
+        {
+            "url": "https://www.tiktok.com/@a/video/1",
+            "worker": "R1",
+            "status": STATUS_TIKTOK_NO_STATS,
+            "attempts": 1,
+            "elapsed": 1.2,
+            "data": {},
+            "rows": [{"sheet_name": "Tháng 7", "row": 9}],
+            "channel_name": "",
+        },
+        15,
+        100,
+    )
+    assert level == "WARN"
+    assert "Ẩn số liệu" in message
+    assert details["kind"] == "scrape_hidden"
 
 
 def test_scrape_link_retries_transient_network_errors(monkeypatch):

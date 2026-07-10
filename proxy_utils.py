@@ -9,7 +9,7 @@ import urllib.request
 from urllib.parse import quote, urlparse
 
 PROXY_LIST_FILENAME = "proxy_list.txt"
-PROXY_TEST_BUILD = "6"
+PROXY_TEST_BUILD = "7"
 IP_CHECK_URL = "https://api.ipify.org?format=json"
 # Link mẫu ổn định — probe phải giống luồng quét (trang chủ TikTok thường không có số liệu).
 TIKTOK_PROBE_URL = "https://www.tiktok.com/@demo/photo/764002"

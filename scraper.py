@@ -148,7 +148,7 @@ def is_request_rate_limited_status(status):
 
 
 def is_transient_network_status(status):
-    """DNS / connection reset / timeout — lỗi tạm, nên retry đủ số lần."""
+    """DNS / connection reset / timeout / SSL đứt giữa chừng — lỗi tạm, nên retry đủ số lần."""
     text = str(status or "").casefold()
     markers = (
         "getaddrinfo failed",
@@ -164,6 +164,14 @@ def is_transient_network_status(status):
         "network is unreachable",
         "connection aborted",
         "broken pipe",
+        "unexpected_eof_while_reading",
+        "eof occurred in violation of protocol",
+        "ssl:",
+        "sslerror",
+        "wrong version number",
+        "connection refused",
+        "remote end closed connection",
+        "incomplete read",
     )
     return any(marker in text for marker in markers)
 
@@ -213,9 +221,11 @@ def request_candidate_limit():
 
 # Phân biệt hai loại "không có số liệu":
 # - METRICS_UNREADABLE: HTML có dấu hiệu số liệu nhưng đọc lỗi (hiếm, đáng retry).
-# - TIKTOK_NO_STATS: TikTok trả trang rỗng, không hề có số liệu (post ẩn view) -> lỗi vĩnh viễn.
+# - TIKTOK_NO_STATS: TikTok trả trang rỗng, không hề có số liệu (post ẩn view) -> đếm ẨN, không phải BỊ LỖI.
 STATUS_METRICS_UNREADABLE = "Error: Không đọc được số liệu"
-STATUS_TIKTOK_NO_STATS = "Lỗi: TikTok không trả số liệu"
+STATUS_TIKTOK_NO_STATS = "Ẩn số liệu: TikTok không trả lượt xem"
+# Chuỗi cũ (trước khi tách ẩn/lỗi) — vẫn nhận diện khi đọc log/Excel cũ.
+STATUS_TIKTOK_NO_STATS_LEGACY = "Lỗi: TikTok không trả số liệu"
 
 MAX_WORKERS = 50
 DEFAULT_WORKERS = 5
@@ -1559,8 +1569,23 @@ def request_html_has_metric_hints(content):
     return bool(REQUEST_METRIC_HINT_PATTERN.search(content or ""))
 
 
+def is_hidden_stats_status(status):
+    """True khi post TikTok ẩn số liệu (không phải lỗi quét mạng/HTTP)."""
+    text = clean_text(status)
+    if not text:
+        return False
+    if text in (STATUS_TIKTOK_NO_STATS, STATUS_TIKTOK_NO_STATS_LEGACY):
+        return True
+    lowered = text.casefold()
+    return (
+        "ẩn số liệu" in lowered
+        or "tiktok không trả số liệu" in lowered
+        or "tiktok không trả lượt xem" in lowered
+    )
+
+
 def no_metrics_status(content):
-    """Nhãn lỗi rõ nghĩa: trang rỗng (TikTok ẩn) vs đọc lỗi tạm thời."""
+    """Nhãn rõ nghĩa: trang rỗng (TikTok ẩn) vs đọc lỗi tạm thời."""
     if request_html_has_metric_hints(content):
         return STATUS_METRICS_UNREADABLE
     return STATUS_TIKTOK_NO_STATS
@@ -2217,10 +2242,10 @@ def format_scrape_result_log(result, processed, total):
         }
         return message, "OK", details
 
-    if status == STATUS_TIKTOK_NO_STATS:
+    if is_hidden_stats_status(status):
         message = (
             f"[{processed}/{total}] Ẩn số liệu • {elapsed:.1f}s • luồng {worker} • "
-            f"TikTok không trả số liệu • dòng {row_refs or '—'}"
+            f"TikTok không trả lượt xem • dòng {row_refs or '—'}"
         )
         details = {
             "kind": "scrape_hidden",
@@ -2573,7 +2598,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
 
                 if status == "Success":
                     success_count += 1
-                elif status == STATUS_TIKTOK_NO_STATS:
+                elif is_hidden_stats_status(status):
                     hidden_count += 1
                 else:
                     error_count += 1
@@ -2775,16 +2800,18 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             )
         )
         duration_seconds = max(int(time.perf_counter() - started_at), 0)
-        hidden_part = f", ẩn số liệu {hidden_count}" if hidden_count else ""
+        summary_counts = (
+            f"thành công {success_count}, ẩn số liệu {hidden_count}, lỗi {error_count}"
+        )
         if selected_names:
             await websocket_manager.broadcast_log(
                 f"HOÀN THÀNH: Đã cập nhật {partner_label} với {processed} URL ({total_rows} dòng), "
-                f"thành công {success_count}, lỗi {error_count}{hidden_part}, thời lượng {duration_seconds}s, file={os.path.basename(file_path)}.",
+                f"{summary_counts}, thời lượng {duration_seconds}s, file={os.path.basename(file_path)}.",
                 level="OK",
             )
         else:
             await websocket_manager.broadcast_log(
                 f"HOÀN THÀNH: Đã quét {processed}/{total} URL ({total_rows} dòng), "
-                f"thành công {success_count}, lỗi {error_count}{hidden_part}, thời lượng {duration_seconds}s, file={os.path.basename(file_path)}.",
+                f"{summary_counts}, thời lượng {duration_seconds}s, file={os.path.basename(file_path)}.",
                 level="OK",
             )
