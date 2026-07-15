@@ -128,7 +128,7 @@ def test_build_partner_report_highlights_single_partner_video_as_video_color():
     report_bytes = build_partner_report("Partner A", rows, apply_min_views=False)
     workbook = load_workbook(io.BytesIO(report_bytes))
     worksheet = workbook.active
-    fill = worksheet.cell(row=7, column=1).fill
+    fill = worksheet.cell(row=4, column=1).fill
     assert str(fill.fgColor.rgb).upper().endswith(VIDEO_LINK_FILL_COLOR)
     assert not str(fill.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
 
@@ -150,7 +150,7 @@ def test_build_partner_report_highlights_row_with_single_partner_unknown_link():
     report_bytes = build_partner_report("Partner A", rows, apply_min_views=False)
     workbook = load_workbook(io.BytesIO(report_bytes))
     worksheet = workbook.active
-    data_row = 7  # table_header_row (6) + 1
+    data_row = 4  # table_header_row (3) + 1
     fill = worksheet.cell(row=data_row, column=1).fill
     assert str(fill.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
 
@@ -183,8 +183,8 @@ def test_build_partner_report_only_highlights_single_partner_rows():
     report_bytes = build_partner_report("Partner A", rows, apply_min_views=False)
     workbook = load_workbook(io.BytesIO(report_bytes))
     worksheet = workbook.active
-    single_partner_fill = worksheet.cell(row=7, column=1).fill
-    multi_partner_fill = worksheet.cell(row=8, column=1).fill
+    single_partner_fill = worksheet.cell(row=4, column=1).fill
+    multi_partner_fill = worksheet.cell(row=5, column=1).fill
     assert str(single_partner_fill.fgColor.rgb).upper().endswith(VIDEO_LINK_FILL_COLOR)
     assert str(multi_partner_fill.fgColor.rgb).upper().endswith(VIDEO_LINK_FILL_COLOR)
 
@@ -206,7 +206,7 @@ def test_build_partner_report_no_highlight_for_photo_link():
     report_bytes = build_partner_report("Partner", rows, apply_min_views=False)
     workbook = load_workbook(io.BytesIO(report_bytes))
     worksheet = workbook.active
-    fill = worksheet.cell(row=7, column=1).fill
+    fill = worksheet.cell(row=4, column=1).fill
     assert fill.fill_type is None or not str(fill.fgColor.rgb or "").upper().endswith(VIDEO_LINK_FILL_COLOR)
     assert not str(fill.fgColor.rgb or "").upper().endswith(SINGLE_LINK_FILL_COLOR)
 
@@ -228,7 +228,7 @@ def test_build_partner_report_highlights_single_partner_photo_as_orange():
     report_bytes = build_partner_report("Partner", rows, apply_min_views=False)
     workbook = load_workbook(io.BytesIO(report_bytes))
     worksheet = workbook.active
-    fill = worksheet.cell(row=7, column=1).fill
+    fill = worksheet.cell(row=4, column=1).fill
     assert str(fill.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
 
 
@@ -260,8 +260,8 @@ def test_build_partner_report_highlights_video_link_without_single_partner():
     report_bytes = build_partner_report("Partner", rows, apply_min_views=False)
     workbook = load_workbook(io.BytesIO(report_bytes))
     worksheet = workbook.active
-    video_fill = worksheet.cell(row=7, column=1).fill
-    photo_fill = worksheet.cell(row=8, column=1).fill
+    video_fill = worksheet.cell(row=4, column=1).fill
+    photo_fill = worksheet.cell(row=5, column=1).fill
     assert str(video_fill.fgColor.rgb).upper().endswith(VIDEO_LINK_FILL_COLOR)
     assert photo_fill.fill_type is None or not str(photo_fill.fgColor.rgb or "").upper().endswith(VIDEO_LINK_FILL_COLOR)
 

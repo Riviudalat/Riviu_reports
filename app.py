@@ -352,7 +352,7 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
     ws = wb.active
     ws.title = "Báo cáo"
     updated_at = format_display_datetime()
-    table_header_row = 6
+    table_header_row = 3
     data_start_row = table_header_row + 1
     last_column = get_column_letter(len(REPORT_COLUMNS))
 
