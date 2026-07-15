@@ -17,13 +17,12 @@ from playwright.async_api import async_playwright
 from workbook_utils import (
     clean_text,
     highlight_single_partner_link_rows,
-    highlight_tiktok_media_link_rows,
+    highlight_video_link_rows,
     is_generated_username_channel,
     is_generic_tiktok_channel_name,
     is_numeric_channel_garbage,
     is_scrapable_tiktok_url,
     is_tiktok_video_link,
-    is_tiktok_photo_link,
     load_channel_overrides,
     metric_number,
     format_display_datetime,
@@ -2638,10 +2637,6 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                         result["url"],
                         resolved_url=resolved_url,
                     )
-                    photo_link = is_tiktok_photo_link(
-                        result["url"],
-                        resolved_url=resolved_url,
-                    )
                     await websocket_manager.broadcast_data({
                         "id": result["sequence"],
                         "url": result["url"],
@@ -2665,7 +2660,6 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                         "sheetName": primary_target.get("sheet_name", ""),
                         "singlePartner": single_partner,
                         "videoLink": video_link,
-                        "photoLink": photo_link,
                     })
                     now = time.perf_counter()
                     if processed == total or now - last_status_broadcast > 0.25:
@@ -2766,13 +2760,12 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             highlighted_count = highlight_single_partner_link_rows(workbook, scan_sheet_for_summary)
             if websocket_manager and highlighted_count:
                 await websocket_manager.broadcast_log(
-                    f"Đã bôi cam {highlighted_count} dòng link 1 đối tác (chưa rõ video/ảnh)."
+                    f"Đã bôi cam {highlighted_count} dòng link 1 đối tác (không phải video)."
                 )
-            media_counts = highlight_tiktok_media_link_rows(workbook, scan_sheet_for_summary)
-            if websocket_manager and (media_counts["video"] or media_counts["photo"]):
+            video_highlighted = highlight_video_link_rows(workbook, scan_sheet_for_summary)
+            if websocket_manager and video_highlighted:
                 await websocket_manager.broadcast_log(
-                    f"Đã bôi màu {media_counts['video']} dòng video (xanh dương), "
-                    f"{media_counts['photo']} dòng ảnh (xanh lá)."
+                    f"Đã bôi xanh {video_highlighted} dòng link video."
                 )
     except Exception as error:
         if websocket_manager:

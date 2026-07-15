@@ -5,13 +5,7 @@ from unittest.mock import patch
 from openpyxl import load_workbook
 
 from app import build_google_push_rows, build_partner_report
-from workbook_utils import (
-    PHOTO_LINK_FILL_COLOR,
-    SINGLE_LINK_FILL_COLOR,
-    VIDEO_LINK_FILL_COLOR,
-    is_failed_channel_name,
-    metric_number,
-)
+from workbook_utils import SINGLE_LINK_FILL_COLOR, VIDEO_LINK_FILL_COLOR, is_failed_channel_name, metric_number
 
 
 def test_validate_proxy_start_blocks_empty(tmp_path):
@@ -195,32 +189,33 @@ def test_build_partner_report_only_highlights_single_partner_rows():
     assert str(multi_partner_fill.fgColor.rgb).upper().endswith(VIDEO_LINK_FILL_COLOR)
 
 
-def test_build_partner_report_no_highlight_when_partners_key_missing_and_photo_link():
+def test_build_partner_report_no_highlight_for_photo_link():
     rows = [
         {
             "NGÀY AIR": "",
-            "TÊN KÊNH": "A",
+            "TÊN KÊNH": "Photo",
             "LINK AIR": "https://www.tiktok.com/@baoquyen.dalat/photo/7635505950807346453",
             "LƯỢT XEM": 200,
             "TIM": 1,
             "BÌNH LUẬN": 1,
             "LƯỢT LƯU": 1,
             "CHIA SẺ": 1,
+            "partners": ["Partner A", "Partner B"],
         },
     ]
     report_bytes = build_partner_report("Partner", rows, apply_min_views=False)
     workbook = load_workbook(io.BytesIO(report_bytes))
     worksheet = workbook.active
     fill = worksheet.cell(row=7, column=1).fill
-    assert not str(fill.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
-    assert not str(fill.fgColor.rgb).upper().endswith(VIDEO_LINK_FILL_COLOR)
+    assert fill.fill_type is None or not str(fill.fgColor.rgb or "").upper().endswith(VIDEO_LINK_FILL_COLOR)
+    assert not str(fill.fgColor.rgb or "").upper().endswith(SINGLE_LINK_FILL_COLOR)
 
 
-def test_build_partner_report_highlights_photo_link():
+def test_build_partner_report_highlights_single_partner_photo_as_orange():
     rows = [
         {
             "NGÀY AIR": "",
-            "TÊN KÊNH": "Photo",
+            "TÊN KÊNH": "Photo solo",
             "LINK AIR": "https://www.tiktok.com/@baoquyen.dalat/photo/7635505950807346453",
             "LƯỢT XEM": 300,
             "TIM": 1,
@@ -234,7 +229,7 @@ def test_build_partner_report_highlights_photo_link():
     workbook = load_workbook(io.BytesIO(report_bytes))
     worksheet = workbook.active
     fill = worksheet.cell(row=7, column=1).fill
-    assert str(fill.fgColor.rgb).upper().endswith(PHOTO_LINK_FILL_COLOR)
+    assert str(fill.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
 
 
 def test_build_partner_report_highlights_video_link_without_single_partner():
@@ -268,7 +263,7 @@ def test_build_partner_report_highlights_video_link_without_single_partner():
     video_fill = worksheet.cell(row=7, column=1).fill
     photo_fill = worksheet.cell(row=8, column=1).fill
     assert str(video_fill.fgColor.rgb).upper().endswith(VIDEO_LINK_FILL_COLOR)
-    assert str(photo_fill.fgColor.rgb).upper().endswith(PHOTO_LINK_FILL_COLOR)
+    assert photo_fill.fill_type is None or not str(photo_fill.fgColor.rgb or "").upper().endswith(VIDEO_LINK_FILL_COLOR)
 
 
 def test_build_partner_report_works_when_logo_image_unavailable():
