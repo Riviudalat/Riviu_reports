@@ -43,6 +43,8 @@ from workbook_utils import (
     LEGACY_GOOGLE_SHEET_FILE_ID,
     REPORT_COLUMNS,
     SINGLE_LINK_FILL_COLOR,
+    VIDEO_LINK_FILL_COLOR,
+    PHOTO_LINK_FILL_COLOR,
     build_workbook_rows,
     clean_text,
     download_google_sheet,
@@ -50,6 +52,8 @@ from workbook_utils import (
     find_data_sheet_names,
     google_sheet_source_for_file,
     is_failed_channel_name,
+    is_tiktok_video_link,
+    is_tiktok_photo_link,
     list_workbook_partners,
     list_workbook_partners_with_link_counts,
     normalize_header,
@@ -385,6 +389,8 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
         cell.border = border
 
     single_link_fill = PatternFill("solid", fgColor=SINGLE_LINK_FILL_COLOR)
+    video_link_fill = PatternFill("solid", fgColor=VIDEO_LINK_FILL_COLOR)
+    photo_link_fill = PatternFill("solid", fgColor=PHOTO_LINK_FILL_COLOR)
     for row_index, (_, source_row) in enumerate(frame.iterrows(), start=data_start_row):
         for col_index, header in enumerate(REPORT_COLUMNS, start=1):
             value = source_row.get(header, "")
@@ -419,9 +425,17 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
         row_partners = source_row.get("partners")
         if not isinstance(row_partners, (list, tuple)):
             row_partners = []
-        if len(row_partners) == 1:
+        link_for_type = clean_text(source_row.get("LINK AIR", ""))
+        row_fill = None
+        if is_tiktok_video_link(link_for_type):
+            row_fill = video_link_fill
+        elif is_tiktok_photo_link(link_for_type):
+            row_fill = photo_link_fill
+        elif len(row_partners) == 1:
+            row_fill = single_link_fill
+        if row_fill is not None:
             for col_index in range(1, len(REPORT_COLUMNS) + 1):
-                ws.cell(row=row_index, column=col_index).fill = single_link_fill
+                ws.cell(row=row_index, column=col_index).fill = row_fill
 
     total_row = None
     if len(frame) > 0:

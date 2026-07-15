@@ -921,8 +921,18 @@ async function loadPreview(sheetName = '') {
 
         body.innerHTML = data.data.map(row => {
             const isSinglePartner = Boolean(row._singlePartner);
-            const rowClass = isSinglePartner ? ' class="single-partner-row"' : '';
-            const linkColor = isSinglePartner ? '#9a3412' : '#ff6b00';
+            const isVideoLink = Boolean(row._videoLink);
+            const isPhotoLink = Boolean(row._photoLink);
+            const classes = [
+                isSinglePartner ? 'single-partner-row' : '',
+                isVideoLink ? 'video-link-row' : '',
+                isPhotoLink ? 'photo-link-row' : '',
+            ].filter(Boolean).join(' ');
+            const rowClass = classes ? ` class="${classes}"` : '';
+            let linkColor = '#ff6b00';
+            if (isVideoLink) linkColor = '#1d4ed8';
+            else if (isPhotoLink) linkColor = '#15803d';
+            else if (isSinglePartner) linkColor = '#9a3412';
             return `<tr${rowClass}>${data.columns.map(column => {
                 let val = row[column] || '';
                 if (typeof val === 'string' && val.startsWith('http')) {
@@ -1207,6 +1217,8 @@ function appendData(row) {
     const tbody = document.getElementById('dataFeed');
     if (tbody.innerText.includes('Chưa có kết quả')) tbody.innerHTML = '';
     const tr = document.createElement('tr');
+    if (row.videoLink) tr.classList.add('video-link-row');
+    else if (row.photoLink) tr.classList.add('photo-link-row');
     if (row.singlePartner) tr.classList.add('single-partner-row');
     const views = formatNumber(row.views);
     const likes = formatNumber(row.likes);
@@ -1218,7 +1230,7 @@ function appendData(row) {
         <td>${row.id}</td>
         <td>${escapeHtml(row.sheetName || '')}</td>
         <td title="${escapeHtml(row.channelName || '')}">${escapeHtml(row.channelName || '')}</td>
-        <td class="col-url" title="${escapeHtml(row.url)}"><a href="${escapeHtml(row.url)}" target="_blank" style="color: ${row.singlePartner ? '#9a3412' : 'inherit'}; text-decoration: none;">${escapeHtml(row.url)}</a></td>
+        <td class="col-url" title="${escapeHtml(row.url)}"><a href="${escapeHtml(row.url)}" target="_blank" style="color: ${row.videoLink ? '#1d4ed8' : (row.photoLink ? '#15803d' : (row.singlePartner ? '#9a3412' : 'inherit'))}; text-decoration: none;">${escapeHtml(row.url)}</a></td>
         <td style="text-align:right; font-weight:bold">${views}</td>
         <td style="text-align:right; font-weight:bold">${likes}</td>
         <td style="text-align:right; font-weight:bold">${comments}</td>

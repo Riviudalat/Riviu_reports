@@ -212,9 +212,18 @@ th { text-align: left; padding: 14px 18px; background: #f9fafb; font-size: 12px;
 td { padding: 14px 18px; border-bottom: 1px solid #f3f4f6; font-size: 14px; color: #374151; white-space: nowrap; max-width: 420px; overflow: hidden; text-overflow: ellipsis; }
 tbody tr:nth-child(even) { background-color: #f9fafb; }
 tbody tr:hover { background-color: #fff7ed; }
-tr.single-partner-row td { background-color: #ffe3bd; }
-tr.single-partner-row:hover td { background-color: #ffd699; }
-tr.single-partner-row .col-url { color: #9a3412; }
+tr.single-partner-row:not(.video-link-row):not(.photo-link-row) td { background-color: #ffe3bd; }
+tr.single-partner-row:not(.video-link-row):not(.photo-link-row):hover td { background-color: #ffd699; }
+tr.single-partner-row td { box-shadow: inset 4px 0 0 transparent; }
+tr.single-partner-row:not(.video-link-row):not(.photo-link-row) .col-url { color: #9a3412; }
+tr.single-partner-row.video-link-row td,
+tr.single-partner-row.photo-link-row td { box-shadow: inset 4px 0 0 #f97316; }
+tr.video-link-row td { background-color: #dbeafe; }
+tr.video-link-row:hover td { background-color: #bfdbfe; }
+tr.video-link-row .col-url { color: #1d4ed8; }
+tr.photo-link-row td { background-color: #dcfce7; }
+tr.photo-link-row:hover td { background-color: #bbf7d0; }
+tr.photo-link-row .col-url { color: #15803d; }
 #previewTable th:nth-child(3), #previewTable td:nth-child(3) { max-width: 260px; width: 260px; }
 #previewTable th:nth-child(4), #previewTable td:nth-child(4) { max-width: 160px; width: 160px; }
 

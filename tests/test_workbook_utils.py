@@ -10,6 +10,8 @@ from workbook_utils import (
     google_sheet_filename_to_label,
     google_sheet_sync_label,
     highlight_single_partner_link_rows,
+    highlight_tiktok_media_link_rows,
+    highlight_video_link_rows,
     is_internal_workbook_filename,
     parse_filename_datetime_stamp,
     result_sheet_display_name,
@@ -29,6 +31,13 @@ from workbook_utils import (
     safe_join,
     safe_workbook_filename,
     SINGLE_LINK_FILL_COLOR,
+    PHOTO_LINK_FILL_COLOR,
+    VIDEO_LINK_FILL_COLOR,
+    TIKTOK_MEDIA_PHOTO,
+    TIKTOK_MEDIA_VIDEO,
+    detect_tiktok_media_type,
+    is_tiktok_photo_link,
+    is_tiktok_video_link,
     split_partner_value,
     summary_sheet_title_for_data_sheet,
     to_number,
@@ -202,7 +211,65 @@ def test_rebuild_summary_sheet_only_one_data_sheet(tmp_path):
     wb.close()
 
 
-def test_highlight_single_partner_link_rows_marks_rows_with_exactly_one_partner():
+def test_detect_tiktok_media_type_from_video_and_photo_urls():
+    video_url = (
+        "https://www.tiktok.com/@ngkhangg.008/video/7635258581851360520"
+        "?is_from_webapp=1&web_id=7636006415740044807"
+    )
+    photo_url = (
+        "https://www.tiktok.com/@baoquyen.dalat/photo/7635505950807346453"
+        "?image_index=2&is_from_webapp=1&web_id=7636006415740044807"
+    )
+    assert detect_tiktok_media_type(video_url) == TIKTOK_MEDIA_VIDEO
+    assert detect_tiktok_media_type(photo_url) == TIKTOK_MEDIA_PHOTO
+    assert is_tiktok_video_link(video_url) is True
+    assert is_tiktok_video_link(photo_url) is False
+    assert is_tiktok_photo_link(photo_url) is True
+    assert is_tiktok_photo_link(video_url) is False
+    assert detect_tiktok_media_type("https://vt.tiktok.com/ZSabc123/") == ""
+    assert (
+        detect_tiktok_media_type(
+            "https://vt.tiktok.com/ZSabc123/",
+            resolved_url=video_url,
+        )
+        == TIKTOK_MEDIA_VIDEO
+    )
+
+
+def test_highlight_tiktok_media_link_rows_marks_video_and_photo():
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "Tháng 6"
+    sheet.append(["LINK AIR", "Đối tác", "Đối tác 2", "LƯỢT XEM"])
+    sheet.append(
+        [
+            "https://www.tiktok.com/@ngkhangg.008/video/7635258581851360520",
+            "Partner A",
+            "Partner B",
+            10,
+        ]
+    )
+    sheet.append(
+        [
+            "https://www.tiktok.com/@baoquyen.dalat/photo/7635505950807346453",
+            "Partner A",
+            "Partner B",
+            20,
+        ]
+    )
+
+    counts = highlight_tiktok_media_link_rows(wb, "Tháng 6")
+
+    assert counts == {"video": 1, "photo": 1}
+    video_fill = sheet.cell(row=2, column=1).fill
+    photo_fill = sheet.cell(row=3, column=1).fill
+    assert str(video_fill.fgColor.rgb).upper().endswith(VIDEO_LINK_FILL_COLOR)
+    assert str(photo_fill.fgColor.rgb).upper().endswith(PHOTO_LINK_FILL_COLOR)
+
+
+def test_highlight_tiktok_media_link_rows_includes_single_partner_rows():
     import openpyxl
 
     wb = openpyxl.Workbook()
@@ -210,8 +277,170 @@ def test_highlight_single_partner_link_rows_marks_rows_with_exactly_one_partner(
     sheet.title = "Tháng 6"
     sheet.append(["LINK AIR", "Đối tác", "Đối tác 2", "LƯỢT XEM"])
     sheet.append(["https://www.tiktok.com/@a/video/1", "Partner A", "", 10])
+    sheet.append(["https://www.tiktok.com/@b/photo/2", "Partner B", "", 20])
+
+    counts = highlight_tiktok_media_link_rows(wb, "Tháng 6")
+
+    assert counts == {"video": 1, "photo": 1}
+    assert str(sheet.cell(row=2, column=1).fill.fgColor.rgb).upper().endswith(VIDEO_LINK_FILL_COLOR)
+    assert str(sheet.cell(row=3, column=1).fill.fgColor.rgb).upper().endswith(PHOTO_LINK_FILL_COLOR)
+
+
+def test_highlight_single_partner_link_rows_skips_video_and_photo():
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "Tháng 6"
+    sheet.append(["LINK AIR", "Đối tác", "Đối tác 2", "LƯỢT XEM"])
+    sheet.append(["https://www.tiktok.com/@a/video/1", "Partner A", "", 10])
+    sheet.append(["https://www.tiktok.com/@b/photo/2", "Partner B", "", 20])
+    sheet.append(["https://vt.tiktok.com/ZSabc123/", "Partner C", "", 30])
+
+    count = highlight_single_partner_link_rows(wb, "Tháng 6")
+
+    assert count == 1
+    assert not str(sheet.cell(row=2, column=1).fill.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
+    assert not str(sheet.cell(row=3, column=1).fill.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
+    assert str(sheet.cell(row=4, column=1).fill.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
+
+
+def test_highlight_video_link_rows_marks_video_not_photo():
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "Tháng 6"
+    sheet.append(["LINK AIR", "Đối tác", "Đối tác 2", "LƯỢT XEM"])
+    sheet.append(
+        [
+            "https://www.tiktok.com/@ngkhangg.008/video/7635258581851360520",
+            "Partner A",
+            "Partner B",
+            10,
+        ]
+    )
+    sheet.append(
+        [
+            "https://www.tiktok.com/@baoquyen.dalat/photo/7635505950807346453",
+            "Partner A",
+            "Partner B",
+            20,
+        ]
+    )
+
+    count = highlight_video_link_rows(wb, "Tháng 6")
+
+    assert count == 1
+    video_fill = sheet.cell(row=2, column=1).fill
+    photo_fill = sheet.cell(row=3, column=1).fill
+    assert str(video_fill.fgColor.rgb).upper().endswith(VIDEO_LINK_FILL_COLOR)
+    assert not str(photo_fill.fgColor.rgb).upper().endswith(VIDEO_LINK_FILL_COLOR)
+
+
+def test_highlight_video_link_rows_wrapper_counts_video_only():
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "Tháng 6"
+    sheet.append(["LINK AIR", "Đối tác", "Đối tác 2", "LƯỢT XEM"])
+    sheet.append(["https://www.tiktok.com/@a/video/1", "Partner A", "", 10])
+    sheet.append(["https://www.tiktok.com/@b/photo/2", "Partner B", "", 20])
+
+    highlight_single_partner_link_rows(wb, "Tháng 6")
+    count = highlight_video_link_rows(wb, "Tháng 6")
+
+    assert count == 1
+    fill = sheet.cell(row=2, column=1).fill
+    assert str(fill.fgColor.rgb).upper().endswith(VIDEO_LINK_FILL_COLOR)
+    assert not str(fill.fgColor.rgb).upper().endswith(SINGLE_LINK_FILL_COLOR)
+
+
+def test_read_sheet_preview_flags_video_and_photo_link_rows(tmp_path):
+    import openpyxl
+
+    file_path = tmp_path / "preview-media.xlsx"
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "Tháng 6"
+    sheet.append(["LINK AIR", "TÊN KÊNH", "Đối tác", "Đối tác 2", "LƯỢT XEM"])
+    sheet.append(
+        [
+            "https://www.tiktok.com/@ngkhangg.008/video/7635258581851360520",
+            "Video",
+            "Partner A",
+            "",
+            10,
+        ]
+    )
+    sheet.append(
+        [
+            "https://www.tiktok.com/@baoquyen.dalat/photo/7635505950807346453",
+            "Photo",
+            "Partner A",
+            "",
+            20,
+        ]
+    )
+    wb.save(file_path)
+    wb.close()
+
+    preview = read_sheet_preview(str(file_path), sheet_name="Tháng 6")
+    rows = preview["data"]
+    assert rows[0].get("_videoLink") is True
+    assert rows[0].get("_singlePartner") is True
+    assert not rows[0].get("_photoLink")
+    assert rows[1].get("_photoLink") is True
+    assert rows[1].get("_singlePartner") is True
+    assert not rows[1].get("_videoLink")
+
+
+def test_read_sheet_preview_flags_video_link_rows(tmp_path):
+    import openpyxl
+
+    file_path = tmp_path / "preview-video.xlsx"
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "Tháng 6"
+    sheet.append(["LINK AIR", "TÊN KÊNH", "Đối tác", "Đối tác 2", "LƯỢT XEM"])
+    sheet.append(
+        [
+            "https://www.tiktok.com/@ngkhangg.008/video/7635258581851360520",
+            "Video",
+            "Partner A",
+            "Partner B",
+            10,
+        ]
+    )
+    sheet.append(
+        [
+            "https://www.tiktok.com/@baoquyen.dalat/photo/7635505950807346453",
+            "Photo",
+            "Partner A",
+            "Partner B",
+            20,
+        ]
+    )
+    wb.save(file_path)
+    wb.close()
+
+    preview = read_sheet_preview(str(file_path), sheet_name="Tháng 6")
+    rows = preview["data"]
+    assert rows[0].get("_videoLink") is True
+    assert not rows[1].get("_videoLink")
+
+
+def test_highlight_single_partner_link_rows_marks_rows_with_exactly_one_partner():
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "Tháng 6"
+    sheet.append(["LINK AIR", "Đối tác", "Đối tác 2", "LƯỢT XEM"])
+    sheet.append(["https://vt.tiktok.com/ZSaaa111/", "Partner A", "", 10])
     sheet.append(["https://www.tiktok.com/@b/video/2", "Partner A", "Partner B", 20])
-    sheet.append(["https://www.tiktok.com/@c/video/3", "Partner B", "", 30])
+    sheet.append(["https://vt.tiktok.com/ZSbbb222/", "Partner B", "", 30])
 
     count = highlight_single_partner_link_rows(wb, "Tháng 6")
 
@@ -231,7 +460,7 @@ def test_highlight_single_partner_link_rows_clears_stale_highlight_once_row_gain
     sheet = wb.active
     sheet.title = "Tháng 6"
     sheet.append(["LINK AIR", "Đối tác", "Đối tác 2", "LƯỢT XEM"])
-    sheet.append(["https://www.tiktok.com/@a/video/1", "Partner A", "", 10])
+    sheet.append(["https://vt.tiktok.com/ZSaaa111/", "Partner A", "", 10])
 
     first_count = highlight_single_partner_link_rows(wb, "Tháng 6")
     assert first_count == 1

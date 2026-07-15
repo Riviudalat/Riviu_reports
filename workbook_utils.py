@@ -26,6 +26,12 @@ SUMMARY_COLUMNS = ["Stt", "ĐỐI TÁC", "TỔNG LINK", "TỔNG LƯỢT XEM", "T
 SUMMARY_TOTAL_LABEL = "TỔNG"
 # Cam cảnh báo đối tác chỉ có đúng 1 link — cần chú ý khi báo cáo/nghiệm thu.
 SINGLE_LINK_FILL_COLOR = "FFC000"
+# Xanh nhạt cho dòng link dạng video (/video/).
+VIDEO_LINK_FILL_COLOR = "BDD7EE"
+# Xanh lá nhạt cho dòng link dạng ảnh/carousel (/photo/).
+PHOTO_LINK_FILL_COLOR = "C6EFCE"
+TIKTOK_MEDIA_VIDEO = "video"
+TIKTOK_MEDIA_PHOTO = "photo"
 METRIC_COLUMNS = ["LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"]
 SUMMARY_METRIC_COLUMNS = ["TỔNG LƯỢT XEM", "TỔNG TIM", "TỔNG BÌNH LUẬN", "TỔNG LƯỢT LƯU", "TỔNG CHIA SẺ"]
 PARTNER_HEADING_MARKERS = ("DANH SÁCH", "DANH SACH", "BỘ ẢNH", "BO ANH")
@@ -507,6 +513,30 @@ def is_scrapable_tiktok_url(value):
     return "tiktok.com" in lower or "vt.tiktok.com" in lower
 
 
+def detect_tiktok_media_type(url, *, resolved_url=""):
+    """Nhận diện link TikTok là video hay ảnh (photo carousel) từ path URL.
+
+    Trả về TIKTOK_MEDIA_VIDEO, TIKTOK_MEDIA_PHOTO, hoặc '' nếu chưa rõ (link rút gọn).
+    """
+    for candidate in (resolved_url, url):
+        text = normalize_tiktok_url(candidate).casefold()
+        if not text:
+            continue
+        if "/video/" in text:
+            return TIKTOK_MEDIA_VIDEO
+        if "/photo/" in text:
+            return TIKTOK_MEDIA_PHOTO
+    return ""
+
+
+def is_tiktok_video_link(url, *, resolved_url=""):
+    return detect_tiktok_media_type(url, resolved_url=resolved_url) == TIKTOK_MEDIA_VIDEO
+
+
+def is_tiktok_photo_link(url, *, resolved_url=""):
+    return detect_tiktok_media_type(url, resolved_url=resolved_url) == TIKTOK_MEDIA_PHOTO
+
+
 def fill_preview_total_row(frame, link_column, metric_columns):
     if not link_column or link_column not in frame.columns:
         return frame
@@ -603,10 +633,16 @@ def read_sheet_preview(file_path, sheet_name=None, limit=None):
                     record.get(link_column, ""),
                     preview_row.get(channel_column, ""),
                 )
-            if link_column and partner_columns and is_tiktok_link(record.get(link_column, "")):
-                row_partners = extract_row_partners(record, partner_columns)
-                if len(row_partners) == 1:
-                    preview_row["_singlePartner"] = True
+            link_value = record.get(link_column, "") if link_column else ""
+            if link_column and is_tiktok_link(link_value):
+                if partner_columns:
+                    row_partners = extract_row_partners(record, partner_columns)
+                    if len(row_partners) == 1:
+                        preview_row["_singlePartner"] = True
+                if is_tiktok_video_link(link_value):
+                    preview_row["_videoLink"] = True
+                elif is_tiktok_photo_link(link_value):
+                    preview_row["_photoLink"] = True
             data.append(preview_row)
 
         return {
@@ -1297,12 +1333,24 @@ def _cell_has_single_link_fill(cell):
     return str(fill.fgColor.rgb or "").upper().endswith(SINGLE_LINK_FILL_COLOR)
 
 
-def highlight_single_partner_link_rows(workbook, data_sheet_name):
-    """Bôi cam các dòng có link TikTok mà dòng đó chỉ gắn đúng 1 đối tác (link độc quyền).
+def _cell_has_video_link_fill(cell):
+    fill = cell.fill
+    if fill is None or fill.fill_type != "solid":
+        return False
+    return str(fill.fgColor.rgb or "").upper().endswith(VIDEO_LINK_FILL_COLOR)
 
-    Dọn sạch highlight cam cũ (chỉ xóa đúng màu SINGLE_LINK_FILL_COLOR) trên các
-    dòng không còn thỏa điều kiện (ví dụ dòng vừa được gắn thêm đối tác thứ 2),
-    để lần quét sau không để sót màu cam.
+
+def _cell_has_photo_link_fill(cell):
+    fill = cell.fill
+    if fill is None or fill.fill_type != "solid":
+        return False
+    return str(fill.fgColor.rgb or "").upper().endswith(PHOTO_LINK_FILL_COLOR)
+
+
+def highlight_single_partner_link_rows(workbook, data_sheet_name):
+    """Bôi cam các dòng link TikTok chỉ có 1 đối tác khi chưa xác định được video/photo.
+
+    Link /video/ hoặc /photo/ được phân loại màu riêng — không bôi cam đè lên.
     """
     source_sheet = clean_text(data_sheet_name)
     if not source_sheet or source_sheet not in workbook.sheetnames:
@@ -1330,7 +1378,8 @@ def highlight_single_partner_link_rows(workbook, data_sheet_name):
         should_highlight = False
         if link and ("tiktok.com" in link or "vt.tiktok.com" in link):
             partners = worksheet_row_partners(worksheet, row_index, partner_columns)
-            should_highlight = len(partners) == 1
+            media_type = detect_tiktok_media_type(link)
+            should_highlight = len(partners) == 1 and not media_type
         if should_highlight:
             highlighted_count += 1
         for column_index in range(1, max_column + 1):
@@ -1341,6 +1390,55 @@ def highlight_single_partner_link_rows(workbook, data_sheet_name):
                 cell.fill = clear_fill
 
     return highlighted_count
+
+
+def highlight_tiktok_media_link_rows(workbook, data_sheet_name):
+    """Bôi màu theo loại link TikTok: xanh dương /video/, xanh lá /photo/ (kể cả 1 đối tác)."""
+    source_sheet = clean_text(data_sheet_name)
+    if not source_sheet or source_sheet not in workbook.sheetnames:
+        return {"video": 0, "photo": 0}
+
+    worksheet = workbook[source_sheet]
+    link_column = worksheet_find_link_column_index(worksheet)
+    if not link_column:
+        return {"video": 0, "photo": 0}
+
+    max_row = worksheet.max_row or 0
+    max_column = worksheet.max_column or 0
+    if max_row < 2 or max_column < 1:
+        return {"video": 0, "photo": 0}
+
+    video_fill = PatternFill("solid", fgColor=VIDEO_LINK_FILL_COLOR)
+    photo_fill = PatternFill("solid", fgColor=PHOTO_LINK_FILL_COLOR)
+    clear_fill = PatternFill(fill_type=None)
+    video_count = 0
+    photo_count = 0
+
+    for row_index in range(2, max_row + 1):
+        link = clean_text(worksheet.cell(row=row_index, column=link_column).value)
+        media_type = detect_tiktok_media_type(link) if link else ""
+
+        if media_type == TIKTOK_MEDIA_VIDEO:
+            video_count += 1
+        elif media_type == TIKTOK_MEDIA_PHOTO:
+            photo_count += 1
+
+        for column_index in range(1, max_column + 1):
+            cell = worksheet.cell(row=row_index, column=column_index)
+            if media_type == TIKTOK_MEDIA_VIDEO:
+                cell.fill = video_fill
+            elif media_type == TIKTOK_MEDIA_PHOTO:
+                cell.fill = photo_fill
+            elif _cell_has_video_link_fill(cell) or _cell_has_photo_link_fill(cell):
+                cell.fill = clear_fill
+
+    return {"video": video_count, "photo": photo_count}
+
+
+def highlight_video_link_rows(workbook, data_sheet_name):
+    """Giữ tên cũ — trả về số dòng video đã bôi."""
+    counts = highlight_tiktok_media_link_rows(workbook, data_sheet_name)
+    return counts["video"]
 
 
 def workbook_file_entries(base_dir):
