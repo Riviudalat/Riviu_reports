@@ -1,11 +1,18 @@
 import io
 from datetime import datetime
+from pathlib import Path
 from unittest.mock import patch
 
 from openpyxl import load_workbook
 
 from app import build_google_push_rows, build_partner_report
 from workbook_utils import SINGLE_LINK_FILL_COLOR, VIDEO_LINK_FILL_COLOR, is_failed_channel_name, metric_number
+
+
+def test_preview_javascript_preserves_numeric_zero_values():
+    source = (Path(__file__).parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+
+    assert "let val = row[column] ?? '';" in source
 
 
 def test_validate_proxy_start_blocks_empty(tmp_path):
@@ -264,6 +271,67 @@ def test_build_partner_report_highlights_video_link_without_single_partner():
     photo_fill = worksheet.cell(row=5, column=1).fill
     assert str(video_fill.fgColor.rgb).upper().endswith(VIDEO_LINK_FILL_COLOR)
     assert photo_fill.fill_type is None or not str(photo_fill.fgColor.rgb or "").upper().endswith(VIDEO_LINK_FILL_COLOR)
+
+
+def test_build_partner_report_does_not_highlight_zero_activity_video():
+    rows = [
+        {
+            "NGÀY AIR": "",
+            "TÊN KÊNH": "Video chưa có hoạt động",
+            "LINK AIR": "https://www.tiktok.com/@demo/video/123",
+            "LƯỢT XEM": 100,
+            "TIM": 0,
+            "BÌNH LUẬN": 0,
+            "LƯỢT LƯU": 0,
+            "CHIA SẺ": 0,
+            "partners": ["Partner A", "Partner B"],
+        },
+    ]
+
+    report_bytes = build_partner_report("Partner", rows, apply_min_views=False)
+    workbook = load_workbook(io.BytesIO(report_bytes))
+    fill = workbook.active.cell(row=4, column=1).fill
+
+    assert fill.fill_type is None or not str(fill.fgColor.rgb or "").upper().endswith(VIDEO_LINK_FILL_COLOR)
+
+
+def test_build_partner_report_uses_persisted_scan_metadata_for_color():
+    rows = [
+        {
+            "NGÀY AIR": "",
+            "TÊN KÊNH": "Short video",
+            "LINK AIR": "https://vt.tiktok.com/ZSactive/",
+            "LƯỢT XEM": 100,
+            "TIM": 10,
+            "BÌNH LUẬN": 1,
+            "LƯỢT LƯU": 2,
+            "CHIA SẺ": 4,
+            "partners": ["Partner A", "Partner B"],
+            "_scanStatus": "Success",
+            "_resolvedUrl": "https://www.tiktok.com/@active/video/123",
+        },
+        {
+            "NGÀY AIR": "",
+            "TÊN KÊNH": "Stale video",
+            "LINK AIR": "https://www.tiktok.com/@stale/video/456",
+            "LƯỢT XEM": 200,
+            "TIM": 20,
+            "BÌNH LUẬN": 2,
+            "LƯỢT LƯU": 3,
+            "CHIA SẺ": 5,
+            "partners": ["Partner A", "Partner B"],
+            "_scanStatus": "Error: Không đọc được số liệu",
+            "_resolvedUrl": "https://www.tiktok.com/@stale/video/456",
+        },
+    ]
+
+    report_bytes = build_partner_report("Partner", rows, apply_min_views=False)
+    workbook = load_workbook(io.BytesIO(report_bytes))
+
+    active_fill = workbook.active.cell(row=4, column=1).fill
+    stale_fill = workbook.active.cell(row=5, column=1).fill
+    assert str(active_fill.fgColor.rgb).upper().endswith(VIDEO_LINK_FILL_COLOR)
+    assert stale_fill.fill_type is None or not str(stale_fill.fgColor.rgb or "").upper().endswith(VIDEO_LINK_FILL_COLOR)
 
 
 def test_build_partner_report_works_when_logo_image_unavailable():

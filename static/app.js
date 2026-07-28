@@ -931,7 +931,7 @@ async function loadPreview(sheetName = '') {
             if (isVideoLink) linkColor = '#1d4ed8';
             else if (isSinglePartner) linkColor = '#9a3412';
             return `<tr${rowClass}>${data.columns.map(column => {
-                let val = row[column] || '';
+                let val = row[column] ?? '';
                 if (typeof val === 'string' && val.startsWith('http')) {
                     return `<td title="${escapeHtml(val)}"><a href="${escapeHtml(val)}" target="_blank" style="color: ${linkColor}; text-decoration: none;">${escapeHtml(val)}</a></td>`;
                 }

@@ -31,6 +31,14 @@ VIDEO_LINK_FILL_COLOR = "BDD7EE"
 LEGACY_PHOTO_LINK_FILL_COLOR = "C6EFCE"
 TIKTOK_MEDIA_VIDEO = "video"
 TIKTOK_MEDIA_PHOTO = "photo"
+TTBD_SCAN_STATUS_HEADER = "__TTBD_SCAN_STATUS"
+TTBD_RESOLVED_URL_HEADER = "__TTBD_RESOLVED_URL"
+TTBD_SOURCE_URL_HEADER = "__TTBD_SOURCE_URL"
+TTBD_INTERNAL_HEADERS = {
+    TTBD_SCAN_STATUS_HEADER,
+    TTBD_RESOLVED_URL_HEADER,
+    TTBD_SOURCE_URL_HEADER,
+}
 METRIC_COLUMNS = ["LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"]
 SUMMARY_METRIC_COLUMNS = ["TỔNG LƯỢT XEM", "TỔNG TIM", "TỔNG BÌNH LUẬN", "TỔNG LƯỢT LƯU", "TỔNG CHIA SẺ"]
 PARTNER_HEADING_MARKERS = ("DANH SÁCH", "DANH SACH", "BỘ ẢNH", "BO ANH")
@@ -517,7 +525,9 @@ def detect_tiktok_media_type(url, *, resolved_url=""):
 
     Trả về TIKTOK_MEDIA_VIDEO, TIKTOK_MEDIA_PHOTO, hoặc '' nếu chưa rõ (link rút gọn).
     """
-    for candidate in (resolved_url, url):
+    # A direct source path is authoritative. The resolved URL only identifies
+    # media type for short links whose own path is ambiguous.
+    for candidate in (url, resolved_url):
         text = normalize_tiktok_url(candidate).casefold()
         if not text:
             continue
@@ -534,6 +544,30 @@ def is_tiktok_video_link(url, *, resolved_url=""):
 
 def is_tiktok_photo_link(url, *, resolved_url=""):
     return detect_tiktok_media_type(url, resolved_url=resolved_url) == TIKTOK_MEDIA_PHOTO
+
+
+def should_highlight_video_link(
+    url,
+    *,
+    likes=0,
+    shares=0,
+    resolved_url="",
+    resolved_source_url="",
+    metrics_readable=True,
+    scan_status="",
+):
+    latest_status = clean_text(scan_status)
+    source_url = normalize_tiktok_url(url)
+    metadata_source_url = normalize_tiktok_url(resolved_source_url)
+    trusted_resolved_url = resolved_url
+    if metadata_source_url and metadata_source_url.casefold() != source_url.casefold():
+        trusted_resolved_url = ""
+    return (
+        metrics_readable
+        and (not latest_status or latest_status == "Success")
+        and is_tiktok_video_link(url, resolved_url=trusted_resolved_url)
+        and (metric_number(likes) > 0 or metric_number(shares) > 0)
+    )
 
 
 def fill_preview_total_row(frame, link_column, metric_columns):
@@ -592,12 +626,25 @@ def read_sheet_preview(file_path, sheet_name=None, limit=None):
         channel_column = find_column_name(frame, ["TÊN KÊNH", "Tên Kênh"])
         date_column = find_column_name(frame, ["NGÀY AIR", "Ngày"])
         partner_columns = dataframe_partner_columns(frame)
+        views_column = find_column_name(frame, ["LƯỢT XEM"])
+        likes_column = find_column_name(frame, ["TIM"])
+        comments_column = find_column_name(frame, ["BÌNH LUẬN"])
+        saves_column = find_column_name(frame, ["LƯỢT LƯU"])
+        shares_column = find_column_name(frame, ["CHIA SẺ"])
+        scan_status_column = find_column_name(frame, [TTBD_SCAN_STATUS_HEADER])
+        resolved_url_column = find_column_name(frame, [TTBD_RESOLVED_URL_HEADER])
+        source_url_column = find_column_name(frame, [TTBD_SOURCE_URL_HEADER])
+        public_columns = [
+            column
+            for column in frame.columns
+            if clean_text(column) not in TTBD_INTERNAL_HEADERS
+        ]
         metric_columns = [
-            find_column_name(frame, ["LƯỢT XEM"]),
-            find_column_name(frame, ["TIM"]),
-            find_column_name(frame, ["BÌNH LUẬN"]),
-            find_column_name(frame, ["LƯỢT LƯU"]),
-            find_column_name(frame, ["CHIA SẺ"]),
+            views_column,
+            likes_column,
+            comments_column,
+            saves_column,
+            shares_column,
         ]
         frame = fill_missing_dates_from_previous(frame, date_column, link_column)
         for column in frame.select_dtypes(include=["datetime"]).columns:
@@ -624,7 +671,8 @@ def read_sheet_preview(file_path, sheet_name=None, limit=None):
         data = []
         for record in preview_frame.to_dict(orient="records"):
             preview_row = {}
-            for column, value in record.items():
+            for column in public_columns:
+                value = record.get(column, "")
                 cleaned = clean_preview_value(value)
                 preview_row[column] = cleaned
             if link_column and channel_column:
@@ -638,14 +686,21 @@ def read_sheet_preview(file_path, sheet_name=None, limit=None):
                     row_partners = extract_row_partners(record, partner_columns)
                     if len(row_partners) == 1:
                         preview_row["_singlePartner"] = True
-                if is_tiktok_video_link(link_value):
+                if should_highlight_video_link(
+                    link_value,
+                    likes=record.get(likes_column, "") if likes_column else 0,
+                    shares=record.get(shares_column, "") if shares_column else 0,
+                    resolved_url=record.get(resolved_url_column, "") if resolved_url_column else "",
+                    resolved_source_url=record.get(source_url_column, "") if source_url_column else "",
+                    scan_status=record.get(scan_status_column, "") if scan_status_column else "",
+                ):
                     preview_row["_videoLink"] = True
             data.append(preview_row)
 
         return {
             "sheets": sheets,
             "currentSheet": current_sheet,
-            "columns": frame.columns.tolist(),
+            "columns": public_columns,
             "data": data,
             "totalRows": int(len(frame.index)),
             "shownRows": int(len(preview_frame.index)),
@@ -850,8 +905,11 @@ def find_link_column_name(frame):
     column = find_column_name(frame, ["LINK AIR", "Link", "URL"])
     if column:
         return column
+    internal_keys = {normalize_key(header) for header in TTBD_INTERNAL_HEADERS}
     for candidate in frame.columns:
         key = normalize_key(candidate)
+        if key in internal_keys:
+            continue
         if "link" in key or "url" in key:
             return candidate
     return None
@@ -894,6 +952,9 @@ def build_workbook_rows(file_path, selected_partner=None, sheet_name=None):
                 "LƯỢT LƯU": find_column_name(frame, ["LƯỢT LƯU"]),
                 "CHIA SẺ": find_column_name(frame, ["CHIA SẺ"]),
             }
+            scan_status_column = find_column_name(frame, [TTBD_SCAN_STATUS_HEADER])
+            resolved_url_column = find_column_name(frame, [TTBD_RESOLVED_URL_HEADER])
+            source_url_column = find_column_name(frame, [TTBD_SOURCE_URL_HEADER])
 
             if not link_column:
                 continue
@@ -924,6 +985,9 @@ def build_workbook_rows(file_path, selected_partner=None, sheet_name=None):
                     "LƯỢT LƯU": row.get(metric_columns["LƯỢT LƯU"], "") if metric_columns["LƯỢT LƯU"] else "",
                     "CHIA SẺ": row.get(metric_columns["CHIA SẺ"], "") if metric_columns["CHIA SẺ"] else "",
                     "partners": partners,
+                    "_scanStatus": clean_text(row.get(scan_status_column, "")) if scan_status_column else "",
+                    "_resolvedUrl": clean_text(row.get(resolved_url_column, "")) if resolved_url_column else "",
+                    "_resolvedSourceUrl": clean_text(row.get(source_url_column, "")) if source_url_column else "",
                 })
 
         return rows
@@ -1008,8 +1072,11 @@ def worksheet_find_link_column_index(worksheet):
     if column_index:
         return column_index
 
+    internal_keys = {normalize_key(header) for header in TTBD_INTERNAL_HEADERS}
     for index, header in enumerate(worksheet_headers(worksheet), start=1):
         key = normalize_key(header)
+        if key in internal_keys:
+            continue
         if "link" in key or "url" in key:
             return index
     return None
@@ -1345,7 +1412,7 @@ def _cell_has_legacy_photo_link_fill(cell):
 
 
 def highlight_single_partner_link_rows(workbook, data_sheet_name):
-    """Bôi cam các dòng link TikTok chỉ có 1 đối tác (trừ link /video/ đã bôi xanh dương)."""
+    """Bôi cam link chỉ có 1 đối tác, trừ video đủ điều kiện bôi xanh."""
     source_sheet = clean_text(data_sheet_name)
     if not source_sheet or source_sheet not in workbook.sheetnames:
         return 0
@@ -1358,6 +1425,11 @@ def highlight_single_partner_link_rows(workbook, data_sheet_name):
     partner_columns = worksheet_partner_column_indexes(worksheet)
     if not partner_columns:
         return 0
+    likes_column = worksheet_find_column_index(worksheet, ["TIM"])
+    shares_column = worksheet_find_column_index(worksheet, ["CHIA SẺ"])
+    scan_status_column = worksheet_find_column_index(worksheet, [TTBD_SCAN_STATUS_HEADER])
+    resolved_url_column = worksheet_find_column_index(worksheet, [TTBD_RESOLVED_URL_HEADER])
+    source_url_column = worksheet_find_column_index(worksheet, [TTBD_SOURCE_URL_HEADER])
 
     max_row = worksheet.max_row or 0
     max_column = worksheet.max_column or 0
@@ -1372,8 +1444,15 @@ def highlight_single_partner_link_rows(workbook, data_sheet_name):
         should_highlight = False
         if link and ("tiktok.com" in link or "vt.tiktok.com" in link):
             partners = worksheet_row_partners(worksheet, row_index, partner_columns)
-            media_type = detect_tiktok_media_type(link)
-            should_highlight = len(partners) == 1 and media_type != TIKTOK_MEDIA_VIDEO
+            is_active_video = should_highlight_video_link(
+                link,
+                likes=worksheet.cell(row=row_index, column=likes_column).value if likes_column else 0,
+                shares=worksheet.cell(row=row_index, column=shares_column).value if shares_column else 0,
+                resolved_url=worksheet.cell(row=row_index, column=resolved_url_column).value if resolved_url_column else "",
+                resolved_source_url=worksheet.cell(row=row_index, column=source_url_column).value if source_url_column else "",
+                scan_status=worksheet.cell(row=row_index, column=scan_status_column).value if scan_status_column else "",
+            )
+            should_highlight = len(partners) == 1 and not is_active_video
         if should_highlight:
             highlighted_count += 1
         for column_index in range(1, max_column + 1):
@@ -1387,7 +1466,7 @@ def highlight_single_partner_link_rows(workbook, data_sheet_name):
 
 
 def highlight_video_link_rows(workbook, data_sheet_name):
-    """Bôi xanh dương các dòng link TikTok dạng /video/ (kể cả 1 đối tác)."""
+    """Bôi xanh video có TIM hoặc CHIA SẺ lớn hơn 0."""
     source_sheet = clean_text(data_sheet_name)
     if not source_sheet or source_sheet not in workbook.sheetnames:
         return 0
@@ -1396,6 +1475,11 @@ def highlight_video_link_rows(workbook, data_sheet_name):
     link_column = worksheet_find_link_column_index(worksheet)
     if not link_column:
         return 0
+    likes_column = worksheet_find_column_index(worksheet, ["TIM"])
+    shares_column = worksheet_find_column_index(worksheet, ["CHIA SẺ"])
+    scan_status_column = worksheet_find_column_index(worksheet, [TTBD_SCAN_STATUS_HEADER])
+    resolved_url_column = worksheet_find_column_index(worksheet, [TTBD_RESOLVED_URL_HEADER])
+    source_url_column = worksheet_find_column_index(worksheet, [TTBD_SOURCE_URL_HEADER])
 
     max_row = worksheet.max_row or 0
     max_column = worksheet.max_column or 0
@@ -1408,7 +1492,17 @@ def highlight_video_link_rows(workbook, data_sheet_name):
 
     for row_index in range(2, max_row + 1):
         link = clean_text(worksheet.cell(row=row_index, column=link_column).value)
-        is_video = bool(link and is_tiktok_video_link(link))
+        is_video = bool(
+            link
+            and should_highlight_video_link(
+                link,
+                likes=worksheet.cell(row=row_index, column=likes_column).value if likes_column else 0,
+                shares=worksheet.cell(row=row_index, column=shares_column).value if shares_column else 0,
+                resolved_url=worksheet.cell(row=row_index, column=resolved_url_column).value if resolved_url_column else "",
+                resolved_source_url=worksheet.cell(row=row_index, column=source_url_column).value if source_url_column else "",
+                scan_status=worksheet.cell(row=row_index, column=scan_status_column).value if scan_status_column else "",
+            )
+        )
 
         if is_video:
             video_count += 1

@@ -51,7 +51,7 @@ from workbook_utils import (
     find_data_sheet_names,
     google_sheet_source_for_file,
     is_failed_channel_name,
-    is_tiktok_video_link,
+    should_highlight_video_link,
     list_workbook_partners,
     list_workbook_partners_with_link_counts,
     normalize_header,
@@ -424,7 +424,14 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
             row_partners = []
         link_for_type = clean_text(source_row.get("LINK AIR", ""))
         row_fill = None
-        if is_tiktok_video_link(link_for_type):
+        if should_highlight_video_link(
+            link_for_type,
+            likes=source_row.get("TIM", 0),
+            shares=source_row.get("CHIA SẺ", 0),
+            resolved_url=source_row.get("_resolvedUrl", ""),
+            resolved_source_url=source_row.get("_resolvedSourceUrl", ""),
+            scan_status=source_row.get("_scanStatus", ""),
+        ):
             row_fill = video_link_fill
         elif len(row_partners) == 1:
             row_fill = single_link_fill

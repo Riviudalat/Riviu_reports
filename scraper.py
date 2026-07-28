@@ -22,7 +22,7 @@ from workbook_utils import (
     is_generic_tiktok_channel_name,
     is_numeric_channel_garbage,
     is_scrapable_tiktok_url,
-    is_tiktok_video_link,
+    should_highlight_video_link,
     load_channel_overrides,
     metric_number,
     format_display_datetime,
@@ -32,6 +32,9 @@ from workbook_utils import (
     resolve_channel_name,
     result_sheet_display_name,
     summary_sheet_title_for_data_sheet,
+    TTBD_RESOLVED_URL_HEADER,
+    TTBD_SCAN_STATUS_HEADER,
+    TTBD_SOURCE_URL_HEADER,
     workbook_data_sheet_names,
     worksheet_partner_column_indexes,
     worksheet_row_partners,
@@ -101,8 +104,9 @@ UNIVERSAL_DETAIL_KEY_MARKERS = (
     "reflow.photo.detail",
 )
 EMBEDDED_STATE_SCRIPT_PATTERNS = (
-    r'<script[^>]+id="__UNIVERSAL_DATA_FOR_REHYDRATION__"[^>]*>(.*?)</script>',
-    r'<script[^>]+id="SIGI_STATE"[^>]*>(.*?)</script>',
+    r"<script\b[^>]*\bid\s*=\s*['\"]__UNIVERSAL_DATA_FOR_REHYDRATION__['\"][^>]*>(.*?)</script\s*>",
+    r"<script\b[^>]*\bid\s*=\s*['\"]SIGI_STATE['\"][^>]*>(.*?)</script\s*>",
+    r"<script\b[^>]*\bid\s*=\s*['\"]api-data['\"][^>]*>(.*?)</script\s*>",
 )
 
 MAX_CONCURRENT_REQUESTS = 20
@@ -111,7 +115,7 @@ MAX_WORKERS_PER_PROXY = 10
 REQUEST_SHELL_RETRY_DELAY = 0.35
 REQUEST_SHELL_RETRY_DELAY_PROXY = 0.12
 REQUEST_CANDIDATE_LIMIT_DIRECT = 4
-REQUEST_CANDIDATE_LIMIT_PROXY = 2
+REQUEST_CANDIDATE_LIMIT_PROXY = 3
 REQUEST_METRIC_HINT_PATTERN = re.compile(r'"(?:playCount|diggCount)"\s*:\s*"?(\d+)"?')
 _request_semaphore = threading.Semaphore(MAX_CONCURRENT_REQUESTS)
 _request_block_lock = threading.Lock()
@@ -228,6 +232,7 @@ STATUS_METRICS_UNREADABLE = "Error: Không đọc được số liệu"
 STATUS_TIKTOK_NO_STATS = "Ẩn số liệu: TikTok không trả lượt xem"
 # Chuỗi cũ (trước khi tách ẩn/lỗi) — vẫn nhận diện khi đọc log/Excel cũ.
 STATUS_TIKTOK_NO_STATS_LEGACY = "Lỗi: TikTok không trả số liệu"
+STATUS_MEDIA_REDIRECT_MISMATCH = "Error: Redirect không khớp video"
 
 MAX_WORKERS = 50
 DEFAULT_WORKERS = 5
@@ -247,6 +252,9 @@ RESULT_SHEET_HEADERS = [
     "CHIA SẺ",
     "Đối tác",
     LAST_UPDATE_HEADER,
+    TTBD_SCAN_STATUS_HEADER,
+    TTBD_RESOLVED_URL_HEADER,
+    TTBD_SOURCE_URL_HEADER,
 ]
 
 SCRAPE_HISTORY_FILENAME = "scrape_history.json"
@@ -447,10 +455,22 @@ def detect_columns(sheet):
     column_map["channel"] = None
     column_map["date"] = None
     column_map["last_update"] = None
+    column_map["scan_status"] = None
+    column_map["resolved_url"] = None
+    column_map["source_url"] = None
 
     for cell in sheet[1]:
         header = normalize_text(cell.value)
         if not header:
+            continue
+        if header == normalize_text(TTBD_SCAN_STATUS_HEADER):
+            column_map["scan_status"] = cell.column
+            continue
+        if header == normalize_text(TTBD_RESOLVED_URL_HEADER):
+            column_map["resolved_url"] = cell.column
+            continue
+        if header == normalize_text(TTBD_SOURCE_URL_HEADER):
+            column_map["source_url"] = cell.column
             continue
         if "URL" in header or "LINK" in header:
             column_map["url"] = cell.column
@@ -503,6 +523,17 @@ def ensure_columns(sheet):
         sheet.cell(row=1, column=max_column).value = LAST_UPDATE_HEADER
         column_map["last_update"] = max_column
 
+    for key, header in (
+        ("scan_status", TTBD_SCAN_STATUS_HEADER),
+        ("resolved_url", TTBD_RESOLVED_URL_HEADER),
+        ("source_url", TTBD_SOURCE_URL_HEADER),
+    ):
+        if not column_map[key]:
+            max_column += 1
+            sheet.cell(row=1, column=max_column).value = header
+            column_map[key] = max_column
+        sheet.column_dimensions[openpyxl.utils.get_column_letter(column_map[key])].hidden = True
+
     return column_map
 
 
@@ -518,7 +549,8 @@ def collect_rows(workbook, selected_partner=None, selected_partners=None, sheet_
     for sheet_name in selected_data_sheet_names(workbook, sheet_name):
         worksheet = workbook[sheet_name]
         partner_columns = worksheet_partner_column_indexes(worksheet)
-        url_column = detect_columns(worksheet)["url"]
+        columns = detect_columns(worksheet)
+        url_column = columns["url"]
         if not url_column:
             continue
 
@@ -527,6 +559,17 @@ def collect_rows(workbook, selected_partner=None, selected_partners=None, sheet_
             if not is_scrapable_tiktok_url(raw_url):
                 continue
             url = normalize_tiktok_url(raw_url)
+            stored_source_url = normalize_tiktok_url(
+                worksheet.cell(row=row_index, column=columns["source_url"]).value
+            ) if columns.get("source_url") else ""
+            stored_resolved_url = normalize_tiktok_url(
+                worksheet.cell(row=row_index, column=columns["resolved_url"]).value
+            ) if columns.get("resolved_url") else ""
+            metadata_matches_source = (
+                not stored_source_url
+                or stored_source_url.casefold() == url.casefold()
+            )
+            expected_media_id = extract_media_id(stored_resolved_url) if metadata_matches_source else ""
 
             partners = []
             if partner_columns:
@@ -544,6 +587,7 @@ def collect_rows(workbook, selected_partner=None, selected_partners=None, sheet_
                 "row": row_index,
                 "url": url,
                 "partners": partners,
+                "expected_media_id": expected_media_id,
             })
 
     return rows
@@ -638,6 +682,9 @@ def build_result_sheet(workbook, rows_to_process, summary_update_time):
             worksheet.cell(row=output_row, column=9).value = int(source_sheet.cell(row=source_row_index, column=columns.get("shares")).value or 0) if columns.get("shares") else 0
             worksheet.cell(row=output_row, column=10).value = "\n".join(partner_names)
             worksheet.cell(row=output_row, column=11).value = clean_text(source_sheet.cell(row=source_row_index, column=columns.get("last_update")).value) if columns.get("last_update") else summary_update_time
+            worksheet.cell(row=output_row, column=12).value = clean_text(source_sheet.cell(row=source_row_index, column=columns.get("scan_status")).value) if columns.get("scan_status") else ""
+            worksheet.cell(row=output_row, column=13).value = clean_text(source_sheet.cell(row=source_row_index, column=columns.get("resolved_url")).value) if columns.get("resolved_url") else ""
+            worksheet.cell(row=output_row, column=14).value = clean_text(source_sheet.cell(row=source_row_index, column=columns.get("source_url")).value) if columns.get("source_url") else ""
             output_row += 1
             sequence += 1
 
@@ -653,6 +700,9 @@ def build_result_sheet(workbook, rows_to_process, summary_update_time):
             worksheet.cell(row=total_row, column=column_index).value = f"=SUM({letter}2:{letter}{total_row - 1})"
 
     worksheet.freeze_panes = "A2"
+    worksheet.column_dimensions[openpyxl.utils.get_column_letter(12)].hidden = True
+    worksheet.column_dimensions[openpyxl.utils.get_column_letter(13)].hidden = True
+    worksheet.column_dimensions[openpyxl.utils.get_column_letter(14)].hidden = True
     return sheet_name
 
 
@@ -726,6 +776,9 @@ def metrics_from_stats_sources(*sources):
     metrics = {}
     for metric in COUNT_FIELD_MAP:
         if not field_values[metric]:
+            if metric == "Saves":
+                metrics[metric] = "0"
+                continue
             return None
         metrics[metric] = str(max(field_values[metric]))
     return metrics
@@ -738,7 +791,7 @@ def extract_raw_stats_fields(content, media_id=""):
         scope = blob.get("__DEFAULT_SCOPE__")
         if isinstance(scope, dict):
             for key, value in scope.items():
-                key_norm = normalize_text(key)
+                key_norm = normalize_text(key).casefold()
                 if not any(marker in key_norm for marker in UNIVERSAL_DETAIL_KEY_MARKERS):
                     continue
                 if not isinstance(value, dict):
@@ -747,7 +800,7 @@ def extract_raw_stats_fields(content, media_id=""):
                 if not isinstance(item_struct, dict):
                     continue
                 item_id = clean_text(item_struct.get("id") or item_struct.get("awemeId"))
-                if media_id and item_id and item_id != media_id:
+                if media_id and item_id != media_id:
                     continue
                 stats = item_struct.get("stats")
                 stats_v2 = item_struct.get("statsV2")
@@ -762,6 +815,9 @@ def extract_raw_stats_fields(content, media_id=""):
         if isinstance(item_module, dict) and media_id:
             item = item_module.get(media_id) or item_module.get(str(media_id))
             if isinstance(item, dict):
+                item_id = clean_text(item.get("id") or item.get("awemeId") or item.get("itemId"))
+                if item_id and item_id != media_id:
+                    continue
                 stats = item.get("stats")
                 stats_v2 = item.get("statsV2")
                 if isinstance(stats, dict):
@@ -776,12 +832,10 @@ def extract_raw_stats_fields(content, media_id=""):
 def extract_embedded_state_blobs(content):
     blobs = []
     for pattern in EMBEDDED_STATE_SCRIPT_PATTERNS:
-        match = re.search(pattern, content or "", flags=re.DOTALL)
-        if not match:
-            continue
-        data = json_loads_safe(match.group(1))
-        if data:
-            blobs.append(data)
+        for match in re.finditer(pattern, content or "", flags=re.DOTALL | re.IGNORECASE):
+            data = json_loads_safe(match.group(1))
+            if data:
+                blobs.append(data)
     return blobs
 
 
@@ -789,7 +843,7 @@ def universal_detail_scope_metrics(scope, media_id=""):
     if not isinstance(scope, dict):
         return None
     for key, value in scope.items():
-        key_norm = normalize_text(key)
+        key_norm = normalize_text(key).casefold()
         if not any(marker in key_norm for marker in UNIVERSAL_DETAIL_KEY_MARKERS):
             continue
         if not isinstance(value, dict):
@@ -798,7 +852,7 @@ def universal_detail_scope_metrics(scope, media_id=""):
         if not isinstance(item_struct, dict):
             continue
         item_id = clean_text(item_struct.get("id") or item_struct.get("awemeId"))
-        if media_id and item_id and item_id != media_id:
+        if media_id and item_id != media_id:
             continue
         metrics = metrics_from_stats_sources(item_struct)
         if metrics:
@@ -826,6 +880,9 @@ def parse_counts_from_sigi_state(data, media_id=""):
         for module_key in (media_id, str(media_id)):
             item = item_module.get(module_key)
             if isinstance(item, dict):
+                item_id = clean_text(item.get("id") or item.get("awemeId") or item.get("itemId"))
+                if item_id and item_id != media_id:
+                    continue
                 metrics = metrics_from_stats_sources(item)
                 if metrics:
                     return metrics
@@ -924,14 +981,7 @@ def parse_counts(content, media_id=""):
         return metrics, True
 
     if media_id:
-        data, found = parse_counts_regex(content, media_id=media_id)
-        if found and validate_metrics(data):
-            return data, True
-
-    if media_id:
-        metrics, found = parse_counts_from_embedded_json(content, media_id="")
-        if found and metrics and validate_metrics(metrics) and not embedded_state_is_ambiguous(content):
-            return metrics, True
+        return empty, False
 
     if embedded_state_is_ambiguous(content):
         return empty, False
@@ -943,10 +993,18 @@ def parse_counts(content, media_id=""):
 
 
 def json_loads_safe(raw_value):
-    try:
-        return json.loads(html.unescape(raw_value))
-    except (TypeError, json.JSONDecodeError):
+    if not isinstance(raw_value, str):
         return None
+    candidates = [raw_value]
+    unescaped = html.unescape(raw_value)
+    if unescaped != raw_value:
+        candidates.append(unescaped)
+    for candidate in candidates:
+        try:
+            return json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+    return None
 
 
 def iter_nested_dicts(value):
@@ -1009,7 +1067,9 @@ def iter_matching_item_structs(content, media_id=""):
         if isinstance(item_module, dict):
             item = item_module.get(media_id) or item_module.get(str(media_id))
             if isinstance(item, dict):
-                yield item
+                item_id = clean_text(item.get("id") or item.get("awemeId") or item.get("itemId"))
+                if not item_id or item_id == media_id:
+                    yield item
 
         for obj in iter_nested_dicts(blob):
             if not isinstance(obj, dict):
@@ -1050,8 +1110,12 @@ TIKTOK_NOT_FOUND_PHRASES = (
     "page not available",
     "page unavailable",
     "video unavailable",
-    "không tìm thấy",
-    "khong tim thay",
+    "không tìm thấy tài khoản này",
+    "không tìm thấy video này",
+    "khong tim thay tai khoan nay",
+    "khong tim thay video nay",
+    "video này hiện không khả dụng",
+    "trang không khả dụng",
     "unable to find",
 )
 
@@ -1076,8 +1140,29 @@ def visible_page_text(content):
 
 
 def is_tiktok_error_page(content):
-    text = visible_page_text(content)
-    return any(phrase in text for phrase in TIKTOK_NOT_FOUND_PHRASES)
+    visible_html = re.sub(r"<script\b[^>]*>.*?</script>", " ", content or "", flags=re.DOTALL | re.IGNORECASE)
+    visible_html = re.sub(r"<style\b[^>]*>.*?</style>", " ", visible_html, flags=re.DOTALL | re.IGNORECASE)
+    surfaces = []
+    heading_pattern = re.compile(
+        r"<(?P<tag>title|h[1-3])\b[^>]*>(?P<body>.*?)</(?P=tag)>",
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    for match in heading_pattern.finditer(visible_html):
+        surfaces.append(strip_html_text(match.group("body")).casefold())
+
+    alert_pattern = re.compile(
+        r"<(?P<tag>[a-z0-9]+)\b(?P<attrs>[^>]*(?:role=[\"']alert[\"']|(?:class|id|data-e2e)=[\"'][^\"']*(?:error|not-found|unavailable)[^\"']*[\"'])[^>]*)>"
+        r"(?P<body>.*?)</(?P=tag)>",
+        flags=re.DOTALL | re.IGNORECASE,
+    )
+    for match in alert_pattern.finditer(visible_html):
+        surfaces.append(strip_html_text(match.group("body")).casefold())
+
+    return any(
+        phrase in surface
+        for surface in surfaces
+        for phrase in TIKTOK_NOT_FOUND_PHRASES
+    )
 
 
 def looks_like_error_text(value):
@@ -1586,11 +1671,85 @@ def is_hidden_stats_status(status):
     )
 
 
-def no_metrics_status(content):
-    """Nhãn rõ nghĩa: trang rỗng (TikTok ẩn) vs đọc lỗi tạm thời."""
-    if request_html_has_metric_hints(content):
-        return STATUS_METRICS_UNREADABLE
-    return STATUS_TIKTOK_NO_STATS
+def should_clear_stale_metrics(status):
+    text = clean_text(status)
+    lowered = text.casefold()
+    return (
+        is_hidden_stats_status(status)
+        or lowered == "error: trang tiktok không khả dụng"
+        or bool(re.fullmatch(r"error:\s*http\s+(?:404|410)(?:\s+.*)?", lowered))
+    )
+
+
+def terminal_status_priority(status):
+    if is_hidden_stats_status(status):
+        return 40
+    text = clean_text(status).casefold()
+    if re.fullmatch(r"error:\s*http\s+410(?:\s+.*)?", text):
+        return 30
+    if text == "error: trang tiktok không khả dụng":
+        return 20
+    if re.fullmatch(r"error:\s*http\s+404(?:\s+.*)?", text):
+        return 10
+    return 0
+
+
+def stronger_terminal_result(current, candidate):
+    if current is None:
+        return candidate
+    if terminal_status_priority(candidate[2]) > terminal_status_priority(current[2]):
+        return candidate
+    return current
+
+
+def item_struct_explicitly_hides_stats(item_struct):
+    hidden_when_true = {
+        "hidestats",
+        "hideviewcount",
+        "isstatshidden",
+        "statshidden",
+        "viewcounthidden",
+    }
+    hidden_when_false = {
+        "isstatsvisible",
+        "statisticsvisible",
+        "statsvisible",
+        "viewcountvisible",
+    }
+    visibility_fields = {"statisticsvisibility", "statsvisibility"}
+
+    for obj in iter_nested_dicts(item_struct):
+        for key, value in obj.items():
+            normalized_key = re.sub(r"[^a-z0-9]", "", str(key).casefold())
+            if normalized_key not in hidden_when_true | hidden_when_false | visibility_fields:
+                continue
+            normalized_value = clean_text(value).casefold()
+            if normalized_key in hidden_when_true and (
+                value is True or normalized_value in {"1", "true", "hidden"}
+            ):
+                return True
+            if normalized_key in hidden_when_false and (
+                value is False or normalized_value in {"0", "false", "hidden"}
+            ):
+                return True
+            if normalized_key in visibility_fields and normalized_value in {"hidden", "private", "disabled"}:
+                return True
+    return False
+
+
+def no_metrics_status(content, media_id=""):
+    """Only classify hidden stats when the matching item says so explicitly."""
+    if media_id:
+        for item_struct in iter_matching_item_structs(content, media_id):
+            if item_struct_explicitly_hides_stats(item_struct):
+                return STATUS_TIKTOK_NO_STATS
+    return STATUS_METRICS_UNREADABLE
+
+
+def media_redirect_mismatch(source_url, final_url):
+    source_media_id = extract_media_id(source_url)
+    final_media_id = extract_media_id(final_url)
+    return bool(source_media_id and final_media_id != source_media_id)
 
 
 def build_request_url_candidates(url):
@@ -1607,8 +1766,6 @@ def build_request_url_candidates(url):
 
     add(url)
     base = url.split("?")[0]
-    add(base)
-
     media_id = extract_media_id(url)
     profile_username = extract_profile_username(url)
     if media_id and "/photo/" in url.lower():
@@ -1616,24 +1773,35 @@ def build_request_url_candidates(url):
             add(f"{base}?_r=1")
         if profile_username:
             add(f"https://www.tiktok.com/@{profile_username}/video/{media_id}")
+    add(base)
 
     return candidates
 
 
 def parse_fetched_request_page(source_url, final_url, content):
     empty = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
-    if is_tiktok_error_page(content):
-        return empty, "", "Error: Trang TikTok không khả dụng"
+    source_media_id = extract_media_id(source_url)
+    final_media_id = extract_media_id(final_url)
+    if media_redirect_mismatch(source_url, final_url):
+        return empty, "", STATUS_MEDIA_REDIRECT_MISMATCH
 
-    media_id = extract_media_id(source_url) or extract_media_id(final_url)
+    media_id = source_media_id or final_media_id
     profile_username = extract_profile_username(source_url) or extract_profile_username(final_url)
+    if not media_id:
+        channel_name = ""
+        if profile_username and not is_generated_username_channel(profile_username):
+            channel_name = f"@{profile_username.lstrip('@')}"
+        return empty, channel_name, STATUS_METRICS_UNREADABLE
+
     metrics, found = parse_counts(content, media_id=media_id)
     channel_name = parse_profile_channel_name(content, profile_username, media_id=media_id)
     if not channel_name and profile_username and not is_generated_username_channel(profile_username):
         channel_name = f"@{profile_username.lstrip('@')}"
     if found and validate_metrics(metrics):
         return metrics, channel_name, "Success"
-    return (metrics if found else empty), channel_name, no_metrics_status(content)
+    if is_tiktok_error_page(content):
+        return empty, "", "Error: Trang TikTok không khả dụng"
+    return (metrics if found else empty), channel_name, no_metrics_status(content, media_id=media_id)
 
 
 def hybrid_browser_worker_count(request_workers, total_links):
@@ -1675,9 +1843,11 @@ def _scrape_link_request_impl(url, timeout=DEFAULT_REQUEST_TIMEOUT):
     last_status = "Error: Không đọc được số liệu"
     last_resolved_url = ""
     saw_metric_hints = False
+    best_terminal = None
 
     try:
-        candidates = build_request_url_candidates(url)[:request_candidate_limit()]
+        candidate_limit = request_candidate_limit()
+        candidates = build_request_url_candidates(url)[:candidate_limit]
         best_success = None
 
         for candidate in candidates:
@@ -1685,6 +1855,11 @@ def _scrape_link_request_impl(url, timeout=DEFAULT_REQUEST_TIMEOUT):
                 final_url, content = fetch_tiktok_html(candidate, timeout=timeout)
             except urllib.error.HTTPError as error:
                 last_status = f"Error: HTTP {error.code}"
+                if should_clear_stale_metrics(last_status):
+                    best_terminal = stronger_terminal_result(
+                        best_terminal,
+                        (last_data, last_channel, last_status, last_resolved_url),
+                    )
                 if error.code in (403, 429):
                     note_request_rate_limit(error.code)
                     release_thread_proxy()
@@ -1696,12 +1871,19 @@ def _scrape_link_request_impl(url, timeout=DEFAULT_REQUEST_TIMEOUT):
                 continue
 
             note_network_success()
-            last_resolved_url = final_url or last_resolved_url
+            redirect_mismatch = media_redirect_mismatch(url, final_url)
+            if final_url and not redirect_mismatch:
+                last_resolved_url = final_url
             if request_html_has_metric_hints(content):
                 saw_metric_hints = True
 
             data, channel_name, status = parse_fetched_request_page(url, final_url, content)
             last_data, last_channel, last_status = data, channel_name, status
+            if should_clear_stale_metrics(status):
+                best_terminal = stronger_terminal_result(
+                    best_terminal,
+                    (data, channel_name, status, last_resolved_url),
+                )
             if status == "Success":
                 if best_success is None or (channel_name and not best_success[1]):
                     best_success = (data, channel_name, status, final_url)
@@ -1712,11 +1894,32 @@ def _scrape_link_request_impl(url, timeout=DEFAULT_REQUEST_TIMEOUT):
                 time.sleep(request_shell_retry_delay())
                 try:
                     final_url, content = fetch_tiktok_html(candidate, timeout=timeout)
-                except Exception:
+                except urllib.error.HTTPError as error:
+                    last_status = f"Error: HTTP {error.code}"
+                    if should_clear_stale_metrics(last_status):
+                        best_terminal = stronger_terminal_result(
+                            best_terminal,
+                            (last_data, last_channel, last_status, last_resolved_url),
+                        )
+                    if error.code in (403, 429):
+                        note_request_rate_limit(error.code)
+                        release_thread_proxy()
                     continue
-                last_resolved_url = final_url or last_resolved_url
+                except Exception as error:
+                    last_status = f"Error: {str(error)}"
+                    if is_transient_network_status(last_status):
+                        note_network_failure()
+                    continue
+                redirect_mismatch = media_redirect_mismatch(url, final_url)
+                if final_url and not redirect_mismatch:
+                    last_resolved_url = final_url
                 data, channel_name, status = parse_fetched_request_page(url, final_url, content)
                 last_data, last_channel, last_status = data, channel_name, status
+                if should_clear_stale_metrics(status):
+                    best_terminal = stronger_terminal_result(
+                        best_terminal,
+                        (data, channel_name, status, last_resolved_url),
+                    )
                 if status == "Success":
                     if best_success is None or (channel_name and not best_success[1]):
                         best_success = (data, channel_name, status, final_url)
@@ -1726,13 +1929,17 @@ def _scrape_link_request_impl(url, timeout=DEFAULT_REQUEST_TIMEOUT):
             redirect_candidate = normalize_tiktok_url(final_url.split("?")[0])
             if (
                 redirect_candidate
+                and not media_redirect_mismatch(url, final_url)
                 and redirect_candidate not in candidates
-                and len(candidates) < 4
+                and len(candidates) < candidate_limit
             ):
                 candidates.append(redirect_candidate)
 
         if best_success:
             data, channel_name, status, final_url = best_success
+            return data, channel_name, status, saw_metric_hints, final_url
+        if best_terminal:
+            data, channel_name, status, final_url = best_terminal
             return data, channel_name, status, saw_metric_hints, final_url
 
         return last_data, last_channel, last_status, saw_metric_hints, last_resolved_url
@@ -1775,7 +1982,7 @@ def scrape_link_with_retries_request(
         channel_name = enrich_channel_name(
             url,
             channel_name,
-            resolved_url=resolved_url,
+            resolved_url=resolved_url if status == "Success" else "",
             channel_cache=channel_cache,
             channel_overrides=channel_overrides,
             profile_lookup_attempted=profile_lookup_attempted,
@@ -1785,10 +1992,14 @@ def scrape_link_with_retries_request(
         last_data, last_channel, last_status = data, channel_name, status
         if status == "Success":
             return data, channel_name, status, attempts_used, last_resolved_url
+        if should_clear_stale_metrics(status):
+            return data, channel_name, status, attempts_used, last_resolved_url
         if is_request_rate_limited_status(status):
             release_thread_proxy()
             continue
         if is_transient_network_status(status):
+            continue
+        if status == STATUS_METRICS_UNREADABLE:
             continue
         if not saw_metric_hints:
             break
@@ -1830,7 +2041,7 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
         await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
         try:
             await page.wait_for_selector(
-                'script#__UNIVERSAL_DATA_FOR_REHYDRATION__, script#SIGI_STATE',
+                'script#__UNIVERSAL_DATA_FOR_REHYDRATION__, script#SIGI_STATE, script#api-data',
                 timeout=12000,
             )
         except Exception:
@@ -1844,7 +2055,15 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
             page_url = url
         if not profile_username:
             profile_username = extract_profile_username(page_url)
-        media_id = extract_media_id(url) or extract_media_id(page_url)
+        source_media_id = extract_media_id(url)
+        final_media_id = extract_media_id(page_url)
+        if media_redirect_mismatch(url, page_url):
+            return data, channel_name, STATUS_MEDIA_REDIRECT_MISMATCH, url
+        media_id = source_media_id or final_media_id
+        if not media_id:
+            if profile_username and not is_generated_username_channel(profile_username):
+                channel_name = f"@{profile_username.lstrip('@')}"
+            return data, channel_name, STATUS_METRICS_UNREADABLE, page_url
 
         previous_metrics = None
         found = False
@@ -1861,7 +2080,6 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
                 previous_metrics = candidate
             elif is_tiktok_error_page(content):
                 return data, channel_name, "Error: Trang TikTok không khả dụng", page_url
-
             parsed_channel = parse_channel_name_from_page(content, profile_username, media_id=media_id)
             if parsed_channel:
                 channel_name = parsed_channel
@@ -1896,7 +2114,7 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
             found = True
 
         if not found:
-            return data, channel_name, no_metrics_status(content), page_url
+            return data, channel_name, no_metrics_status(content, media_id=media_id), page_url
 
         return data, channel_name, "Success", page_url
     except Exception as error:
@@ -1918,8 +2136,45 @@ async def scrape_with_retries(page, url, retries, channel_cache=None):
         last_data, last_channel, last_status = data, channel_name, status
         if status == "Success":
             return data, channel_name, status, attempt + 1, last_resolved_url
+        if should_clear_stale_metrics(status):
+            return data, channel_name, status, attempt + 1, last_resolved_url
 
     return last_data, last_channel, last_status, retries + 1, last_resolved_url
+
+
+def select_fallback_result(request_result, browser_result):
+    if browser_result.get("status") == "Success":
+        return browser_result
+    if should_clear_stale_metrics(request_result.get("status")) and not should_clear_stale_metrics(
+        browser_result.get("status")
+    ):
+        return request_result
+    return browser_result
+
+
+def guard_result_media_identity(result):
+    if result.get("status") != "Success":
+        return result
+
+    raw_expected_ids = result.get("expected_media_ids") or []
+    if isinstance(raw_expected_ids, str):
+        raw_expected_ids = [raw_expected_ids]
+    expected_ids = {clean_text(value) for value in raw_expected_ids if clean_text(value)}
+    if not expected_ids:
+        return result
+
+    resolved_media_id = extract_media_id(result.get("resolved_url", ""))
+    if len(expected_ids) == 1 and resolved_media_id in expected_ids:
+        return result
+
+    guarded = dict(result)
+    guarded.update({
+        "data": {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"},
+        "channel_name": "",
+        "status": STATUS_MEDIA_REDIRECT_MISMATCH,
+        "resolved_url": "",
+    })
+    return guarded
 
 
 async def worker_loop(
@@ -1987,18 +2242,36 @@ async def worker_loop(
                 except Exception:
                     pass
             elapsed = time.perf_counter() - started_at
+            browser_result = {
+                "data": data,
+                "channel_name": channel_name,
+                "status": status,
+                "attempts": attempts,
+                "resolved_url": resolved_url,
+                "elapsed": elapsed,
+                "worker": display_worker,
+            }
+            selected_result = select_fallback_result(item.get("_request_result") or {}, browser_result)
+            data = selected_result.get("data", data)
+            channel_name = selected_result.get("channel_name", channel_name)
+            status = selected_result.get("status", status)
+            attempts = selected_result.get("attempts", attempts)
+            resolved_url = selected_result.get("resolved_url", resolved_url)
+            elapsed = selected_result.get("elapsed", elapsed)
+            selected_worker = selected_result.get("worker", display_worker)
             channel_name = enrich_channel_name(
                 item["url"],
                 channel_name,
-                resolved_url=resolved_url,
+                resolved_url=resolved_url if status == "Success" else "",
                 channel_cache=channel_cache,
                 channel_overrides=channel_overrides,
                 profile_lookup_attempted=profile_lookup_attempted,
                 cache_lock=cache_lock,
             )
+            result_item = {key: value for key, value in item.items() if key != "_request_result"}
             await result_queue.put({
-                **item,
-                "worker": display_worker,
+                **result_item,
+                "worker": selected_worker,
                 "data": data,
                 "channel_name": channel_name,
                 "status": status,
@@ -2122,7 +2395,18 @@ async def request_worker_loop(
                     "resolved_url": resolved_url,
                 })
             else:
-                await browser_queue.put(item)
+                await browser_queue.put({
+                    **item,
+                    "_request_result": {
+                        "worker": worker_label,
+                        "data": data,
+                        "channel_name": channel_name,
+                        "status": status,
+                        "attempts": attempts,
+                        "elapsed": elapsed,
+                        "resolved_url": resolved_url,
+                    },
+                })
             scrape_queue.task_done()
             current_item = None
     except Exception as error:
@@ -2152,17 +2436,26 @@ def write_result(
     row_index = item["row"]
     update_time = format_display_datetime()
 
-    if status == "Success":
+    write_metrics = status == "Success" or should_clear_stale_metrics(status)
+    if write_metrics:
         for metric_key, data_key in METRIC_KEYS.items():
             column_index = columns.get(metric_key)
             if column_index:
-                sheet.cell(row=row_index, column=column_index).value = int(data.get(data_key) or 0)
+                value = int(data.get(data_key) or 0) if status == "Success" else 0
+                sheet.cell(row=row_index, column=column_index).value = value
+
+    if columns.get("scan_status"):
+        sheet.cell(row=row_index, column=columns["scan_status"]).value = clean_text(status)
+    if status == "Success" and resolved_url and columns.get("resolved_url"):
+        sheet.cell(row=row_index, column=columns["resolved_url"]).value = normalize_tiktok_url(resolved_url)
+    if status == "Success" and columns.get("source_url"):
+        sheet.cell(row=row_index, column=columns["source_url"]).value = normalize_tiktok_url(item["url"])
 
     if columns.get("channel"):
         channel_value = channel_name_for_sheet(
             item["url"],
             channel_name,
-            resolved_url=resolved_url,
+            resolved_url=resolved_url if status == "Success" else "",
             status=status,
             channel_cache=channel_cache,
             channel_overrides=channel_overrides,
@@ -2170,7 +2463,9 @@ def write_result(
             cache_lock=cache_lock,
         )
         existing = clean_text(sheet.cell(row=row_index, column=columns["channel"]).value)
-        if channel_name_quality(existing, item["url"]) > channel_name_quality(channel_value, item["url"]):
+        if status != "Success" and channel_name_quality(existing, item["url"]) > 0:
+            channel_value = existing
+        elif channel_name_quality(existing, item["url"]) > channel_name_quality(channel_value, item["url"]):
             channel_value = existing
         sheet.cell(row=row_index, column=columns["channel"]).value = channel_value
 
@@ -2324,6 +2619,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 "sequence": len(bucket_order) + 1,
                 "url": item["url"],
                 "rows": [],
+                "expected_media_ids": [],
             }
             unique_buckets[key] = bucket
             bucket_order.append(bucket)
@@ -2332,6 +2628,9 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             "row": item["row"],
             "partners": item["partners"],
         })
+        expected_media_id = clean_text(item.get("expected_media_id", ""))
+        if expected_media_id and expected_media_id not in bucket["expected_media_ids"]:
+            bucket["expected_media_ids"].append(expected_media_id)
 
     duplicate_count = len(rows_to_process) - len(bucket_order)
     channel_cache = {}
@@ -2582,6 +2881,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                         )
                     continue
 
+                result = guard_result_media_identity(result)
                 processed += 1
                 data = result["data"]
                 status = result["status"]
@@ -2591,7 +2891,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 result["channel_name"] = enrich_channel_name(
                     result["url"],
                     result.get("channel_name", ""),
-                    resolved_url=resolved_url,
+                    resolved_url=resolved_url if status == "Success" else "",
                     channel_cache=channel_cache,
                     channel_overrides=channel_overrides,
                     profile_lookup_attempted=profile_lookup_attempted,
@@ -2633,9 +2933,12 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                     primary_target = bucket_rows[0] if bucket_rows else {"sheet_name": ""}
                     # Chỉ tô cam khi dòng chính (primary) đúng 1 đối tác — khớp Excel/preview.
                     single_partner = len(primary_target.get("partners") or []) == 1
-                    video_link = is_tiktok_video_link(
+                    video_link = should_highlight_video_link(
                         result["url"],
                         resolved_url=resolved_url,
+                        likes=data.get("Likes", 0),
+                        shares=data.get("Shares", 0),
+                        metrics_readable=status == "Success",
                     )
                     await websocket_manager.broadcast_data({
                         "id": result["sequence"],
@@ -2650,7 +2953,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                         "channelName": channel_name_for_sheet(
                             result["url"],
                             result["channel_name"],
-                            resolved_url=resolved_url,
+                            resolved_url=resolved_url if status == "Success" else "",
                             status=status,
                             channel_cache=channel_cache,
                             channel_overrides=channel_overrides,
@@ -2760,12 +3063,12 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             highlighted_count = highlight_single_partner_link_rows(workbook, scan_sheet_for_summary)
             if websocket_manager and highlighted_count:
                 await websocket_manager.broadcast_log(
-                    f"Đã bôi cam {highlighted_count} dòng link 1 đối tác (không phải video)."
+                    f"Đã bôi cam {highlighted_count} dòng link 1 đối tác chưa đủ điều kiện xanh."
                 )
             video_highlighted = highlight_video_link_rows(workbook, scan_sheet_for_summary)
             if websocket_manager and video_highlighted:
                 await websocket_manager.broadcast_log(
-                    f"Đã bôi xanh {video_highlighted} dòng link video."
+                    f"Đã bôi xanh {video_highlighted} dòng video có hoạt động."
                 )
     except Exception as error:
         if websocket_manager:
@@ -2773,7 +3076,11 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 f"CẢNH BÁO: Không bôi cam được dòng link 1 đối tác ({str(error)})"
             )
 
-    await save_workbook(workbook, file_path, websocket_manager)
+    final_saved, final_save_reason = await save_workbook(workbook, file_path, websocket_manager)
+    if not final_saved:
+        if final_save_reason == "permission":
+            raise RuntimeError("Lưu file Excel thất bại vì file đang mở.")
+        raise RuntimeError("Lưu file Excel thất bại.")
     duration_seconds = max(int(time.perf_counter() - started_at), 0)
     scan_sheet_name = clean_text(sheet_name) or ""
     if not scan_sheet_name and rows_to_process:
