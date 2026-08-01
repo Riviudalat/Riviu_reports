@@ -66,6 +66,8 @@ def main() -> None:
         str(work_dir),
         "--specpath",
         str(spec_dir),
+        "--additional-hooks-dir",
+        str(ROOT / "desktop" / "pyinstaller-hooks"),
         "--add-data",
         add_data(ROOT / "templates", "templates"),
         "--add-data",
@@ -76,8 +78,6 @@ def main() -> None:
         "uvicorn",
         "--collect-all",
         "jinja2",
-        "--collect-all",
-        "playwright",
         str(ROOT / "desktop_server.py"),
     ]
     subprocess.run(command, cwd=ROOT, check=True, env=playwright_env)

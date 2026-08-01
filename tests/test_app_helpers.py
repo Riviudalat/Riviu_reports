@@ -100,6 +100,8 @@ def test_desktop_bundle_keeps_resources_separate_from_user_data_and_release_ci()
     assert '"/_desktop/shutdown"' in sidecar_entrypoint
     assert 'PLAYWRIGHT_BROWSERS_PATH' in sidecar_source
     assert 'PLAYWRIGHT_BROWSERS_PATH' in sidecar_entrypoint
+    assert '"--additional-hooks-dir"' in sidecar_source
+    assert (root / "desktop" / "pyinstaller-hooks" / "hook-playwright.async_api.py").is_file()
     assert '"externalBin"' in config
     assert '"createUpdaterArtifacts": true' in config
     assert "windows-2022" in workflow
