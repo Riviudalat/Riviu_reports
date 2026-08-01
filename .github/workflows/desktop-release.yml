@@ -52,7 +52,7 @@ jobs:
         run: |
           tag="v${VERSION}"
           gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "Riviu Reports $tag" --generate-notes --draft
-          release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq .id)"
+          release_id="$(gh release view "$tag" --repo "$GITHUB_REPOSITORY" --json databaseId --jq .databaseId)"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
