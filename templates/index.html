@@ -9,71 +9,95 @@
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">
     <link rel="stylesheet" href="/static/styles.css?v={{ asset_version }}">
 </head>
-<body>
+<body class="compact-page" data-workspace-tab="sheet">
     <div class="toast-stack" id="toastStack" aria-live="assertive"></div>
     <div class="server-banner" id="serverBanner" hidden>Server đã cập nhật — restart Khoidong.bat rồi F5 trang này.</div>
-    <div class="container">
-        <div class="header">
-            <div class="header-brand">
-                <h1><img class="brand-logo" src="/logo.png" alt="Riviu"><span class="brand-title">Reports</span></h1>
-            </div>
-
+    <div class="compact-drawer-backdrop" id="compactDrawerBackdrop" onclick="closeCompactDrawers()"></div>
+    <div class="compact-app">
+        <div class="compact-header">
+            <header class="compact-topbar">
+                <div class="header-brand">
+                    <h1><img class="brand-logo" src="/logo.png" alt="Riviu"><span class="brand-title">Reports</span></h1>
+                </div>
+                <div class="compact-source-summary">
+                    <span class="material-icons-outlined compact-source-icon">table_view</span>
+                    <div class="compact-source-copy">
+                        <div class="compact-source-file" id="compactSourceFile">Chưa chọn file</div>
+                        <div class="compact-source-meta"><span id="compactSourceSheet">Chưa chọn sheet</span></div>
+                    </div>
+                </div>
+                <div class="compact-top-actions">
+                    <button class="btn btn-outline btn-compact compact-top-action" id="sourceDrawerButton" onclick="openSourceDrawer()" title="Đổi nguồn dữ liệu" aria-label="Đổi nguồn dữ liệu">
+                        <span class="material-icons-outlined">swap_horiz</span><span class="compact-action-label">Đổi nguồn</span>
+                    </button>
+                    <button class="btn btn-outline btn-compact compact-top-action" onclick="openHistoryModal()" title="Lịch sử quét" aria-label="Lịch sử quét">
+                        <span class="material-icons-outlined">history</span><span class="compact-action-label">Lịch sử</span>
+                    </button>
+                    <button class="btn btn-primary btn-compact compact-top-action" onclick="openReportModal()" title="Đối tác và báo cáo" aria-label="Đối tác và báo cáo">
+                        <span class="material-icons-outlined">summarize</span><span class="compact-action-label">Đối tác & báo cáo</span>
+                    </button>
+                </div>
+            </header>
             <div class="scan-toolbar" role="toolbar" aria-label="Cấu hình quét">
-                <div class="toolbar-group toolbar-config">
-                    <div class="toolbar-field">
-                        <label class="toolbar-label" for="workerCountSelect">
-                            <span class="material-icons-outlined toolbar-label-icon">bolt</span>
-                            Luồng
-                        </label>
-                        <select id="workerCountSelect" class="toolbar-select toolbar-select-sm">
-                            <option value="1">1</option>
-                            <option value="3">3</option>
-                            <option value="5">5</option>
-                            <option value="8">8</option>
-                            <option value="10" selected>10</option>
-                            <option value="20">20</option>
-                            <option value="25">25</option>
-                            <option value="30">30</option>
-                            <option value="50">50</option>
-                        </select>
+                <button class="btn btn-outline btn-compact compact-settings-button" id="scanSettingsButton" onclick="openScanSettingsDrawer()" title="Cấu hình quét" aria-label="Cấu hình quét">
+                    <span class="material-icons-outlined">settings</span>
+                </button>
+                <div class="scan-advanced-controls" id="scanSettingsDrawer" aria-hidden="true">
+                    <div class="compact-mobile-drawer-head">
+                        <strong>Cấu hình quét</strong>
+                        <button class="icon-btn" onclick="closeCompactDrawers()" aria-label="Đóng"><span class="material-icons-outlined">close</span></button>
                     </div>
-                    <div class="toolbar-field">
-                        <label class="toolbar-label" for="scrapeModeSelect">
-                            <span class="material-icons-outlined toolbar-label-icon">tune</span>
-                            Chế độ
-                        </label>
-                        <select id="scrapeModeSelect" class="toolbar-select">
-                            <option value="request" selected>Request</option>
-                            <option value="hybrid">Hybrid (Request + trình duyệt)</option>
-                            <option value="browser">Trình duyệt</option>
-                        </select>
-                    </div>
-                </div>
-
-                <div class="toolbar-divider" aria-hidden="true"></div>
-
-                <div class="toolbar-group toolbar-proxy">
-                    <div class="toolbar-field toolbar-field-proxy">
-                        <div class="toolbar-label">
-                            <span class="material-icons-outlined toolbar-label-icon">vpn_key</span>
-                            Proxy xoay
-                        </div>
-                        <div class="proxy-card" id="proxyCard">
-                            <label class="proxy-toggle" for="proxyUseCheckbox" title="Bật/tắt proxy khi quét">
-                                <input type="checkbox" id="proxyUseCheckbox" class="proxy-toggle-input">
-                                <span class="proxy-switch" aria-hidden="true"><span class="proxy-switch-knob"></span></span>
-                                <span class="proxy-status-dot" id="proxyStatusDot" aria-hidden="true"></span>
+                    <div class="toolbar-group toolbar-config">
+                        <div class="toolbar-field">
+                            <label class="toolbar-label" for="workerCountSelect">
+                                <span class="material-icons-outlined toolbar-label-icon">bolt</span>
+                                Luồng
                             </label>
-                            <button class="proxy-setup-btn" id="proxyConfigBtn" type="button" onclick="openProxyModal()" title="Dán & test proxy">
-                                <span class="material-icons-outlined">edit</span>
-                                <span class="proxy-setup-text">Cấu hình</span>
-                            </button>
+                            <select id="workerCountSelect" class="toolbar-select toolbar-select-sm">
+                                <option value="1">1</option>
+                                <option value="3">3</option>
+                                <option value="5">5</option>
+                                <option value="8">8</option>
+                                <option value="10" selected>10</option>
+                                <option value="20">20</option>
+                                <option value="25">25</option>
+                                <option value="30">30</option>
+                                <option value="50">50</option>
+                            </select>
+                        </div>
+                        <div class="toolbar-field">
+                            <label class="toolbar-label" for="scrapeModeSelect">
+                                <span class="material-icons-outlined toolbar-label-icon">tune</span>
+                                Chế độ
+                            </label>
+                            <select id="scrapeModeSelect" class="toolbar-select">
+                                <option value="request" selected>Request</option>
+                                <option value="hybrid">Hybrid (Request + trình duyệt)</option>
+                                <option value="browser">Trình duyệt</option>
+                            </select>
+                        </div>
+                    </div>
+                    <div class="toolbar-divider" aria-hidden="true"></div>
+                    <div class="toolbar-group toolbar-proxy">
+                        <div class="toolbar-field toolbar-field-proxy">
+                            <div class="toolbar-label">
+                                <span class="material-icons-outlined toolbar-label-icon">vpn_key</span>
+                                Proxy xoay
+                            </div>
+                            <div class="proxy-card" id="proxyCard">
+                                <label class="proxy-toggle" for="proxyUseCheckbox" title="Bật/tắt proxy khi quét">
+                                    <input type="checkbox" id="proxyUseCheckbox" class="proxy-toggle-input">
+                                    <span class="proxy-switch" aria-hidden="true"><span class="proxy-switch-knob"></span></span>
+                                    <span class="proxy-status-dot" id="proxyStatusDot" aria-hidden="true"></span>
+                                </label>
+                                <button class="proxy-setup-btn" id="proxyConfigBtn" type="button" onclick="openProxyModal()" title="Dán & test proxy">
+                                    <span class="material-icons-outlined">edit</span>
+                                    <span class="proxy-setup-text">Cấu hình</span>
+                                </button>
+                            </div>
                         </div>
                     </div>
                 </div>
-
-                <div class="toolbar-divider" aria-hidden="true"></div>
-
                 <div class="toolbar-group toolbar-sheet">
                     <div class="toolbar-field toolbar-field-grow">
                         <label class="toolbar-label" for="scanSheetSelect">
@@ -99,22 +123,40 @@
             </div>
         </div>
 
-        <div class="stats-grid">
-            <div class="stat-card"><div class="label">TỔNG LINK</div><div class="value" id="totalLinks">0</div></div>
-            <div class="stat-card"><div class="label">ĐÃ XỬ LÝ</div><div class="value" id="processedLinks" style="color:#ff6b00">0</div></div>
-            <div class="stat-card"><div class="label">THÀNH CÔNG</div><div class="value" id="successLinks" style="color:#16a34a">0</div></div>
-            <div class="stat-card"><div class="label">BỊ LỖI</div><div class="value" id="errorLinks" style="color:#dc2626">0</div></div>
-        </div>
+        <nav class="workspace-tabs" role="tablist" aria-label="Các vùng dữ liệu">
+            <button class="workspace-tab active" type="button" role="tab" aria-selected="true" data-workspace-tab="sheet" onclick="setWorkspaceTab('sheet')">
+                <span class="material-icons-outlined">table_rows</span><span>Dữ liệu sheet</span><span class="workspace-tab-count" id="totalLinks">0</span>
+            </button>
+            <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-workspace-tab="live" onclick="setWorkspaceTab('live')">
+                <span class="material-icons-outlined">sensors</span><span>Live</span><span class="workspace-tab-count" id="processedLinks">0</span>
+            </button>
+            <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-workspace-tab="success" onclick="setWorkspaceTab('success')">
+                <span class="material-icons-outlined">check_circle</span><span>Thành công</span><span class="workspace-tab-count success-count" id="successLinks">0</span>
+            </button>
+            <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-workspace-tab="nostats" onclick="setWorkspaceTab('nostats')">
+                <span class="material-icons-outlined">visibility_off</span><span>Không số liệu</span><span class="workspace-tab-count nostats-count" id="hiddenCountBadge">0</span>
+            </button>
+            <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-workspace-tab="errors" onclick="setWorkspaceTab('errors')">
+                <span class="material-icons-outlined">error_outline</span><span>Lỗi quét</span><span class="workspace-tab-count error-count" id="failedCountBadge">0</span>
+            </button>
+            <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-workspace-tab="duplicates" onclick="setWorkspaceTab('duplicates')">
+                <span class="material-icons-outlined">content_copy</span><span>Link trùng</span><span class="workspace-tab-count duplicate-count" id="duplicateCountBadge">0</span>
+            </button>
+            <button class="workspace-tab" type="button" role="tab" aria-selected="false" data-workspace-tab="logs" onclick="setWorkspaceTab('logs')">
+                <span class="material-icons-outlined">terminal</span><span>Nhật ký</span><span class="workspace-tab-count" id="logCountBadge">0</span>
+            </button>
+        </nav>
 
         <div class="progress-section">
             <div class="progress-bar"><div class="progress-fill" id="progressBar"></div></div>
             <div class="progress-meta">
-                <span id="progressText" style="font-size:14px; color:#4b5563; font-weight:500" aria-live="polite">Sẵn sàng chờ lệnh...</span>
+                <span id="progressText" aria-live="polite">Sẵn sàng chờ lệnh...</span>
                 <span id="progressStatus" class="progress-status"></span>
+                <span id="errorLinks" hidden>0</span>
             </div>
         </div>
 
-        <div class="controls-shell">
+        <aside class="controls-shell source-drawer" id="sourceDrawer" aria-hidden="true">
             <div class="controls-shell-head">
                 <div>
                     <div class="controls-shell-title">Nguồn dữ liệu</div>
@@ -123,6 +165,9 @@
                     <button class="btn btn-outline btn-compact" id="googleOauthBtn" onclick="document.getElementById('googleOauthFileInput').click()">Nạp OAuth</button>
                     <button class="btn btn-soft btn-compact google-login-btn" id="googleLoginBtn" onclick="connectGoogleOAuth()">Đăng nhập Google</button>
                     <input type="file" id="googleOauthFileInput" hidden accept=".json" onchange="uploadGoogleOauthClient(this)">
+                    <button class="icon-btn" type="button" onclick="closeSourceDrawer()" title="Đóng" aria-label="Đóng nguồn dữ liệu">
+                        <span class="material-icons-outlined">close</span>
+                    </button>
                 </div>
             </div>
 
@@ -185,36 +230,69 @@
                     </div>
                 </div>
             </div>
-        </div>
+        </aside>
 
-        <div class="card">
-            <div class="card-header">
-                <div class="card-title-block">
-                    <span>NỘI DUNG SHEET HIỆN TẠI</span>
+        <main class="workspace-shell">
+            <div class="workspace-head">
+                <div class="workspace-heading">
+                    <h2 id="workspaceViewTitle">Dữ liệu sheet hiện tại</h2>
+                    <div class="workspace-subtitle">
+                        <span id="workspaceViewSubtitle">Xem và chuyển sheet trong cùng một vùng làm việc</span>
+                        <span class="failed-note" id="duplicateNote"></span>
+                        <span class="failed-note" id="failedNote"></span>
+                    </div>
                 </div>
-                <div class="card-header-actions">
-                    <button class="btn btn-soft btn-compact" onclick="openHistoryModal()">
-                        <span class="material-icons-outlined">history</span> Lịch sử quét
+                <div class="workspace-actions">
+                    <button class="btn btn-outline btn-compact workspace-action" data-action-for="sheet" onclick="loadPreview()" title="Làm mới dữ liệu">
+                        <span class="material-icons-outlined">refresh</span><span class="workspace-action-label">Làm mới</span>
                     </button>
-                    <button class="btn btn-soft btn-compact" onclick="openReportModal()">
-                        <span class="material-icons-outlined">summarize</span> Đối tác & báo cáo
+                    <button class="btn btn-outline btn-compact workspace-action" data-action-for="sheet" onclick="downloadCurrentWorkbook()" title="Tải sheet">
+                        <span class="material-icons-outlined">download</span><span class="workspace-action-label">Tải sheet</span>
+                    </button>
+                    <button class="btn btn-outline btn-compact workspace-action" data-action-for="nostats" onclick="copyFailedLinks('nostats')" title="Copy link không số liệu">
+                        <span class="material-icons-outlined">content_copy</span><span class="workspace-action-label">Copy link</span>
+                    </button>
+                    <button class="btn btn-outline btn-compact workspace-action" data-action-for="nostats" onclick="clearFailedLinks(true, 'nostats')" title="Xóa danh sách không số liệu">
+                        <span class="material-icons-outlined">delete_sweep</span><span class="workspace-action-label">Xóa</span>
+                    </button>
+                    <button class="btn btn-outline btn-compact workspace-action" data-action-for="errors" onclick="copyFailedLinks('errors')" title="Copy link lỗi">
+                        <span class="material-icons-outlined">content_copy</span><span class="workspace-action-label">Copy link</span>
+                    </button>
+                    <button class="btn btn-outline btn-compact workspace-action" data-action-for="errors" onclick="clearFailedLinks(true, 'errors')" title="Xóa danh sách lỗi">
+                        <span class="material-icons-outlined">delete_sweep</span><span class="workspace-action-label">Xóa</span>
+                    </button>
+                    <button class="btn btn-outline btn-compact workspace-action" data-action-for="duplicates" onclick="copyDuplicateLinks()" title="Copy link trùng">
+                        <span class="material-icons-outlined">content_copy</span><span class="workspace-action-label">Copy link</span>
+                    </button>
+                    <button class="btn btn-outline btn-compact workspace-action" data-action-for="duplicates" onclick="clearDuplicateLinks()" title="Xóa danh sách trùng">
+                        <span class="material-icons-outlined">delete_sweep</span><span class="workspace-action-label">Xóa</span>
+                    </button>
+                    <button class="btn btn-outline btn-compact workspace-action" data-action-for="logs" onclick="copyLogs()" title="Copy log">
+                        <span class="material-icons-outlined">content_copy</span><span class="workspace-action-label">Copy</span>
+                    </button>
+                    <button class="btn btn-outline btn-compact workspace-action" data-action-for="logs" onclick="exportLogs()" title="Xuất log">
+                        <span class="material-icons-outlined">download</span><span class="workspace-action-label">Xuất</span>
+                    </button>
+                    <button class="btn btn-outline btn-compact workspace-action" data-action-for="logs" onclick="clearLogs()" title="Xóa log">
+                        <span class="material-icons-outlined">delete_sweep</span><span class="workspace-action-label">Xóa</span>
                     </button>
                 </div>
             </div>
+
+            <section class="workspace-panel workspace-panel-sheet active" data-workspace-panel="sheet">
             <div class="sheet-tabs" id="sheetTabs"></div>
             <div class="summary-dashboard" id="summaryDashboard"></div>
-            <div class="table-wrap">
+            <div class="table-wrap workspace-table-wrap preview-table-wrap">
                 <table id="previewTable">
                     <thead id="previewHeader"></thead>
                     <tbody id="previewBody"><tr><td colspan="10" style="text-align:center; padding:50px; color:#9ca3af">Đang tải dữ liệu...</td></tr></tbody>
                 </table>
             </div>
-        </div>
+            </section>
 
-        <div style="display:flex; flex-direction: column; gap:25px">
-            <div class="card">
-                <div class="card-header">KẾT QUẢ QUÉT TRỰC TIẾP</div>
-                <div class="table-wrap" style="height:400px">
+            <div class="workspace-secondary-panels">
+            <section class="workspace-panel workspace-panel-live" data-workspace-panel="live">
+                <div class="table-wrap workspace-table-wrap live-results-wrap">
                     <table>
                         <thead>
                             <tr>
@@ -233,21 +311,47 @@
                         <tbody id="dataFeed"><tr><td colspan="10" style="text-align:center; padding:40px; color:#9ca3af">Chưa có kết quả mới</td></tr></tbody>
                     </table>
                 </div>
-            </div>
+                <button class="workspace-new-results" id="newResultsButton" type="button" onclick="showNewestLiveResults()" hidden>
+                    <span class="material-icons-outlined">north</span>
+                    <span id="newResultsButtonText">Có kết quả mới</span>
+                </button>
+            </section>
 
-            <div class="card">
-                <div class="card-header">
-                    <span>LINK BỊ LỖI <span class="error-badge" id="failedCountBadge">0</span><span class="failed-note" id="failedNote"></span></span>
-                    <div class="card-header-actions">
-                        <button class="btn btn-outline btn-compact" onclick="copyFailedLinks()">
-                            <span class="material-icons-outlined">content_copy</span> Copy link lỗi
-                        </button>
-                        <button class="btn btn-outline btn-compact" onclick="clearFailedLinks()">
-                            <span class="material-icons-outlined">delete_sweep</span> Xóa danh sách
-                        </button>
-                    </div>
+            <section class="workspace-panel duplicate-links-card" data-workspace-panel="duplicates">
+                <div class="table-wrap workspace-table-wrap duplicate-table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>LINK BỊ TRÙNG</th>
+                                <th>SỐ LẦN</th>
+                                <th>SHEET / SỐ DÒNG</th>
+                            </tr>
+                        </thead>
+                        <tbody id="duplicateLinksBody"><tr><td colspan="4" class="duplicate-empty">Chưa có link trùng</td></tr></tbody>
+                    </table>
                 </div>
-                <div class="table-wrap" style="max-height:260px">
+            </section>
+
+            <section class="workspace-panel" data-workspace-panel="nostats">
+                <div class="table-wrap workspace-table-wrap">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>SHEET</th>
+                                <th>LINK KHÔNG SỐ LIỆU</th>
+                                <th>LÝ DO</th>
+                                <th>LUỒNG</th>
+                            </tr>
+                        </thead>
+                        <tbody id="noStatsLinksBody"><tr><td colspan="5" class="workspace-empty">Chưa có link không đọc được số liệu</td></tr></tbody>
+                    </table>
+                </div>
+            </section>
+
+            <section class="workspace-panel" data-workspace-panel="errors">
+                <div class="table-wrap workspace-table-wrap">
                     <table>
                         <thead>
                             <tr>
@@ -258,29 +362,16 @@
                                 <th>LUỒNG</th>
                             </tr>
                         </thead>
-                        <tbody id="failedLinksBody"><tr><td colspan="5" style="text-align:center; padding:32px; color:#9ca3af">Chưa có link lỗi</td></tr></tbody>
+                        <tbody id="failedLinksBody"><tr><td colspan="5" class="workspace-empty">Chưa có link lỗi</td></tr></tbody>
                     </table>
                 </div>
-            </div>
+            </section>
 
-            <div class="card">
-                <div class="card-header">
-                    <span>NHẬT KÝ HỆ THỐNG</span>
-                    <div class="card-header-actions">
-                        <button class="btn btn-outline btn-compact" onclick="copyLogs()">
-                            <span class="material-icons-outlined">content_copy</span> Copy log
-                        </button>
-                        <button class="btn btn-outline btn-compact" onclick="exportLogs()">
-                            <span class="material-icons-outlined">download</span> Xuất log
-                        </button>
-                        <button class="btn btn-outline btn-compact" onclick="clearLogs()">
-                            <span class="material-icons-outlined">delete_sweep</span> Xóa log
-                        </button>
-                    </div>
-                </div>
+            <section class="workspace-panel workspace-panel-logs" data-workspace-panel="logs">
                 <div class="log-box" id="logs"></div>
+            </section>
             </div>
-        </div>
+        </main>
     </div>
 
     <div class="modal-backdrop" id="reportModal" aria-hidden="true">

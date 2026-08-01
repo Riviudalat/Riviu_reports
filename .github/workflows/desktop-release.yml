@@ -1,0 +1,144 @@
+name: Desktop release
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  quality:
+    name: Quality checks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip -r requirements.txt
+          npm ci
+
+      - name: Run checks
+        run: |
+          python -m pytest -q
+          node --check static/app.js
+
+  prepare-release:
+    name: Prepare GitHub release
+    needs: quality
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.release.outputs.version }}
+      tag: ${{ steps.release.outputs.tag }}
+      release_id: ${{ steps.release.outputs.release_id }}
+    steps:
+      - name: Create release
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: 0.1.${{ github.run_number }}
+        run: |
+          tag="v${VERSION}"
+          gh release create "$tag" --repo "$GITHUB_REPOSITORY" --title "Riviu Reports $tag" --generate-notes --draft
+          release_id="$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$tag" --jq .id)"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
+  build-and-publish:
+    name: ${{ matrix.name }}
+    needs: prepare-release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+          - name: macOS Intel
+            os: macos-13
+            target: x86_64-apple-darwin
+          - name: macOS Apple Silicon
+            os: macos-14
+            target: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    env:
+      TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+      TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Import Apple signing certificate
+        if: runner.os == 'macOS' && secrets.APPLE_CERTIFICATE != ''
+        uses: apple-actions/import-codesign-certs@v3
+        with:
+          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
+          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip -r requirements.txt
+
+      - name: Install desktop dependencies
+        run: npm ci
+
+      - name: Set release version
+        run: npm run desktop:version -- ${{ needs.prepare-release.outputs.version }}
+
+      - name: Build bundled server
+        run: python desktop/build_sidecar.py --target ${{ matrix.target }}
+
+      - name: Build installers and publish updater artifacts
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        with:
+          projectPath: .
+          tagName: ${{ needs.prepare-release.outputs.tag }}
+          releaseId: ${{ needs.prepare-release.outputs.release_id }}
+          releaseName: Riviu Reports ${{ needs.prepare-release.outputs.tag }}
+          releaseBody: Automated Riviu Reports desktop build.
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }}
+
+  publish-release:
+    name: Publish completed release
+    needs:
+      - prepare-release
+      - build-and-publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Publish updater release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.prepare-release.outputs.tag }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest

@@ -28,3 +28,12 @@ probe_scrape_result.json
 # Script test local (có thể chứa credential proxy)
 scripts/
 docs/superpowers/
+
+# Desktop build dependencies and generated bundles
+node_modules/
+build/
+output/
+src-tauri/target/
+src-tauri/gen/
+src-tauri/binaries/riviu-server-*
+.keys/

@@ -7,6 +7,7 @@ import io
 import json
 import os
 import re
+import sys
 import zipfile
 from datetime import datetime
 import urllib.error
@@ -72,10 +73,19 @@ from workbook_utils import (
 )
 
 
-app = FastAPI()
-templates = Jinja2Templates(directory="templates")
+def application_resource_dir() -> str:
+    """Return bundled resources when frozen, otherwise the repository directory."""
+    return os.path.abspath(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))))
 
-_STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
+
+APP_RESOURCE_DIR = application_resource_dir()
+EXCEL_DIR = os.path.abspath(os.environ.get("RIVIU_DATA_DIR", APP_RESOURCE_DIR))
+os.makedirs(EXCEL_DIR, exist_ok=True)
+
+app = FastAPI()
+templates = Jinja2Templates(directory=os.path.join(APP_RESOURCE_DIR, "templates"))
+
+_STATIC_DIR = os.path.join(APP_RESOURCE_DIR, "static")
 if os.path.isdir(_STATIC_DIR):
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 
@@ -118,16 +128,22 @@ class ConnectionManager:
             except Exception:
                 pass
 
+    async def broadcast_duplicates(self, data: dict):
+        for conn in self.active_connections:
+            try:
+                await conn.send_json({"type": "duplicates", "data": data})
+            except Exception:
+                pass
+
 
 manager = ConnectionManager()
-EXCEL_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = ensure_data_dir(EXCEL_DIR)
 SCRAPE_TASK = None
 CURRENT_SELECTED_FILE = ""
 CURRENT_SELECTED_SHEET = ""
 CURRENT_SCAN_SHEET = ""
 GOOGLE_SHEET_SOURCE_URL = ""
-LOGO_PATH = os.path.join(EXCEL_DIR, "logo.png")
+LOGO_PATH = os.path.join(APP_RESOURCE_DIR, "logo.png")
 
 
 def file_entries():
@@ -673,7 +689,7 @@ async def index(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"asset_version": static_asset_version(EXCEL_DIR)},
+        context={"asset_version": static_asset_version(APP_RESOURCE_DIR)},
     )
 
 

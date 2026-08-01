@@ -593,6 +593,37 @@ def collect_rows(workbook, selected_partner=None, selected_partners=None, sheet_
     return rows
 
 
+def build_duplicate_link_payload(bucket_order):
+    """Build the duplicate-link summary shown in the live UI."""
+    items = []
+    duplicate_row_count = 0
+
+    for bucket in bucket_order:
+        rows = bucket.get("rows", [])
+        if len(rows) < 2:
+            continue
+
+        locations = [
+            {
+                "sheetName": row.get("sheet_name", ""),
+                "row": row.get("row", ""),
+            }
+            for row in rows
+        ]
+        duplicate_row_count += len(locations) - 1
+        items.append({
+            "id": len(items) + 1,
+            "url": bucket.get("url", ""),
+            "locations": locations,
+        })
+
+    return {
+        "duplicateUrlCount": len(items),
+        "duplicateRowCount": duplicate_row_count,
+        "items": items,
+    }
+
+
 def is_total_row(sheet, row_index, url_column):
     value = clean_text(sheet.cell(row=row_index, column=url_column).value)
     return normalize_text(value) == "TỔNG" or normalize_text(value) == "TONG"
@@ -2642,6 +2673,11 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     total = len(bucket_order)
     started_at = time.perf_counter()
     mode = "partner" if selected_names else "full"
+    duplicate_payload = build_duplicate_link_payload(bucket_order)
+    if websocket_manager:
+        broadcast_duplicates = getattr(websocket_manager, "broadcast_duplicates", None)
+        if broadcast_duplicates:
+            await broadcast_duplicates(duplicate_payload)
     if use_request:
         configure_request_concurrency(worker_count, proxy_count=len(proxy_configs))
 

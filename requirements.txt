@@ -12,3 +12,4 @@ google-auth>=2.35.0
 google-auth-oauthlib>=1.2.1
 PySocks>=1.7.1
 pytest>=8.0.0
+pyinstaller>=6.12,<7

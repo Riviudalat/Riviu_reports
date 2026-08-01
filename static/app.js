@@ -4,6 +4,8 @@ let reportSheetName = '';
 let reportSheetUpdating = false;
 let selectedPartners = new Set();
 let failedLinks = [];
+let duplicateLinks = [];
+let duplicateRowCount = 0;
 let currentSheetName = '';
 let currentFileId = '';
 let currentScanSheetName = '';
@@ -12,6 +14,9 @@ let googleSheetUrlDirty = false;
 let googlePushReady = false;
 let scanCompletedForCurrentFile = false;
 let googleOAuthAuthorized = false;
+let activeWorkspaceTab = 'sheet';
+let pendingLiveResults = 0;
+let desktopUpdateCheckInFlight = false;
 const startBtn = document.getElementById('startBtn');
 const cancelBtn = document.getElementById('cancelBtn');
 const workerCountSelect = document.getElementById('workerCountSelect');
@@ -44,6 +49,143 @@ function syncProxyCardActiveState() {
 const scanSheetSelect = document.getElementById('scanSheetSelect');
 const pushSheetSelect = document.getElementById('pushSheetSelect');
 const googleSheetUrlInput = document.getElementById('googleSheetUrlInput');
+
+const WORKSPACE_VIEW_META = Object.freeze({
+    sheet: {
+        title: 'Dữ liệu sheet hiện tại',
+        subtitle: 'Xem và chuyển sheet trong cùng một vùng làm việc',
+        panel: 'sheet',
+    },
+    live: {
+        title: 'Kết quả đang quét',
+        subtitle: 'Kết quả mới nhất nằm ở đầu danh sách',
+        panel: 'live',
+    },
+    success: {
+        title: 'Đọc số liệu thành công',
+        subtitle: 'Chỉ hiển thị các link đã đọc được số liệu',
+        panel: 'live',
+    },
+    nostats: {
+        title: 'Không đọc được số liệu',
+        subtitle: 'Link hoạt động nhưng nền tảng không trả số liệu',
+        panel: 'nostats',
+    },
+    errors: {
+        title: 'Lỗi quét cần kiểm tra',
+        subtitle: 'Lỗi kết nối, link không hợp lệ hoặc lỗi xử lý',
+        panel: 'errors',
+    },
+    duplicates: {
+        title: 'Link bị trùng',
+        subtitle: 'Hiển thị đầy đủ sheet và số dòng của từng link',
+        panel: 'duplicates',
+    },
+    logs: {
+        title: 'Nhật ký hệ thống',
+        subtitle: 'Theo dõi chi tiết quá trình quét và cập nhật dữ liệu',
+        panel: 'logs',
+    },
+});
+
+function syncCompactDrawerState() {
+    const sourceOpen = document.body.classList.contains('source-drawer-open');
+    const settingsOpen = document.body.classList.contains('scan-settings-open');
+    const sourceDrawer = document.getElementById('sourceDrawer');
+    const settingsDrawer = document.getElementById('scanSettingsDrawer');
+    const backdrop = document.getElementById('compactDrawerBackdrop');
+    const sourceButton = document.getElementById('sourceDrawerButton');
+    const settingsButton = document.getElementById('scanSettingsButton');
+    const settingsAreInline = window.matchMedia('(min-width: 1025px)').matches;
+
+    if (sourceDrawer) sourceDrawer.setAttribute('aria-hidden', sourceOpen ? 'false' : 'true');
+    if (settingsDrawer) settingsDrawer.setAttribute('aria-hidden', settingsAreInline || settingsOpen ? 'false' : 'true');
+    if (sourceButton) sourceButton.setAttribute('aria-expanded', sourceOpen ? 'true' : 'false');
+    if (settingsButton) settingsButton.setAttribute('aria-expanded', settingsOpen ? 'true' : 'false');
+    if (backdrop) backdrop.classList.toggle('active', sourceOpen || settingsOpen);
+}
+
+function openSourceDrawer() {
+    document.body.classList.remove('scan-settings-open');
+    document.body.classList.add('source-drawer-open');
+    syncCompactDrawerState();
+}
+
+function closeSourceDrawer() {
+    document.body.classList.remove('source-drawer-open');
+    syncCompactDrawerState();
+}
+
+function openScanSettingsDrawer() {
+    document.body.classList.remove('source-drawer-open');
+    document.body.classList.add('scan-settings-open');
+    syncCompactDrawerState();
+}
+
+function closeCompactDrawers() {
+    document.body.classList.remove('source-drawer-open', 'scan-settings-open');
+    syncCompactDrawerState();
+}
+
+function syncCompactSourceSummary(fileLabel = '', sheetName = '') {
+    const fileSelect = document.getElementById('excelFileSelect');
+    const selectedFile = fileSelect?.selectedOptions?.[0];
+    const resolvedFile = String(fileLabel || selectedFile?.textContent || currentFileId || '').trim();
+    const resolvedSheet = String(sheetName || scanSheetSelect?.value || currentScanSheetName || currentSheetName || '').trim();
+    const fileEl = document.getElementById('compactSourceFile');
+    const sheetEl = document.getElementById('compactSourceSheet');
+
+    if (fileEl) {
+        fileEl.textContent = resolvedFile || 'Chưa chọn file';
+        fileEl.title = resolvedFile || 'Chưa chọn file';
+    }
+    if (sheetEl) {
+        sheetEl.textContent = resolvedSheet || 'Chưa chọn sheet';
+        sheetEl.title = resolvedSheet || 'Chưa chọn sheet';
+    }
+}
+
+function showNewestLiveResults() {
+    const wrapper = document.querySelector('.live-results-wrap');
+    if (wrapper) wrapper.scrollTo({ top: 0, behavior: 'smooth' });
+    pendingLiveResults = 0;
+    const button = document.getElementById('newResultsButton');
+    if (button) button.hidden = true;
+}
+
+function updatePendingLiveResults() {
+    const button = document.getElementById('newResultsButton');
+    const text = document.getElementById('newResultsButtonText');
+    if (!button || !text) return;
+    text.textContent = `Có ${pendingLiveResults} kết quả mới`;
+    button.hidden = pendingLiveResults < 1;
+}
+
+function setWorkspaceTab(tabName) {
+    const meta = WORKSPACE_VIEW_META[tabName];
+    if (!meta) return;
+
+    activeWorkspaceTab = tabName;
+    document.body.dataset.workspaceTab = tabName;
+    document.querySelectorAll('.workspace-tab').forEach(button => {
+        const active = button.dataset.workspaceTab === tabName;
+        button.classList.toggle('active', active);
+        button.setAttribute('aria-selected', active ? 'true' : 'false');
+    });
+    document.querySelectorAll('.workspace-panel').forEach(panel => {
+        panel.classList.toggle('active', panel.dataset.workspacePanel === meta.panel);
+    });
+    document.querySelectorAll('.workspace-action').forEach(button => {
+        button.hidden = button.dataset.actionFor !== tabName;
+    });
+
+    const title = document.getElementById('workspaceViewTitle');
+    const subtitle = document.getElementById('workspaceViewSubtitle');
+    if (title) title.textContent = meta.title;
+    if (subtitle) subtitle.textContent = meta.subtitle;
+
+    if (meta.panel === 'live') showNewestLiveResults();
+}
 
 function cmdLine(type, message) {
     const prefix = type ? `[${type}] ` : '';
@@ -145,6 +287,8 @@ function addLog(msg, options = {}) {
     div.innerHTML = `<span class="log-time">[${time}]</span> ${renderLogBody(msg, level, details)}`;
     logs.appendChild(div);
     logs.scrollTop = logs.scrollHeight;
+    const logCountBadge = document.getElementById('logCountBadge');
+    if (logCountBadge) logCountBadge.textContent = logs.querySelectorAll('.log-line').length;
 }
 
 const TOAST_ICONS = { success: 'check_circle', error: 'error', warn: 'warning', info: 'info' };
@@ -488,6 +632,7 @@ function updateProxyModalSummary(count) {
 function openProxyModal() {
     const modal = document.getElementById('proxyModal');
     if (!modal) return;
+    closeCompactDrawers();
     if (proxyTextInput) {
         proxyTextInput.value = currentProxyText();
     }
@@ -669,6 +814,7 @@ async function updateFileList({ applyGoogleSheetUrl = false } = {}) {
             select.innerHTML = '<option value="">(Không có file nào)</option>';
             renderScanSheetOptions([], '');
             renderPushSheetOptions([], '');
+            syncCompactSourceSummary('', '');
             return;
         }
 
@@ -679,6 +825,7 @@ async function updateFileList({ applyGoogleSheetUrl = false } = {}) {
             if (file.id === data.current) opt.selected = true;
             select.appendChild(opt);
         });
+        syncCompactSourceSummary('', currentScanSheetName);
 
     } catch (error) {
         console.error(error);
@@ -893,6 +1040,7 @@ async function loadPreview(sheetName = '') {
         }
 
         currentSheetName = data.currentSheet || '';
+        syncCompactSourceSummary(data.fileLabel || data.file || '', currentSheetName);
         renderSheetTabs(data.sheets || [], currentSheetName);
         renderScanSheetOptions(data.sheets || [], currentScanSheetName);
         renderPushSheetOptions(data.sheets || [], currentPushSheetName);
@@ -911,6 +1059,10 @@ async function loadPreview(sheetName = '') {
             header.innerHTML = '';
             body.innerHTML = '<tr><td colspan="10" style="text-align:center; padding:40px; color:#9ca3af">Sheet này chưa có dữ liệu.</td></tr>';
             return;
+        }
+
+        if (!startBtn.disabled) {
+            document.getElementById('totalLinks').textContent = Array.isArray(data.data) ? data.data.length : 0;
         }
 
         header.innerHTML = `<tr>${data.columns.map(column => `<th>${escapeHtml(column)}</th>`).join('')}</tr>`;
@@ -1017,6 +1169,7 @@ function connectWS() {
         }
         else if (message.type === 'status') updateProgress(message.data);
         else if (message.type === 'data') appendData(message.row);
+        else if (message.type === 'duplicates') setDuplicateLinks(message.data);
     };
     ws.onopen = () => addLog('Hệ thống đã kết nối trực tiếp.');
     ws.onclose = () => {
@@ -1064,6 +1217,8 @@ function startScraping(partners = []) {
         partners: selected,
         partner: selected.length === 1 ? selected[0] : ''
     }));
+    setWorkspaceTab('live');
+    closeCompactDrawers();
     startBtn.disabled = true;
     cancelBtn.disabled = false;
     cancelBtn.innerHTML = BTN_CANCEL_IDLE;
@@ -1076,6 +1231,9 @@ function startScraping(partners = []) {
     document.getElementById('refreshPartnerBtn').disabled = true;
     startBtn.innerHTML = BTN_START_BUSY;
     document.getElementById('dataFeed').innerHTML = '';
+    pendingLiveResults = 0;
+    updatePendingLiveResults();
+    clearDuplicateLinks(false);
     clearFailedLinks(false);
     const statusEl = document.getElementById('progressStatus');
     statusEl.textContent = '';
@@ -1153,9 +1311,13 @@ function updateProgress(data) {
     document.getElementById('totalLinks').textContent = data.total;
     document.getElementById('processedLinks').textContent = data.processed;
     document.getElementById('successLinks').textContent = data.success;
-    // Gộp ẩn số liệu + lỗi quét vào một ô BỊ LỖI; chi tiết xem ở tab link lỗi.
-    const combinedErrors = Number(data.error || 0) + Number(data.hidden || 0);
-    document.getElementById('errorLinks').textContent = combinedErrors;
+    const hiddenCount = Number(data.hidden || 0);
+    const errorCount = Number(data.error || 0);
+    document.getElementById('errorLinks').textContent = errorCount;
+    const hiddenBadge = document.getElementById('hiddenCountBadge');
+    const failedBadge = document.getElementById('failedCountBadge');
+    if (hiddenBadge) hiddenBadge.textContent = hiddenCount;
+    if (failedBadge) failedBadge.textContent = errorCount;
     const pct = data.total > 0 ? (data.processed / data.total) * 100 : 0;
     document.getElementById('progressBar').style.width = `${pct}%`;
     const parts = [];
@@ -1213,7 +1375,16 @@ function updateProgress(data) {
 function appendData(row) {
     const tbody = document.getElementById('dataFeed');
     if (tbody.innerText.includes('Chưa có kết quả')) tbody.innerHTML = '';
+    const wrapper = document.querySelector('.live-results-wrap');
+    const isSuccess = row.status === 'Success';
+    const noStats = !isSuccess && isNoStatsStatus(row.status);
+    const resultStatus = isSuccess ? 'success' : (noStats ? 'nostats' : 'error');
+    const visibleInCurrentTab = activeWorkspaceTab === 'live'
+        || (activeWorkspaceTab === 'success' && isSuccess);
+    const preserveScroll = Boolean(wrapper && visibleInCurrentTab && wrapper.scrollTop > 32);
+    const previousScrollHeight = wrapper?.scrollHeight || 0;
     const tr = document.createElement('tr');
+    tr.dataset.resultStatus = resultStatus;
     if (row.videoLink) tr.classList.add('video-link-row');
     if (row.singlePartner) tr.classList.add('single-partner-row');
     const views = formatNumber(row.views);
@@ -1221,47 +1392,172 @@ function appendData(row) {
     const comments = formatNumber(row.comments);
     const saves = formatNumber(row.saves);
     const shares = formatNumber(row.shares);
+    const statusLabel = isSuccess ? 'OK' : (noStats ? 'KHÔNG SỐ LIỆU' : 'LỖI');
+    const statusColor = isSuccess ? '#15803d' : (noStats ? '#b45309' : '#dc2626');
 
     tr.innerHTML = `
-        <td>${row.id}</td>
-        <td>${escapeHtml(row.sheetName || '')}</td>
-        <td title="${escapeHtml(row.channelName || '')}">${escapeHtml(row.channelName || '')}</td>
-        <td class="col-url" title="${escapeHtml(row.url)}"><a href="${escapeHtml(row.url)}" target="_blank" style="color: ${row.videoLink ? '#1d4ed8' : (row.singlePartner ? '#9a3412' : 'inherit')}; text-decoration: none;">${escapeHtml(row.url)}</a></td>
-        <td style="text-align:right; font-weight:bold">${views}</td>
-        <td style="text-align:right; font-weight:bold">${likes}</td>
-        <td style="text-align:right; font-weight:bold">${comments}</td>
-        <td style="text-align:right; font-weight:bold">${saves}</td>
-        <td style="text-align:right; font-weight:bold">${shares}</td>
-        <td><span class="col-status" title="${escapeHtml(row.status || '')}" style="color:${row.status === 'Success' ? '#16a34a' : '#dc2626'}">${row.status === 'Success' ? 'OK' : 'LỖI'}</span></td>
+        <td data-label="ID">${escapeHtml(row.id)}</td>
+        <td data-label="Sheet">${escapeHtml(row.sheetName || '')}</td>
+        <td data-label="Kênh" title="${escapeHtml(row.channelName || '')}">${escapeHtml(row.channelName || '')}</td>
+        <td data-label="Link" class="col-url" title="${escapeHtml(row.url)}"><a href="${escapeHtml(row.url)}" target="_blank" rel="noopener noreferrer" style="color: ${row.videoLink ? '#1d4ed8' : (row.singlePartner ? '#9a3412' : 'inherit')}; text-decoration: none;">${escapeHtml(row.url)}</a></td>
+        <td data-label="Lượt xem" style="text-align:right; font-weight:bold">${escapeHtml(views)}</td>
+        <td data-label="Tim" style="text-align:right; font-weight:bold">${escapeHtml(likes)}</td>
+        <td data-label="Bình luận" style="text-align:right; font-weight:bold">${escapeHtml(comments)}</td>
+        <td data-label="Lượt lưu" style="text-align:right; font-weight:bold">${escapeHtml(saves)}</td>
+        <td data-label="Chia sẻ" style="text-align:right; font-weight:bold">${escapeHtml(shares)}</td>
+        <td data-label="Trạng thái"><span class="col-status" title="${escapeHtml(row.status || '')}" style="color:${statusColor}">${statusLabel}</span></td>
     `;
     tbody.prepend(tr);
-    if (row.status !== 'Success') {
+    if (preserveScroll && wrapper) {
+        wrapper.scrollTop += Math.max(wrapper.scrollHeight - previousScrollHeight, 0);
+        pendingLiveResults += 1;
+        updatePendingLiveResults();
+    }
+    if (!isSuccess) {
         appendFailedLink(row);
     }
 }
 
-function renderFailedLinks() {
-    const tbody = document.getElementById('failedLinksBody');
-    const badge = document.getElementById('failedCountBadge');
-    const note = document.getElementById('failedNote');
-    badge.textContent = failedLinks.length;
+function desktopUpdaterInvoke() {
+    return window.__TAURI__?.core?.invoke || null;
+}
 
-    if (failedLinks.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="5" style="text-align:center; padding:32px; color:#9ca3af">Chưa có link lỗi</td></tr>';
-        if (note) note.textContent = '';
+async function checkDesktopUpdate() {
+    const invoke = desktopUpdaterInvoke();
+    if (!invoke || desktopUpdateCheckInFlight) return;
+    desktopUpdateCheckInFlight = true;
+    try {
+        const version = await invoke('check_for_update');
+        if (!version) return;
+        const installNow = window.confirm(`Riviu Reports ${version} đã sẵn sàng. Cài đặt ngay bây giờ?`);
+        if (!installNow) return;
+        showToast(`Đang cài đặt Riviu Reports ${version}...`, 'info');
+        await invoke('install_update');
+    } catch (error) {
+        console.warn('Desktop updater check failed:', error);
+    } finally {
+        desktopUpdateCheckInFlight = false;
+    }
+}
+
+function scheduleDesktopUpdates() {
+    if (!desktopUpdaterInvoke()) return;
+    void checkDesktopUpdate();
+    window.setInterval(() => void checkDesktopUpdate(), 4 * 60 * 60 * 1000);
+}
+
+function groupDuplicateLocations(locations) {
+    const grouped = new Map();
+    (Array.isArray(locations) ? locations : []).forEach(location => {
+        const sheetName = String(location?.sheetName || 'Không rõ sheet');
+        const row = location?.row;
+        if (!grouped.has(sheetName)) grouped.set(sheetName, []);
+        grouped.get(sheetName).push(row);
+    });
+    return grouped;
+}
+
+function renderDuplicateLinks() {
+    const tbody = document.getElementById('duplicateLinksBody');
+    const badge = document.getElementById('duplicateCountBadge');
+    const note = document.getElementById('duplicateNote');
+    if (!tbody || !badge) return;
+
+    badge.textContent = duplicateLinks.length;
+    if (note) {
+        note.textContent = duplicateRowCount > 0 ? `(${duplicateRowCount} dòng được gộp)` : '';
+    }
+
+    if (duplicateLinks.length === 0) {
+        tbody.innerHTML = '<tr><td colspan="4" class="duplicate-empty">Chưa có link trùng</td></tr>';
         return;
     }
 
-    const noStatsCount = failedLinks.filter(item => isNoStatsStatus(item.status)).length;
-    const realErrorCount = failedLinks.length - noStatsCount;
-    if (note) {
-        const parts = [];
-        if (realErrorCount > 0) parts.push(`${realErrorCount} lỗi quét`);
-        if (noStatsCount > 0) parts.push(`${noStatsCount} không đọc được số liệu`);
-        note.textContent = parts.length ? `(${parts.join(' • ')})` : '';
+    tbody.innerHTML = duplicateLinks.map((item, index) => {
+        const locations = Array.isArray(item.locations) ? item.locations : [];
+        const locationHtml = Array.from(groupDuplicateLocations(locations).entries())
+            .map(([sheetName, rows]) => `
+                <div class="duplicate-location">
+                    <span class="duplicate-sheet">${escapeHtml(sheetName)}</span>
+                    <span>dòng ${rows.map(row => escapeHtml(String(row ?? ''))).join(', ')}</span>
+                </div>
+            `).join('');
+        const occurrenceCount = locations.length;
+        return `
+            <tr>
+                <td data-label="ID">${escapeHtml(String(item.id || index + 1))}</td>
+                <td data-label="Link" class="col-url duplicate-url-cell" title="${escapeHtml(item.url || '')}">
+                    <a href="${escapeHtml(item.url || '')}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.url || '')}</a>
+                </td>
+                <td data-label="Số lần" class="duplicate-occurrence">${occurrenceCount}</td>
+                <td data-label="Sheet / số dòng" class="duplicate-locations">${locationHtml}</td>
+            </tr>
+        `;
+    }).join('');
+}
+
+function setDuplicateLinks(data = {}) {
+    duplicateLinks = Array.isArray(data?.items) ? data.items : [];
+    const fallbackCount = duplicateLinks.reduce((total, item) => {
+        const count = Array.isArray(item.locations) ? item.locations.length : 0;
+        return total + Math.max(count - 1, 0);
+    }, 0);
+    const reportedCount = Number(data?.duplicateRowCount);
+    duplicateRowCount = Number.isFinite(reportedCount) && reportedCount >= 0
+        ? reportedCount
+        : fallbackCount;
+    renderDuplicateLinks();
+}
+
+async function copyDuplicateLinks() {
+    if (duplicateLinks.length === 0) {
+        notify('Không có link trùng để copy.', 'warn');
+        return;
     }
 
-    tbody.innerHTML = failedLinks.map(item => {
+    const text = duplicateLinks.map(item => {
+        const locationText = Array.from(groupDuplicateLocations(item.locations).entries())
+            .map(([sheetName, rows]) => `${sheetName}: dòng ${rows.join(', ')}`)
+            .join(' • ');
+        return `${item.url || ''}\n${locationText}`;
+    }).join('\n\n');
+
+    try {
+        if (navigator.clipboard) {
+            await navigator.clipboard.writeText(text);
+        } else {
+            const textarea = document.createElement('textarea');
+            textarea.value = text;
+            document.body.appendChild(textarea);
+            textarea.select();
+            document.execCommand('copy');
+            textarea.remove();
+        }
+        notify(`Đã copy ${duplicateLinks.length} link trùng kèm số dòng.`, 'success');
+    } catch (error) {
+        notify(`Lỗi copy link: ${error.message}`, 'error');
+    }
+}
+
+function clearDuplicateLinks(showLog = true) {
+    duplicateLinks = [];
+    duplicateRowCount = 0;
+    renderDuplicateLinks();
+    if (showLog) addLog('Đã xóa danh sách link trùng.');
+}
+
+function failedLinksForKind(kind = 'all') {
+    if (kind === 'nostats') return failedLinks.filter(item => isNoStatsStatus(item.status));
+    if (kind === 'errors') return failedLinks.filter(item => !isNoStatsStatus(item.status));
+    return failedLinks;
+}
+
+function renderFailureRows(items, emptyMessage) {
+    if (items.length === 0) {
+        return `<tr><td colspan="5" class="workspace-empty">${escapeHtml(emptyMessage)}</td></tr>`;
+    }
+
+    return items.map(item => {
         const noStats = isNoStatsStatus(item.status);
         const reasonClass = noStats ? 'failed-reason soft-warn' : 'failed-reason';
         const reasonText = noStats
@@ -1270,14 +1566,38 @@ function renderFailedLinks() {
         const tag = noStats ? '<span class="reason-tag">Ẩn số liệu</span>' : '';
         return `
         <tr>
-            <td>${item.id}</td>
-            <td>${escapeHtml(item.sheetName || '')}</td>
-            <td class="col-url" title="${escapeHtml(item.url)}"><a href="${escapeHtml(item.url)}" target="_blank" style="color: inherit; text-decoration: none;">${escapeHtml(item.url)}</a></td>
-            <td class="${reasonClass}" title="${escapeHtml(item.status || '')}">${escapeHtml(reasonText)}${tag}</td>
-            <td>${item.worker ? `Luồng ${item.worker}` : ''}</td>
+            <td data-label="ID">${escapeHtml(item.id)}</td>
+            <td data-label="Sheet">${escapeHtml(item.sheetName || '')}</td>
+            <td data-label="Link" class="col-url" title="${escapeHtml(item.url)}"><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer" style="color: inherit; text-decoration: none;">${escapeHtml(item.url)}</a></td>
+            <td data-label="Lý do" class="${reasonClass}" title="${escapeHtml(item.status || '')}">${escapeHtml(reasonText)}${tag}</td>
+            <td data-label="Luồng">${item.worker ? `Luồng ${escapeHtml(item.worker)}` : ''}</td>
         </tr>
     `;
     }).join('');
+}
+
+function renderFailedLinks() {
+    const errorBody = document.getElementById('failedLinksBody');
+    const noStatsBody = document.getElementById('noStatsLinksBody');
+    const errorBadge = document.getElementById('failedCountBadge');
+    const noStatsBadge = document.getElementById('hiddenCountBadge');
+    const note = document.getElementById('failedNote');
+    const noStatsItems = failedLinksForKind('nostats');
+    const errorItems = failedLinksForKind('errors');
+
+    if (errorBadge) errorBadge.textContent = errorItems.length;
+    if (noStatsBadge) noStatsBadge.textContent = noStatsItems.length;
+    const legacyErrorCount = document.getElementById('errorLinks');
+    if (legacyErrorCount) legacyErrorCount.textContent = errorItems.length;
+    if (errorBody) errorBody.innerHTML = renderFailureRows(errorItems, 'Chưa có link lỗi');
+    if (noStatsBody) noStatsBody.innerHTML = renderFailureRows(noStatsItems, 'Chưa có link không đọc được số liệu');
+
+    if (note) {
+        const parts = [];
+        if (errorItems.length > 0) parts.push(`${errorItems.length} lỗi quét`);
+        if (noStatsItems.length > 0) parts.push(`${noStatsItems.length} không đọc được số liệu`);
+        note.textContent = parts.length ? `(${parts.join(' • ')})` : '';
+    }
 }
 
 function appendFailedLink(row) {
@@ -1291,12 +1611,14 @@ function appendFailedLink(row) {
     renderFailedLinks();
 }
 
-async function copyFailedLinks() {
-    if (failedLinks.length === 0) {
-        notify('Không có link lỗi để copy.', 'warn');
+async function copyFailedLinks(kind = 'all') {
+    const items = failedLinksForKind(kind);
+    const label = kind === 'nostats' ? 'link không số liệu' : (kind === 'errors' ? 'link lỗi' : 'link cần kiểm tra');
+    if (items.length === 0) {
+        notify(`Không có ${label} để copy.`, 'warn');
         return;
     }
-    const text = failedLinks.map(item => item.url).join('\n');
+    const text = items.map(item => item.url).join('\n');
     try {
         if (navigator.clipboard) {
             await navigator.clipboard.writeText(text);
@@ -1308,21 +1630,35 @@ async function copyFailedLinks() {
             document.execCommand('copy');
             textarea.remove();
         }
-        notify(`Đã copy ${failedLinks.length} link lỗi.`, 'success');
+        notify(`Đã copy ${items.length} ${label}.`, 'success');
     } catch (error) {
         notify(`Lỗi copy link: ${error.message}`, 'error');
     }
 }
 
-function clearFailedLinks(showLog = true) {
-    failedLinks = [];
+function clearFailedLinks(showLog = true, kind = 'all') {
+    if (typeof showLog === 'string') {
+        kind = showLog;
+        showLog = true;
+    }
+    if (kind === 'nostats') {
+        failedLinks = failedLinks.filter(item => !isNoStatsStatus(item.status));
+    } else if (kind === 'errors') {
+        failedLinks = failedLinks.filter(item => isNoStatsStatus(item.status));
+    } else {
+        failedLinks = [];
+    }
     renderFailedLinks();
-    if (showLog) addLog('Đã xóa danh sách link lỗi.');
+    if (showLog) {
+        const label = kind === 'nostats' ? 'không số liệu' : (kind === 'errors' ? 'lỗi quét' : 'cần kiểm tra');
+        addLog(`Đã xóa danh sách link ${label}.`);
+    }
 }
 
 async function openReportModal() {
     const modal = document.getElementById('reportModal');
     const list = document.getElementById('partnerList');
+    closeCompactDrawers();
     modal.classList.add('active');
     modal.setAttribute('aria-hidden', 'false');
     document.body.style.overflow = 'hidden';
@@ -1420,6 +1756,7 @@ function closeReportModal() {
 
 async function openHistoryModal() {
     const modal = document.getElementById('historyModal');
+    closeCompactDrawers();
     modal.classList.add('active');
     modal.setAttribute('aria-hidden', 'false');
     document.body.style.overflow = 'hidden';
@@ -1690,17 +2027,26 @@ document.getElementById('historyModal').addEventListener('click', (event) => {
     if (event.target.id === 'historyModal') closeHistoryModal();
 });
 
+document.getElementById('proxyModal').addEventListener('click', (event) => {
+    if (event.target.id === 'proxyModal') closeProxyModal();
+});
+
 document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
     if (document.getElementById('reportModal').classList.contains('active')) {
         closeReportModal();
     } else if (document.getElementById('historyModal').classList.contains('active')) {
         closeHistoryModal();
+    } else if (document.getElementById('proxyModal').classList.contains('active')) {
+        closeProxyModal();
+    } else {
+        closeCompactDrawers();
     }
 });
 
 scanSheetSelect.addEventListener('change', () => {
     currentScanSheetName = scanSheetSelect.value;
+    syncCompactSourceSummary('', currentScanSheetName);
 });
 
 pushSheetSelect.addEventListener('change', () => {
@@ -1716,10 +2062,15 @@ if (proxyUseCheckbox) {
     proxyUseCheckbox.addEventListener('change', syncProxyCardActiveState);
 }
 
+window.addEventListener('resize', syncCompactDrawerState);
+
 window.onload = async () => {
+    syncCompactDrawerState();
+    setWorkspaceTab('sheet');
     await checkServerVersion();
     await updateFileList({ applyGoogleSheetUrl: true });
     await loadPreview();
     await refreshProxyStatus();
     connectWS();
+    scheduleDesktopUpdates();
 };

@@ -60,6 +60,64 @@ def test_build_request_url_candidates_includes_video_rewrite():
     )
 
 
+def test_build_duplicate_link_payload_lists_all_sheet_rows():
+    import scraper
+
+    assert hasattr(scraper, "build_duplicate_link_payload")
+    payload = scraper.build_duplicate_link_payload([
+        {
+            "url": "https://www.tiktok.com/@demo/video/123",
+            "rows": [
+                {"sheet_name": "Data", "row": 2},
+                {"sheet_name": "Data", "row": 7},
+                {"sheet_name": "Data", "row": 15},
+            ],
+        }
+    ])
+
+    assert payload == {
+        "duplicateUrlCount": 1,
+        "duplicateRowCount": 2,
+        "items": [
+            {
+                "id": 1,
+                "url": "https://www.tiktok.com/@demo/video/123",
+                "locations": [
+                    {"sheetName": "Data", "row": 2},
+                    {"sheetName": "Data", "row": 7},
+                    {"sheetName": "Data", "row": 15},
+                ],
+            }
+        ],
+    }
+
+
+def test_build_duplicate_link_payload_ignores_unique_urls_and_preserves_sheets():
+    import scraper
+
+    assert hasattr(scraper, "build_duplicate_link_payload")
+    payload = scraper.build_duplicate_link_payload([
+        {
+            "url": "https://www.tiktok.com/@demo/video/unique",
+            "rows": [{"sheet_name": "Thang 6", "row": 4}],
+        },
+        {
+            "url": "https://www.tiktok.com/@demo/video/duplicate",
+            "rows": [
+                {"sheet_name": "Thang 6", "row": 8},
+                {"sheet_name": "Thang 7", "row": 11},
+            ],
+        },
+    ])
+
+    assert payload["duplicateUrlCount"] == 1
+    assert payload["duplicateRowCount"] == 1
+    assert payload["items"][0]["locations"] == [
+        {"sheetName": "Thang 6", "row": 8},
+        {"sheetName": "Thang 7", "row": 11},
+    ]
+
+
 def test_proxy_request_budget_keeps_photo_r1_candidate(monkeypatch):
     import scraper
 

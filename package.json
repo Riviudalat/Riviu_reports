@@ -1,0 +1,14 @@
+{
+  "name": "riviu-reports-desktop",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "desktop:sidecar": "node desktop/run-sidecar-build.mjs",
+    "desktop:dev": "npm run desktop:sidecar && tauri dev",
+    "desktop:build": "npm run desktop:sidecar && tauri build",
+    "desktop:version": "node desktop/set-version.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.4"
+  }
+}

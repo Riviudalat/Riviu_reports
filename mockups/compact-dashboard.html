@@ -1,0 +1,1095 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Riviu Reports - Compact Workspace</title>
+    <link rel="icon" href="../logo.png">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Material+Icons+Outlined&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --orange: #f45d01;
+            --orange-dark: #c2410c;
+            --orange-soft: #fff4e8;
+            --ink: #18202c;
+            --muted: #687386;
+            --line: #dde3eb;
+            --line-soft: #edf0f4;
+            --surface: #ffffff;
+            --canvas: #f3f5f8;
+            --green: #14804a;
+            --green-soft: #e9f7ef;
+            --amber: #a15c00;
+            --amber-soft: #fff4d6;
+            --red: #c92a2a;
+            --red-soft: #fff0f0;
+            --blue: #2563a9;
+            --blue-soft: #edf5ff;
+        }
+
+        * { box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; }
+        body { font-family: Inter, Arial, sans-serif; color: var(--ink); background: var(--canvas); font-size: 14px; }
+        button, select, input { font: inherit; letter-spacing: 0; }
+        button { cursor: pointer; }
+        .material-icons-outlined { font-size: 19px; line-height: 1; }
+
+        .app-shell {
+            height: 100dvh;
+            display: grid;
+            grid-template-rows: 64px 62px 44px 58px minmax(0, 1fr);
+            overflow: hidden;
+        }
+
+        .topbar {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+            padding: 0 22px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--line);
+            min-width: 0;
+        }
+
+        .brand {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            flex: 0 0 auto;
+        }
+
+        .brand img { width: 36px; height: 36px; object-fit: contain; }
+        .brand-name { font-size: 17px; font-weight: 800; color: #111827; white-space: nowrap; }
+        .brand-name span { color: var(--orange); }
+
+        .source-context {
+            min-width: 0;
+            flex: 1 1 auto;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding-left: 20px;
+            border-left: 1px solid var(--line);
+        }
+
+        .source-icon {
+            width: 34px;
+            height: 34px;
+            border-radius: 7px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: var(--orange-dark);
+            background: var(--orange-soft);
+            flex: 0 0 auto;
+        }
+
+        .source-copy { min-width: 0; }
+        .source-file { font-weight: 700; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .source-meta { margin-top: 2px; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+        .top-actions { display: flex; align-items: center; gap: 7px; flex: 0 0 auto; }
+        .icon-button, .text-button, .primary-button, .danger-button {
+            height: 38px;
+            border-radius: 7px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 7px;
+            border: 1px solid var(--line);
+            background: var(--surface);
+            color: #303a49;
+            font-weight: 650;
+        }
+
+        .icon-button { width: 38px; padding: 0; }
+        .text-button { padding: 0 12px; }
+        .icon-button:hover, .text-button:hover { border-color: #bcc5d1; background: #f8fafc; }
+        .primary-button { padding: 0 16px; border-color: var(--orange); background: var(--orange); color: #fff; }
+        .primary-button:hover { background: #d94f00; border-color: #d94f00; }
+        .danger-button { padding: 0 14px; color: var(--red); border-color: #efc0c0; background: #fff; }
+        .danger-button:hover { background: var(--red-soft); }
+
+        .scanbar {
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            padding: 10px 22px;
+            background: #fafbfc;
+            border-bottom: 1px solid var(--line);
+        }
+
+        .control-field {
+            height: 40px;
+            min-width: 118px;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 0 10px;
+            border: 1px solid var(--line);
+            border-radius: 7px;
+            background: var(--surface);
+        }
+
+        .control-field.sheet-control { min-width: 178px; }
+        .control-field .material-icons-outlined { color: #798596; font-size: 18px; }
+        .control-field label { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; white-space: nowrap; }
+        .control-field select {
+            min-width: 0;
+            max-width: 130px;
+            height: 30px;
+            padding: 0 20px 0 0;
+            border: 0;
+            outline: 0;
+            background: transparent;
+            color: var(--ink);
+            font-weight: 700;
+        }
+
+        .toggle-field { min-width: 126px; justify-content: space-between; }
+        .switch { position: relative; width: 34px; height: 20px; flex: 0 0 auto; }
+        .switch input { position: absolute; opacity: 0; pointer-events: none; }
+        .switch-track { position: absolute; inset: 0; border-radius: 10px; background: #cbd3dd; transition: background 160ms ease; }
+        .switch-track::after { content: ''; position: absolute; width: 14px; height: 14px; left: 3px; top: 3px; border-radius: 50%; background: #fff; box-shadow: 0 1px 3px rgba(20, 27, 38, 0.25); transition: transform 160ms ease; }
+        .switch input:checked + .switch-track { background: var(--orange); }
+        .switch input:checked + .switch-track::after { transform: translateX(14px); }
+        .scan-spacer { flex: 1 1 auto; }
+        .scan-actions { display: flex; gap: 8px; }
+        .mobile-settings { display: none; }
+
+        .status-strip {
+            min-width: 0;
+            display: grid;
+            grid-template-columns: minmax(220px, 1fr) auto;
+            align-items: center;
+            gap: 20px;
+            padding: 7px 22px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--line);
+        }
+
+        .progress-block { min-width: 0; display: flex; align-items: center; gap: 12px; }
+        .progress-copy { white-space: nowrap; font-size: 12px; font-weight: 700; }
+        .progress-copy strong { color: var(--orange-dark); font-size: 13px; }
+        .progress-track { height: 7px; min-width: 80px; flex: 1 1 auto; border-radius: 4px; overflow: hidden; background: #e9edf2; }
+        .progress-fill { width: 53.3%; height: 100%; background: var(--orange); transition: width 280ms ease; }
+        .run-meta { display: flex; align-items: center; gap: 16px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+        .run-meta span { display: inline-flex; align-items: center; gap: 5px; }
+        .live-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 0 4px rgba(20, 128, 74, 0.12); }
+        .live-dot.paused { background: #8993a1; box-shadow: none; }
+
+        .metric-tabs {
+            display: flex;
+            align-items: stretch;
+            gap: 2px;
+            min-width: 0;
+            overflow-x: auto;
+            scrollbar-width: thin;
+            padding: 0 18px;
+            background: var(--surface);
+            border-bottom: 1px solid var(--line);
+        }
+
+        .metric-tab {
+            position: relative;
+            min-width: 138px;
+            height: 57px;
+            padding: 0 12px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            flex: 1 0 auto;
+            border: 0;
+            border-radius: 0;
+            color: #566173;
+            background: transparent;
+            font-weight: 650;
+            white-space: nowrap;
+        }
+
+        .metric-tab::after { content: ''; position: absolute; left: 12px; right: 12px; bottom: 0; height: 3px; border-radius: 2px 2px 0 0; background: transparent; }
+        .metric-tab:hover { color: #222c3a; background: #fafbfc; }
+        .metric-tab.active { color: var(--orange-dark); background: #fffaf5; }
+        .metric-tab.active::after { background: var(--orange); }
+        .metric-tab .material-icons-outlined { font-size: 18px; }
+        .tab-count {
+            min-width: 27px;
+            height: 23px;
+            padding: 0 7px;
+            border-radius: 12px;
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            color: #414c5d;
+            background: #edf0f4;
+            font-size: 12px;
+            font-weight: 800;
+            font-variant-numeric: tabular-nums;
+        }
+
+        .metric-tab[data-tab="success"] .tab-count { color: var(--green); background: var(--green-soft); }
+        .metric-tab[data-tab="nostats"] .tab-count { color: var(--amber); background: var(--amber-soft); }
+        .metric-tab[data-tab="errors"] .tab-count { color: var(--red); background: var(--red-soft); }
+        .metric-tab[data-tab="duplicates"] .tab-count { color: var(--orange-dark); background: var(--orange-soft); }
+
+        .workspace {
+            position: relative;
+            min-width: 0;
+            min-height: 0;
+            display: grid;
+            grid-template-rows: 58px minmax(0, 1fr);
+            margin: 12px 16px 14px;
+            overflow: hidden;
+            border: 1px solid var(--line);
+            border-radius: 8px;
+            background: var(--surface);
+            box-shadow: 0 5px 18px rgba(17, 24, 39, 0.05);
+        }
+
+        .workspace-head {
+            min-width: 0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 16px;
+            padding: 9px 16px;
+            border-bottom: 1px solid var(--line);
+            background: #fafbfc;
+        }
+
+        .view-heading { min-width: 0; }
+        .view-title { margin: 0; font-size: 15px; font-weight: 800; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .view-subtitle { margin-top: 3px; color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+        .view-tools { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+
+        .search-box {
+            width: min(260px, 26vw);
+            height: 36px;
+            display: flex;
+            align-items: center;
+            gap: 7px;
+            padding: 0 10px;
+            border: 1px solid var(--line);
+            border-radius: 7px;
+            background: var(--surface);
+        }
+
+        .search-box .material-icons-outlined { color: #8b95a4; font-size: 18px; }
+        .search-box input { width: 100%; min-width: 0; border: 0; outline: 0; background: transparent; color: var(--ink); }
+        .workspace-content { min-width: 0; min-height: 0; overflow: auto; scroll-behavior: smooth; }
+
+        .data-table { width: 100%; border-collapse: collapse; table-layout: auto; }
+        .data-table th {
+            position: sticky;
+            top: 0;
+            z-index: 2;
+            height: 41px;
+            padding: 0 14px;
+            text-align: left;
+            border-bottom: 1px solid var(--line);
+            background: #f5f7fa;
+            color: #5f6a7b;
+            font-size: 11px;
+            font-weight: 750;
+            text-transform: uppercase;
+            white-space: nowrap;
+        }
+
+        .data-table td {
+            height: 48px;
+            padding: 8px 14px;
+            border-bottom: 1px solid var(--line-soft);
+            color: #344052;
+            white-space: nowrap;
+            max-width: 330px;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            font-size: 13px;
+        }
+
+        .data-table tbody tr:hover { background: #fffaf5; }
+        .data-table td.number, .data-table th.number { text-align: right; font-variant-numeric: tabular-nums; }
+        .data-table td.url-cell { min-width: 250px; color: var(--orange-dark); }
+        .data-table a { color: inherit; text-decoration: none; }
+        .data-table a:hover { text-decoration: underline; }
+        .channel-cell { font-weight: 650; color: #202a37 !important; }
+
+        .status-pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 5px;
+            height: 25px;
+            padding: 0 9px;
+            border-radius: 13px;
+            font-size: 11px;
+            font-weight: 750;
+        }
+
+        .status-pill::before { content: ''; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+        .status-pill.success { color: var(--green); background: var(--green-soft); }
+        .status-pill.nostats { color: var(--amber); background: var(--amber-soft); }
+        .status-pill.error { color: var(--red); background: var(--red-soft); }
+        .location-stack { white-space: normal; line-height: 1.55; }
+        .location-stack strong { color: #202a37; }
+
+        .log-view { min-height: 100%; padding: 12px 16px 20px; background: #131820; color: #d9dee7; font-family: Consolas, 'Courier New', monospace; font-size: 12px; line-height: 1.55; }
+        .log-row { display: grid; grid-template-columns: 72px 72px minmax(0, 1fr); gap: 10px; padding: 7px 0; border-bottom: 1px solid #29313e; }
+        .log-time { color: #8e9aad; }
+        .log-level { font-weight: 700; }
+        .log-level.ok { color: #63d99b; }
+        .log-level.warn { color: #ffc765; }
+        .log-level.error { color: #ff8585; }
+        .log-level.info { color: #79b9ff; }
+        .log-message { min-width: 0; overflow-wrap: anywhere; }
+
+        .empty-state { min-height: 100%; display: grid; place-items: center; padding: 30px; color: var(--muted); text-align: center; }
+        .empty-state .material-icons-outlined { display: block; margin-bottom: 8px; font-size: 30px; color: #a4adba; }
+        .new-results {
+            position: absolute;
+            right: 18px;
+            bottom: 18px;
+            height: 36px;
+            padding: 0 13px;
+            border: 1px solid #fdba74;
+            border-radius: 18px;
+            display: none;
+            align-items: center;
+            gap: 6px;
+            color: var(--orange-dark);
+            background: #fff7ed;
+            box-shadow: 0 8px 20px rgba(124, 45, 18, 0.14);
+            font-weight: 700;
+        }
+        .new-results.visible { display: inline-flex; }
+
+        .drawer-backdrop { position: fixed; inset: 0; z-index: 20; display: none; background: rgba(17, 24, 39, 0.42); }
+        .drawer-backdrop.open { display: block; }
+        .drawer {
+            position: fixed;
+            z-index: 21;
+            top: 0;
+            right: 0;
+            width: min(430px, 100vw);
+            height: 100dvh;
+            display: grid;
+            grid-template-rows: auto minmax(0, 1fr) auto;
+            visibility: hidden;
+            pointer-events: none;
+            transform: translateX(102%);
+            transition: transform 180ms ease, visibility 0s linear 180ms;
+            background: var(--surface);
+            box-shadow: -18px 0 45px rgba(17, 24, 39, 0.16);
+        }
+        .drawer.open { visibility: visible; pointer-events: auto; transform: translateX(0); transition-delay: 0s; }
+        .drawer-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 18px 20px; border-bottom: 1px solid var(--line); }
+        .drawer-title { font-size: 17px; font-weight: 800; }
+        .drawer-body { overflow: auto; padding: 20px; }
+        .drawer-footer { display: flex; justify-content: flex-end; gap: 8px; padding: 14px 20px; border-top: 1px solid var(--line); background: #fafbfc; }
+        .drawer-section { padding: 0 0 20px; margin: 0 0 20px; border-bottom: 1px solid var(--line); }
+        .drawer-section:last-child { margin-bottom: 0; border-bottom: 0; }
+        .drawer-label { display: block; margin-bottom: 8px; color: #4f5a6b; font-size: 12px; font-weight: 750; }
+        .drawer-input { width: 100%; height: 42px; padding: 0 12px; border: 1px solid var(--line); border-radius: 7px; outline: 0; background: #fff; color: var(--ink); }
+        .drawer-input:focus { border-color: var(--orange); box-shadow: 0 0 0 3px rgba(244, 93, 1, 0.12); }
+        .source-modes { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-bottom: 18px; }
+        .source-mode { min-height: 66px; padding: 8px; border: 1px solid var(--line); border-radius: 7px; background: #fff; color: #566173; font-size: 12px; font-weight: 700; }
+        .source-mode .material-icons-outlined { display: block; margin: 0 auto 5px; }
+        .source-mode.active { border-color: var(--orange); color: var(--orange-dark); background: var(--orange-soft); }
+        .drawer-setting-row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+
+        .toast {
+            position: fixed;
+            z-index: 30;
+            left: 50%;
+            bottom: 22px;
+            transform: translate(-50%, 18px);
+            min-width: 260px;
+            max-width: min(460px, calc(100vw - 24px));
+            padding: 11px 14px;
+            border-radius: 7px;
+            border: 1px solid #bbdfcb;
+            color: #0f6a3b;
+            background: #effaf4;
+            box-shadow: 0 10px 30px rgba(17, 24, 39, 0.16);
+            opacity: 0;
+            pointer-events: none;
+            transition: opacity 150ms ease, transform 150ms ease;
+            font-weight: 650;
+            text-align: center;
+        }
+        .toast.show { opacity: 1; transform: translate(-50%, 0); }
+
+        @media (max-width: 1080px) {
+            .app-shell { grid-template-rows: 60px 58px 44px 56px minmax(0, 1fr); }
+            .topbar, .scanbar, .status-strip { padding-left: 14px; padding-right: 14px; }
+            .source-context { padding-left: 12px; }
+            .top-action-label { display: none; }
+            .text-button.top-action { width: 38px; padding: 0; }
+            .control-field { min-width: 106px; }
+            .toggle-field { display: none; }
+            .metric-tabs { padding: 0 10px; }
+            .metric-tab { min-width: 130px; }
+            .workspace { margin: 10px 10px 12px; }
+        }
+
+        @media (max-width: 760px) {
+            .app-shell { grid-template-rows: 58px 56px 48px 52px minmax(0, 1fr); }
+            .brand img { width: 32px; height: 32px; }
+            .brand-name { font-size: 15px; }
+            .source-context { gap: 7px; border-left: 0; padding-left: 0; }
+            .source-icon { display: none; }
+            .source-file { font-size: 12px; }
+            .source-meta { font-size: 11px; }
+            .top-actions { gap: 5px; }
+            .top-actions .history-action, .top-actions .report-action { display: none; }
+            .scanbar { gap: 7px; }
+            .control-field:not(.mobile-core) { display: none; }
+            .control-field.sheet-control { flex: 1 1 auto; min-width: 0; }
+            .control-field.sheet-control label, .control-field.sheet-control .material-icons-outlined { display: none; }
+            .control-field select { width: 100%; max-width: none; }
+            .mobile-settings { display: inline-flex; flex: 0 0 auto; }
+            .scan-spacer { display: none; }
+            .scan-actions { flex: 0 0 auto; }
+            .danger-button { width: 38px; padding: 0; }
+            .danger-button .action-label { display: none; }
+            .primary-button { padding: 0 12px; }
+            .primary-button .action-label { display: none; }
+            .status-strip { grid-template-columns: 1fr; gap: 2px; padding-top: 5px; padding-bottom: 5px; }
+            .progress-block { gap: 8px; }
+            .progress-copy { min-width: 80px; }
+            .run-meta { font-size: 10px; justify-content: flex-end; }
+            .run-meta span:nth-child(2) { display: none; }
+            .metric-tabs { padding: 0 5px; }
+            .metric-tab { min-width: 127px; height: 51px; padding: 0 9px; font-size: 12px; }
+            .workspace { grid-template-rows: 51px minmax(0, 1fr); margin: 8px 8px 10px; }
+            .workspace-head { padding: 7px 10px; }
+            .view-title { font-size: 13px; }
+            .view-subtitle { font-size: 10px; }
+            .search-box { width: 38px; padding: 0 9px; }
+            .search-box input { display: none; }
+            .view-tools .export-action { display: none; }
+            .data-table, .data-table tbody { display: block; width: 100%; }
+            .data-table thead { display: none; }
+            .data-table tbody tr { display: block; padding: 11px 12px; border-bottom: 1px solid var(--line); }
+            .data-table td {
+                min-height: 24px;
+                height: auto;
+                max-width: none;
+                padding: 3px 0;
+                border: 0;
+                display: grid;
+                grid-template-columns: 78px minmax(0, 1fr);
+                gap: 8px;
+                align-items: baseline;
+                white-space: normal;
+                overflow: visible;
+                overflow-wrap: anywhere;
+            }
+            .data-table td::before { content: attr(data-label); color: #778294; font-size: 10px; font-weight: 750; text-transform: uppercase; }
+            .data-table td[data-mobile-hide="true"] { display: none; }
+            .data-table td.number { text-align: left; }
+            .data-table td.url-cell { min-width: 0; }
+            .data-table td.location-stack > div { grid-column: 2; }
+            .log-view { padding: 8px 11px 16px; }
+            .log-row { grid-template-columns: 54px 54px minmax(0, 1fr); gap: 6px; font-size: 10px; }
+            .drawer-setting-row { grid-template-columns: 1fr; }
+            .new-results { right: 12px; bottom: 12px; }
+        }
+    </style>
+</head>
+<body>
+    <div class="app-shell">
+        <header class="topbar">
+            <div class="brand">
+                <img src="../logo.png" alt="Riviu">
+                <div class="brand-name">Riviu <span>Reports</span></div>
+            </div>
+
+            <div class="source-context">
+                <span class="source-icon material-icons-outlined">table_view</span>
+                <div class="source-copy">
+                    <div class="source-file" id="sourceFileLabel">Report Seeding Tiktok 2026.xlsx</div>
+                    <div class="source-meta"><span id="sourceSheetLabel">Tháng 7</span> · cập nhật 14:32 hôm nay</div>
+                </div>
+            </div>
+
+            <div class="top-actions">
+                <button class="text-button top-action" id="sourceButton" title="Đổi nguồn dữ liệu" aria-label="Đổi nguồn dữ liệu">
+                    <span class="material-icons-outlined">swap_horiz</span>
+                    <span class="top-action-label">Đổi nguồn</span>
+                </button>
+                <button class="text-button top-action history-action" data-toast="Đã mở lịch sử quét" title="Lịch sử quét">
+                    <span class="material-icons-outlined">history</span>
+                    <span class="top-action-label">Lịch sử</span>
+                </button>
+                <button class="text-button top-action report-action" data-toast="Đã mở báo cáo đối tác" title="Báo cáo đối tác">
+                    <span class="material-icons-outlined">summarize</span>
+                    <span class="top-action-label">Báo cáo</span>
+                </button>
+            </div>
+        </header>
+
+        <section class="scanbar" aria-label="Cấu hình quét">
+            <div class="control-field">
+                <span class="material-icons-outlined">bolt</span>
+                <label for="workerSelect">Luồng</label>
+                <select id="workerSelect">
+                    <option>5</option>
+                    <option selected>10</option>
+                    <option>20</option>
+                    <option>30</option>
+                </select>
+            </div>
+            <div class="control-field">
+                <span class="material-icons-outlined">tune</span>
+                <label for="modeSelect">Chế độ</label>
+                <select id="modeSelect">
+                    <option selected>Request</option>
+                    <option>Hybrid</option>
+                    <option>Trình duyệt</option>
+                </select>
+            </div>
+            <div class="control-field toggle-field">
+                <span class="material-icons-outlined">vpn_key</span>
+                <label for="proxyToggle">Proxy</label>
+                <label class="switch" title="Bật hoặc tắt proxy">
+                    <input id="proxyToggle" type="checkbox" checked>
+                    <span class="switch-track"></span>
+                </label>
+            </div>
+            <div class="control-field sheet-control mobile-core">
+                <span class="material-icons-outlined">grid_on</span>
+                <label for="sheetSelect">Sheet</label>
+                <select id="sheetSelect">
+                    <option>Tháng 6</option>
+                    <option selected>Tháng 7</option>
+                    <option>Tháng 8</option>
+                </select>
+            </div>
+
+            <button class="icon-button mobile-settings" id="settingsButton" title="Cấu hình quét" aria-label="Cấu hình quét">
+                <span class="material-icons-outlined">settings</span>
+            </button>
+            <div class="scan-spacer"></div>
+            <div class="scan-actions">
+                <button class="danger-button" id="resetButton" title="Dừng và đặt lại phiên" aria-label="Dừng và đặt lại phiên">
+                    <span class="material-icons-outlined">restart_alt</span>
+                    <span class="action-label">Đặt lại</span>
+                </button>
+                <button class="primary-button" id="runButton" aria-label="Tạm dừng phiên quét">
+                    <span class="material-icons-outlined" id="runButtonIcon">pause</span>
+                    <span class="action-label" id="runButtonLabel">Tạm dừng</span>
+                </button>
+            </div>
+        </section>
+
+        <section class="status-strip" aria-label="Tiến độ phiên quét">
+            <div class="progress-block">
+                <div class="progress-copy"><strong id="progressNumbers">128/240</strong> · <span id="progressPercent">53%</span></div>
+                <div class="progress-track" aria-hidden="true"><div class="progress-fill" id="progressFill"></div></div>
+            </div>
+            <div class="run-meta">
+                <span><i class="live-dot" id="liveDot"></i><b id="runState">Đang quét</b></span>
+                <span><span class="material-icons-outlined">speed</span><b id="scanSpeed">14</b> link/phút</span>
+                <span><span class="material-icons-outlined">schedule</span>còn khoảng <b id="scanEta">8 phút</b></span>
+            </div>
+        </section>
+
+        <nav class="metric-tabs" role="tablist" aria-label="Các vùng dữ liệu">
+            <button class="metric-tab" role="tab" aria-selected="false" data-tab="sheet">
+                <span class="material-icons-outlined">table_rows</span><span>Dữ liệu sheet</span><span class="tab-count" id="countSheet">240</span>
+            </button>
+            <button class="metric-tab active" role="tab" aria-selected="true" data-tab="live">
+                <span class="material-icons-outlined">sensors</span><span>Live</span><span class="tab-count" id="countLive">128</span>
+            </button>
+            <button class="metric-tab" role="tab" aria-selected="false" data-tab="success">
+                <span class="material-icons-outlined">check_circle</span><span>Thành công</span><span class="tab-count" id="countSuccess">119</span>
+            </button>
+            <button class="metric-tab" role="tab" aria-selected="false" data-tab="nostats">
+                <span class="material-icons-outlined">visibility_off</span><span>Không số liệu</span><span class="tab-count" id="countNoStats">6</span>
+            </button>
+            <button class="metric-tab" role="tab" aria-selected="false" data-tab="errors">
+                <span class="material-icons-outlined">error_outline</span><span>Lỗi quét</span><span class="tab-count" id="countErrors">3</span>
+            </button>
+            <button class="metric-tab" role="tab" aria-selected="false" data-tab="duplicates">
+                <span class="material-icons-outlined">content_copy</span><span>Link trùng</span><span class="tab-count" id="countDuplicates">2</span>
+            </button>
+            <button class="metric-tab" role="tab" aria-selected="false" data-tab="logs">
+                <span class="material-icons-outlined">terminal</span><span>Nhật ký</span><span class="tab-count" id="countLogs">12</span>
+            </button>
+        </nav>
+
+        <main class="workspace">
+            <div class="workspace-head">
+                <div class="view-heading">
+                    <h2 class="view-title" id="viewTitle">Kết quả đang quét</h2>
+                    <div class="view-subtitle" id="viewSubtitle">Kết quả mới nhất nằm trên cùng</div>
+                </div>
+                <div class="view-tools">
+                    <label class="search-box" title="Tìm trong bảng hiện tại">
+                        <span class="material-icons-outlined">search</span>
+                        <input id="searchInput" type="search" placeholder="Tìm link hoặc kênh">
+                    </label>
+                    <button class="icon-button export-action" data-toast="Đã chuẩn bị dữ liệu xuất" title="Xuất dữ liệu đang xem" aria-label="Xuất dữ liệu đang xem">
+                        <span class="material-icons-outlined">download</span>
+                    </button>
+                </div>
+            </div>
+            <div class="workspace-content" id="workspaceContent"></div>
+            <button class="new-results" id="newResultsButton"><span class="material-icons-outlined">north</span><span id="newResultsLabel">Có 1 kết quả mới</span></button>
+        </main>
+    </div>
+
+    <div class="drawer-backdrop" id="drawerBackdrop"></div>
+    <aside class="drawer" id="drawer" aria-hidden="true">
+        <div class="drawer-head">
+            <div class="drawer-title" id="drawerTitle">Nguồn dữ liệu</div>
+            <button class="icon-button" id="drawerClose" title="Đóng" aria-label="Đóng"><span class="material-icons-outlined">close</span></button>
+        </div>
+        <div class="drawer-body" id="drawerBody"></div>
+        <div class="drawer-footer">
+            <button class="text-button" id="drawerCancel">Hủy</button>
+            <button class="primary-button" id="drawerApply"><span class="material-icons-outlined">check</span>Áp dụng</button>
+        </div>
+    </aside>
+
+    <div class="toast" id="toast" role="status"></div>
+
+    <script>
+        const state = {
+            activeTab: 'live',
+            total: 240,
+            processed: 128,
+            success: 119,
+            noStats: 6,
+            errors: 3,
+            duplicateCount: 2,
+            running: true,
+            pendingNew: 0,
+            search: '',
+            drawerMode: 'source'
+        };
+
+        const channels = ['Quỳnh Đà Lạt', 'Ăn Gì Hôm Nay', 'Dalat Review', 'Lành Đi Đây', 'Mây Lang Thang', 'Chuyện Của Đà Lạt'];
+        const partners = ['Vườn Nướng', 'Mê Lá', 'Nhà Tôm', 'Hanna Land', 'Tiệm Chaiko'];
+        const liveRows = [
+            { id: 128, sheet: 'Tháng 7', row: 286, channel: 'Quỳnh Đà Lạt', url: 'https://www.tiktok.com/@quynh.dalat/photo/7657817433285135636', views: 12840, likes: 906, status: 'success' },
+            { id: 127, sheet: 'Tháng 7', row: 285, channel: 'Ăn Gì Hôm Nay', url: 'https://www.tiktok.com/@angi/video/7657000000000000127', views: 9402, likes: 552, status: 'success' },
+            { id: 126, sheet: 'Tháng 7', row: 284, channel: 'Dalat Review', url: 'https://www.tiktok.com/@dalatreview/photo/7657000000000000126', views: 0, likes: 0, status: 'nostats' },
+            { id: 125, sheet: 'Tháng 7', row: 283, channel: 'Lành Đi Đây', url: 'https://www.tiktok.com/@lanhdiday/video/7657000000000000125', views: 23601, likes: 1940, status: 'success' },
+            { id: 124, sheet: 'Tháng 7', row: 282, channel: 'Mây Lang Thang', url: 'https://www.tiktok.com/@maylangthang/video/7657000000000000124', views: 0, likes: 0, status: 'error' },
+            { id: 123, sheet: 'Tháng 7', row: 281, channel: 'Chuyện Của Đà Lạt', url: 'https://www.tiktok.com/@chuyencuadalat/photo/7657000000000000123', views: 5877, likes: 347, status: 'success' },
+            { id: 122, sheet: 'Tháng 7', row: 280, channel: 'Quỳnh Đà Lạt', url: 'https://www.tiktok.com/@quynh.dalat/video/7657000000000000122', views: 18032, likes: 1210, status: 'success' },
+            { id: 121, sheet: 'Tháng 7', row: 279, channel: 'Ăn Gì Hôm Nay', url: 'https://www.tiktok.com/@angi/photo/7657000000000000121', views: 7310, likes: 488, status: 'success' }
+        ];
+
+        const sheetRows = Array.from({ length: 16 }, (_, index) => ({
+            id: index + 1,
+            row: index + 2,
+            date: `${String((index % 28) + 1).padStart(2, '0')}/07/2026`,
+            channel: channels[index % channels.length],
+            url: `https://www.tiktok.com/@riviu.demo/${index % 3 === 0 ? 'photo' : 'video'}/7657000000000000${String(index + 10).padStart(2, '0')}`,
+            views: 3600 + index * 821,
+            likes: 210 + index * 37,
+            partner: partners[index % partners.length]
+        }));
+
+        const duplicateRows = [
+            { id: 1, url: 'https://www.tiktok.com/@quynh.dalat/photo/7657817433285135636', count: 3, locations: [{ sheet: 'Tháng 7', rows: '42, 86' }, { sheet: 'Tháng 8', rows: '15' }] },
+            { id: 2, url: 'https://www.tiktok.com/@dalatreview/video/7657000000000000198', count: 2, locations: [{ sheet: 'Tháng 7', rows: '118, 206' }] }
+        ];
+
+        const logs = [
+            { time: '14:32:18', level: 'ok', label: 'OK', message: '[128/240] Đã đọc số liệu · Quỳnh Đà Lạt · 12.840 lượt xem' },
+            { time: '14:32:16', level: 'ok', label: 'OK', message: '[127/240] Đã đọc số liệu · Ăn Gì Hôm Nay · 9.402 lượt xem' },
+            { time: '14:32:14', level: 'warn', label: 'CHÚ Ý', message: '[126/240] TikTok không trả số liệu công khai · dòng 284' },
+            { time: '14:32:12', level: 'info', label: 'LIVE', message: 'Đang chạy 10 luồng Request · 14 link/phút' },
+            { time: '14:32:09', level: 'error', label: 'LỖI', message: '[124/240] Trang không khả dụng sau 3 lần thử · dòng 282' },
+            { time: '14:32:06', level: 'ok', label: 'OK', message: '[123/240] Đã đọc số liệu · Chuyện Của Đà Lạt · 5.877 lượt xem' },
+            { time: '14:31:58', level: 'info', label: 'LƯU', message: 'Đã lưu kết quả tạm thời vào workbook' },
+            { time: '14:31:52', level: 'ok', label: 'OK', message: '[120/240] Đã đọc số liệu · 18.032 lượt xem' },
+            { time: '14:31:45', level: 'info', label: 'LIVE', message: 'Tiến độ ổn định · còn khoảng 8 phút' },
+            { time: '14:31:40', level: 'ok', label: 'OK', message: '[118/240] Đã đọc số liệu · 7.310 lượt xem' },
+            { time: '14:31:32', level: 'warn', label: 'CHÚ Ý', message: 'Phát hiện 2 URL trùng · đã gộp 3 lượt quét' },
+            { time: '14:31:20', level: 'info', label: 'BẮT ĐẦU', message: 'Sheet Tháng 7 · 240 dòng · Request · 10 luồng' }
+        ];
+
+        const viewMeta = {
+            sheet: ['Dữ liệu sheet hiện tại', '240 dòng trong sheet Tháng 7'],
+            live: ['Kết quả đang quét', 'Kết quả mới nhất nằm trên cùng'],
+            success: ['Đọc số liệu thành công', 'Chỉ hiển thị link có số liệu hợp lệ'],
+            nostats: ['Không đọc được số liệu', 'Link hoạt động nhưng TikTok không trả số liệu công khai'],
+            errors: ['Lỗi quét cần kiểm tra', 'Link không khả dụng hoặc hết số lần thử'],
+            duplicates: ['Link bị trùng', 'Mỗi URL kèm đầy đủ sheet và số dòng'],
+            logs: ['Nhật ký phiên quét', 'Sự kiện mới nhất nằm trên cùng']
+        };
+
+        const statusLabel = {
+            success: '<span class="status-pill success">Đã đọc</span>',
+            nostats: '<span class="status-pill nostats">Không số liệu</span>',
+            error: '<span class="status-pill error">Lỗi quét</span>'
+        };
+
+        function escapeHtml(value) {
+            return String(value ?? '')
+                .replaceAll('&', '&amp;')
+                .replaceAll('<', '&lt;')
+                .replaceAll('>', '&gt;')
+                .replaceAll('"', '&quot;')
+                .replaceAll("'", '&#039;');
+        }
+
+        function formatNumber(value) {
+            return Number(value || 0).toLocaleString('vi-VN');
+        }
+
+        function matchesSearch(row) {
+            if (!state.search) return true;
+            return JSON.stringify(row).toLocaleLowerCase('vi').includes(state.search);
+        }
+
+        function resultTable(rows) {
+            if (!rows.length) {
+                return '<div class="empty-state"><div><span class="material-icons-outlined">inbox</span>Không có dữ liệu phù hợp</div></div>';
+            }
+            return `
+                <table class="data-table">
+                    <thead><tr><th>ID</th><th>Sheet / dòng</th><th>Kênh</th><th>Link TikTok</th><th class="number">Lượt xem</th><th class="number">Tim</th><th>Trạng thái</th></tr></thead>
+                    <tbody>${rows.map(row => `
+                        <tr>
+                            <td data-label="ID" data-mobile-hide="true">${escapeHtml(row.id)}</td>
+                            <td data-label="Vị trí">${escapeHtml(row.sheet)} · dòng ${escapeHtml(row.row)}</td>
+                            <td data-label="Kênh" class="channel-cell">${escapeHtml(row.channel)}</td>
+                            <td data-label="Link" class="url-cell"><a href="${escapeHtml(row.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(row.url)}</a></td>
+                            <td data-label="Lượt xem" class="number">${formatNumber(row.views)}</td>
+                            <td data-label="Tim" class="number" data-mobile-hide="true">${formatNumber(row.likes)}</td>
+                            <td data-label="Trạng thái">${statusLabel[row.status]}</td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table>`;
+        }
+
+        function sheetTable() {
+            const rows = sheetRows.filter(matchesSearch);
+            return `
+                <table class="data-table">
+                    <thead><tr><th>STT</th><th>Dòng</th><th>Ngày</th><th>Kênh</th><th>Link TikTok</th><th class="number">Lượt xem</th><th class="number">Tim</th><th>Đối tác</th></tr></thead>
+                    <tbody>${rows.map(row => `
+                        <tr>
+                            <td data-label="STT" data-mobile-hide="true">${row.id}</td>
+                            <td data-label="Dòng">${row.row}</td>
+                            <td data-label="Ngày">${row.date}</td>
+                            <td data-label="Kênh" class="channel-cell">${escapeHtml(row.channel)}</td>
+                            <td data-label="Link" class="url-cell"><a href="${escapeHtml(row.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(row.url)}</a></td>
+                            <td data-label="Lượt xem" class="number">${formatNumber(row.views)}</td>
+                            <td data-label="Tim" class="number" data-mobile-hide="true">${formatNumber(row.likes)}</td>
+                            <td data-label="Đối tác">${escapeHtml(row.partner)}</td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table>`;
+        }
+
+        function duplicateTable() {
+            const rows = duplicateRows.filter(matchesSearch);
+            return `
+                <table class="data-table">
+                    <thead><tr><th>ID</th><th>Link bị trùng</th><th class="number">Số lần</th><th>Sheet / số dòng</th></tr></thead>
+                    <tbody>${rows.map(item => `
+                        <tr>
+                            <td data-label="ID" data-mobile-hide="true">${item.id}</td>
+                            <td data-label="Link" class="url-cell"><a href="${escapeHtml(item.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(item.url)}</a></td>
+                            <td data-label="Số lần" class="number">${item.count}</td>
+                            <td data-label="Vị trí" class="location-stack">${item.locations.map(location => `<div><strong>${escapeHtml(location.sheet)}:</strong> dòng ${escapeHtml(location.rows)}</div>`).join('')}</td>
+                        </tr>`).join('')}
+                    </tbody>
+                </table>`;
+        }
+
+        function logView() {
+            const rows = logs.filter(matchesSearch);
+            return `<div class="log-view">${rows.map(item => `
+                <div class="log-row">
+                    <span class="log-time">${escapeHtml(item.time)}</span>
+                    <span class="log-level ${escapeHtml(item.level)}">${escapeHtml(item.label)}</span>
+                    <span class="log-message">${escapeHtml(item.message)}</span>
+                </div>`).join('')}</div>`;
+        }
+
+        function renderActiveView({ preserveScroll = false } = {}) {
+            const content = document.getElementById('workspaceContent');
+            const previousScroll = content.scrollTop;
+            const [title, subtitle] = viewMeta[state.activeTab];
+            document.getElementById('viewTitle').textContent = title;
+            document.getElementById('viewSubtitle').textContent = subtitle;
+
+            if (state.activeTab === 'sheet') content.innerHTML = sheetTable();
+            else if (state.activeTab === 'duplicates') content.innerHTML = duplicateTable();
+            else if (state.activeTab === 'logs') content.innerHTML = logView();
+            else {
+                let rows = liveRows.filter(matchesSearch);
+                if (state.activeTab === 'success') rows = rows.filter(row => row.status === 'success');
+                if (state.activeTab === 'nostats') rows = rows.filter(row => row.status === 'nostats');
+                if (state.activeTab === 'errors') rows = rows.filter(row => row.status === 'error');
+                content.innerHTML = resultTable(rows);
+            }
+
+            if (preserveScroll) content.scrollTop = previousScroll;
+            updateNewResultsButton();
+        }
+
+        function syncSummary() {
+            document.getElementById('countSheet').textContent = state.total;
+            document.getElementById('countLive').textContent = state.processed;
+            document.getElementById('countSuccess').textContent = state.success;
+            document.getElementById('countNoStats').textContent = state.noStats;
+            document.getElementById('countErrors').textContent = state.errors;
+            document.getElementById('countDuplicates').textContent = state.duplicateCount;
+            document.getElementById('countLogs').textContent = logs.length;
+            document.getElementById('progressNumbers').textContent = `${state.processed}/${state.total}`;
+            const percent = Math.min(100, Math.round((state.processed / state.total) * 100));
+            document.getElementById('progressPercent').textContent = `${percent}%`;
+            document.getElementById('progressFill').style.width = `${percent}%`;
+            const eta = Math.max(0, Math.ceil((state.total - state.processed) / 14));
+            document.getElementById('scanEta').textContent = eta ? `${eta} phút` : 'hoàn tất';
+        }
+
+        function syncRunState() {
+            const icon = document.getElementById('runButtonIcon');
+            const label = document.getElementById('runButtonLabel');
+            const dot = document.getElementById('liveDot');
+            const runState = document.getElementById('runState');
+            icon.textContent = state.running ? 'pause' : 'play_arrow';
+            label.textContent = state.running ? 'Tạm dừng' : 'Tiếp tục';
+            document.getElementById('runButton').setAttribute('aria-label', state.running ? 'Tạm dừng phiên quét' : 'Tiếp tục phiên quét');
+            runState.textContent = state.running ? 'Đang quét' : 'Đã tạm dừng';
+            dot.classList.toggle('paused', !state.running);
+        }
+
+        function updateNewResultsButton() {
+            const button = document.getElementById('newResultsButton');
+            const visible = state.pendingNew > 0 && ['live', 'success', 'nostats', 'errors'].includes(state.activeTab);
+            button.classList.toggle('visible', visible);
+            document.getElementById('newResultsLabel').textContent = `Có ${state.pendingNew} kết quả mới`;
+        }
+
+        function switchTab(tab) {
+            state.activeTab = tab;
+            state.pendingNew = 0;
+            document.querySelectorAll('.metric-tab').forEach(button => {
+                const active = button.dataset.tab === tab;
+                button.classList.toggle('active', active);
+                button.setAttribute('aria-selected', String(active));
+            });
+            renderActiveView();
+            document.getElementById('workspaceContent').scrollTop = 0;
+        }
+
+        function timeNow() {
+            return new Date().toLocaleTimeString('vi-VN', { hour12: false });
+        }
+
+        function simulateResult() {
+            if (!state.running || state.processed >= state.total) return;
+            state.processed += 1;
+            const id = state.processed;
+            let status = 'success';
+            if (id % 17 === 0) status = 'nostats';
+            if (id % 41 === 0) status = 'error';
+            if (status === 'success') state.success += 1;
+            if (status === 'nostats') state.noStats += 1;
+            if (status === 'error') state.errors += 1;
+
+            const channel = channels[id % channels.length];
+            const row = {
+                id,
+                sheet: document.getElementById('sheetSelect').value,
+                row: id + 158,
+                channel,
+                url: `https://www.tiktok.com/@riviu.live/${id % 3 === 0 ? 'photo' : 'video'}/7657000000000000${id}`,
+                views: status === 'success' ? 4200 + id * 83 : 0,
+                likes: status === 'success' ? 190 + id * 4 : 0,
+                status
+            };
+            liveRows.unshift(row);
+            if (liveRows.length > 60) liveRows.pop();
+
+            const label = status === 'success' ? 'OK' : status === 'nostats' ? 'CHÚ Ý' : 'LỖI';
+            const level = status === 'success' ? 'ok' : status === 'nostats' ? 'warn' : 'error';
+            logs.unshift({ time: timeNow(), level, label, message: `[${id}/${state.total}] ${status === 'success' ? `Đã đọc số liệu · ${channel} · ${formatNumber(row.views)} lượt xem` : status === 'nostats' ? 'TikTok không trả số liệu công khai' : 'Link không khả dụng sau 3 lần thử'}` });
+            if (logs.length > 80) logs.pop();
+
+            const content = document.getElementById('workspaceContent');
+            const relevant = state.activeTab === 'live' || state.activeTab === status || (state.activeTab === 'nostats' && status === 'nostats') || (state.activeTab === 'errors' && status === 'error');
+            if (relevant && content.scrollTop < 8) renderActiveView();
+            else if (['live', 'success', 'nostats', 'errors'].includes(state.activeTab)) {
+                state.pendingNew += 1;
+                updateNewResultsButton();
+            } else if (state.activeTab === 'logs') {
+                renderActiveView({ preserveScroll: true });
+            }
+
+            syncSummary();
+            if (state.processed >= state.total) {
+                state.running = false;
+                syncRunState();
+                showToast('Phiên quét mô phỏng đã hoàn tất');
+            }
+        }
+
+        function sourceDrawerHtml() {
+            return `
+                <div class="source-modes">
+                    <button class="source-mode active"><span class="material-icons-outlined">link</span>Google Sheet</button>
+                    <button class="source-mode"><span class="material-icons-outlined">folder_open</span>File có sẵn</button>
+                    <button class="source-mode"><span class="material-icons-outlined">upload_file</span>Tải Excel</button>
+                </div>
+                <div class="drawer-section">
+                    <label class="drawer-label" for="sourceUrl">Link Google Sheet</label>
+                    <input class="drawer-input" id="sourceUrl" value="https://docs.google.com/spreadsheets/d/report-demo/edit">
+                </div>
+                <div class="drawer-setting-row">
+                    <div>
+                        <label class="drawer-label" for="drawerFile">File hiện tại</label>
+                        <select class="drawer-input" id="drawerFile">
+                            <option selected>Report Seeding Tiktok 2026.xlsx</option>
+                            <option>Report Tháng 8.xlsx</option>
+                            <option>Riviu Tổng hợp.xlsx</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="drawer-label" for="drawerSheet">Sheet</label>
+                        <select class="drawer-input" id="drawerSheet">
+                            <option>Tháng 6</option>
+                            <option selected>Tháng 7</option>
+                            <option>Tháng 8</option>
+                        </select>
+                    </div>
+                </div>`;
+        }
+
+        function settingsDrawerHtml() {
+            return `
+                <div class="drawer-section">
+                    <div class="drawer-setting-row">
+                        <div>
+                            <label class="drawer-label" for="mobileWorkers">Số luồng</label>
+                            <select class="drawer-input" id="mobileWorkers"><option>5</option><option selected>10</option><option>20</option><option>30</option></select>
+                        </div>
+                        <div>
+                            <label class="drawer-label" for="mobileMode">Chế độ quét</label>
+                            <select class="drawer-input" id="mobileMode"><option selected>Request</option><option>Hybrid</option><option>Trình duyệt</option></select>
+                        </div>
+                    </div>
+                </div>
+                <div class="drawer-section">
+                    <label class="drawer-label" for="mobileProxy">Proxy</label>
+                    <select class="drawer-input" id="mobileProxy"><option selected>Bật proxy xoay</option><option>Tắt proxy</option></select>
+                </div>
+                <div class="drawer-section">
+                    <label class="drawer-label" for="mobileSheet">Sheet quét</label>
+                    <select class="drawer-input" id="mobileSheet"><option>Tháng 6</option><option selected>Tháng 7</option><option>Tháng 8</option></select>
+                </div>`;
+        }
+
+        function openDrawer(mode) {
+            state.drawerMode = mode;
+            document.getElementById('drawerTitle').textContent = mode === 'source' ? 'Nguồn dữ liệu' : 'Cấu hình quét';
+            document.getElementById('drawerBody').innerHTML = mode === 'source' ? sourceDrawerHtml() : settingsDrawerHtml();
+            document.getElementById('drawer').classList.add('open');
+            document.getElementById('drawer').setAttribute('aria-hidden', 'false');
+            document.getElementById('drawerBackdrop').classList.add('open');
+        }
+
+        function closeDrawer() {
+            document.getElementById('drawer').classList.remove('open');
+            document.getElementById('drawer').setAttribute('aria-hidden', 'true');
+            document.getElementById('drawerBackdrop').classList.remove('open');
+        }
+
+        let toastTimer;
+        function showToast(message) {
+            const toast = document.getElementById('toast');
+            toast.textContent = message;
+            toast.classList.add('show');
+            clearTimeout(toastTimer);
+            toastTimer = setTimeout(() => toast.classList.remove('show'), 1800);
+        }
+
+        document.querySelectorAll('.metric-tab').forEach(button => button.addEventListener('click', () => switchTab(button.dataset.tab)));
+        document.querySelectorAll('[data-toast]').forEach(button => button.addEventListener('click', () => showToast(button.dataset.toast)));
+        document.getElementById('sourceButton').addEventListener('click', () => openDrawer('source'));
+        document.getElementById('settingsButton').addEventListener('click', () => openDrawer('settings'));
+        document.getElementById('drawerClose').addEventListener('click', closeDrawer);
+        document.getElementById('drawerCancel').addEventListener('click', closeDrawer);
+        document.getElementById('drawerBackdrop').addEventListener('click', closeDrawer);
+        document.getElementById('drawerApply').addEventListener('click', () => {
+            if (state.drawerMode === 'source') {
+                const file = document.getElementById('drawerFile')?.value;
+                const sheet = document.getElementById('drawerSheet')?.value;
+                if (file) document.getElementById('sourceFileLabel').textContent = file;
+                if (sheet) {
+                    document.getElementById('sourceSheetLabel').textContent = sheet;
+                    document.getElementById('sheetSelect').value = sheet;
+                }
+                showToast('Đã đổi nguồn dữ liệu');
+            } else {
+                const workers = document.getElementById('mobileWorkers')?.value;
+                const mode = document.getElementById('mobileMode')?.value;
+                const sheet = document.getElementById('mobileSheet')?.value;
+                if (workers) document.getElementById('workerSelect').value = workers;
+                if (mode) document.getElementById('modeSelect').value = mode;
+                if (sheet) document.getElementById('sheetSelect').value = sheet;
+                showToast('Đã cập nhật cấu hình quét');
+            }
+            closeDrawer();
+        });
+
+        document.getElementById('runButton').addEventListener('click', () => {
+            if (state.processed >= state.total) return;
+            state.running = !state.running;
+            syncRunState();
+            showToast(state.running ? 'Đã tiếp tục phiên quét' : 'Đã tạm dừng phiên quét');
+        });
+
+        document.getElementById('resetButton').addEventListener('click', () => {
+            state.processed = 0;
+            state.success = 0;
+            state.noStats = 0;
+            state.errors = 0;
+            state.pendingNew = 0;
+            state.running = false;
+            liveRows.length = 0;
+            logs.unshift({ time: timeNow(), level: 'info', label: 'ĐẶT LẠI', message: 'Phiên mô phỏng đã được đặt lại' });
+            syncSummary();
+            syncRunState();
+            renderActiveView();
+            showToast('Đã đặt lại phiên quét');
+        });
+
+        document.getElementById('sheetSelect').addEventListener('change', event => {
+            document.getElementById('sourceSheetLabel').textContent = event.target.value;
+            viewMeta.sheet[1] = `${state.total} dòng trong sheet ${event.target.value}`;
+            renderActiveView();
+        });
+
+        document.getElementById('searchInput').addEventListener('input', event => {
+            state.search = event.target.value.trim().toLocaleLowerCase('vi');
+            renderActiveView();
+        });
+
+        document.getElementById('newResultsButton').addEventListener('click', () => {
+            state.pendingNew = 0;
+            renderActiveView();
+            document.getElementById('workspaceContent').scrollTop = 0;
+        });
+
+        syncSummary();
+        syncRunState();
+        renderActiveView();
+        setInterval(simulateResult, 1800);
+    </script>
+</body>
+</html>
