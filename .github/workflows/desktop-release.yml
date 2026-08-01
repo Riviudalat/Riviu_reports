@@ -98,11 +98,14 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Import Apple signing certificate
-        if: runner.os == 'macOS' && secrets.APPLE_CERTIFICATE != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
         uses: apple-actions/import-codesign-certs@v3
+        env:
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
         with:
-          p12-file-base64: ${{ secrets.APPLE_CERTIFICATE }}
-          p12-password: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          p12-file-base64: ${{ env.APPLE_CERTIFICATE }}
+          p12-password: ${{ env.APPLE_CERTIFICATE_PASSWORD }}
 
       - name: Install Python dependencies
         run: python -m pip install --upgrade pip -r requirements.txt
