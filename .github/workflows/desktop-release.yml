@@ -77,10 +77,12 @@ jobs:
     env:
       TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
       TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
-      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-      APPLE_ID: ${{ secrets.APPLE_ID }}
-      APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_CERT_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_CERTIFICATE_DATA: ${{ secrets.APPLE_CERTIFICATE }}
+      APPLE_CERTIFICATE_PASSWORD_VALUE: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_NOTARIZE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_NOTARIZE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+      APPLE_NOTARIZE_TEAM: ${{ secrets.APPLE_TEAM_ID }}
     steps:
       - uses: actions/checkout@v4
 
@@ -98,14 +100,14 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Import Apple signing certificate
-        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE != ''
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_DATA != ''
         uses: apple-actions/import-codesign-certs@v3
         env:
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_CERTIFICATE: ${{ env.APPLE_CERTIFICATE_DATA }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ env.APPLE_CERTIFICATE_PASSWORD_VALUE }}
         with:
-          p12-file-base64: ${{ env.APPLE_CERTIFICATE }}
-          p12-password: ${{ env.APPLE_CERTIFICATE_PASSWORD }}
+          p12-file-base64: ${{ env.APPLE_CERTIFICATE_DATA }}
+          p12-password: ${{ env.APPLE_CERTIFICATE_PASSWORD_VALUE }}
 
       - name: Install Python dependencies
         run: python -m pip install --upgrade pip -r requirements.txt
@@ -119,10 +121,30 @@ jobs:
       - name: Build bundled server
         run: python desktop/build_sidecar.py --target ${{ matrix.target }}
 
-      - name: Build installers and publish updater artifacts
+      - name: Build installers and publish updater artifacts (unsigned)
+        if: runner.os != 'macOS' || env.APPLE_CERT_IDENTITY == ''
         uses: tauri-apps/tauri-action@v1
         env:
           GITHUB_TOKEN: ${{ github.token }}
+        with:
+          projectPath: .
+          tagName: ${{ needs.prepare-release.outputs.tag }}
+          releaseId: ${{ needs.prepare-release.outputs.release_id }}
+          releaseName: Riviu Reports ${{ needs.prepare-release.outputs.tag }}
+          releaseBody: Automated Riviu Reports desktop build.
+          releaseDraft: true
+          prerelease: false
+          args: --target ${{ matrix.target }}
+
+      - name: Build installers and publish updater artifacts (signed)
+        if: runner.os == 'macOS' && env.APPLE_CERT_IDENTITY != ''
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          APPLE_SIGNING_IDENTITY: ${{ env.APPLE_CERT_IDENTITY }}
+          APPLE_ID: ${{ env.APPLE_NOTARIZE_ID }}
+          APPLE_PASSWORD: ${{ env.APPLE_NOTARIZE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ env.APPLE_NOTARIZE_TEAM }}
         with:
           projectPath: .
           tagName: ${{ needs.prepare-release.outputs.tag }}
