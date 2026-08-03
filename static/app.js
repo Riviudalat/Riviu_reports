@@ -1429,8 +1429,6 @@ async function checkDesktopUpdate() {
     try {
         const version = await invoke('check_for_update');
         if (!version) return;
-        const installNow = window.confirm(`Riviu Reports ${version} đã sẵn sàng. Cài đặt ngay bây giờ?`);
-        if (!installNow) return;
         showToast(`Đang cài đặt Riviu Reports ${version}...`, 'info');
         await invoke('install_update');
     } catch (error) {
@@ -1443,7 +1441,7 @@ async function checkDesktopUpdate() {
 function scheduleDesktopUpdates() {
     if (!desktopUpdaterInvoke()) return;
     void checkDesktopUpdate();
-    window.setInterval(() => void checkDesktopUpdate(), 4 * 60 * 60 * 1000);
+    window.setInterval(() => void checkDesktopUpdate(), 5 * 60 * 1000);
 }
 
 function groupDuplicateLocations(locations) {

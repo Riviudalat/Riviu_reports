@@ -33,8 +33,8 @@ the updater payloads, and uploads `latest.json` with the platform artifacts:
 - Linux x64 AppImage, DEB, and RPM packages
 
 The installed app checks the release `latest.json` at startup and then every
-four hours. When a newer release is available, it offers to download, install,
-and restart.
+five minutes. When a newer release is available, it downloads, installs, and
+restarts automatically.
 
 The repository secrets `TAURI_SIGNING_PRIVATE_KEY` and
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` are required for the updater and have been

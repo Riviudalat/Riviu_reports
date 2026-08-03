@@ -82,7 +82,8 @@ def test_desktop_updater_only_activates_inside_tauri():
     assert "function desktopUpdaterInvoke" in source
     assert "window.__TAURI__?.core?.invoke" in source
     assert "function scheduleDesktopUpdates" in source
-    assert "setInterval(() => void checkDesktopUpdate(), 4 * 60 * 60 * 1000)" in source
+    assert "setInterval(() => void checkDesktopUpdate(), 5 * 60 * 1000)" in source
+    assert "window.confirm(`Riviu Reports ${version}" not in source
 
 
 def test_desktop_bundle_keeps_resources_separate_from_user_data_and_release_ci():
