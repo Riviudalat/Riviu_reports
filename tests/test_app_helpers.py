@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from openpyxl import load_workbook
 
-from app import build_google_push_rows, build_partner_report
+from app import build_google_push_rows, build_partner_report, spreadsheet_date_text
 from workbook_utils import SINGLE_LINK_FILL_COLOR, VIDEO_LINK_FILL_COLOR, is_failed_channel_name, metric_number
 
 
@@ -215,6 +215,11 @@ def test_build_partner_report_filters_by_min_views():
     assert len(report_bytes) > 0
     assert metric_number(200) >= 100
     assert is_failed_channel_name("Good") is False
+
+
+def test_export_date_keeps_vietnamese_day_month_year_order():
+    assert spreadsheet_date_text("02/06/2026") == "'02/06/2026"
+    assert spreadsheet_date_text("02-06-2026") == "'02-06-2026"
 
 
 def test_build_partner_report_total_row_has_numeric_sums():

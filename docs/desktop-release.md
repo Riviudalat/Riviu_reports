@@ -1,6 +1,6 @@
 # Riviu Reports Desktop
 
-Riviu Reports ships as a Tauri desktop application for Windows and macOS. The
+Riviu Reports ships as a Tauri desktop application for Windows, macOS, and Linux. The
 Tauri shell launches the bundled FastAPI server only on `127.0.0.1`, then loads
 the existing report UI in the desktop window. Chromium is bundled with the
 sidecar, so a fresh desktop installation can run scans without a separate
@@ -8,11 +8,14 @@ Playwright browser install.
 
 ## Local development
 
-```powershell
-.venv\Scripts\python -m pip install -r requirements.txt
+```bash
+python3 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
 npm install
 npm run desktop:dev
 ```
+
+On Windows, use `.venv\\Scripts\\python.exe` in place of `.venv/bin/python`.
 
 `desktop:dev` first builds the current platform's `riviu-server` sidecar. Data
 created through the desktop app is stored in the operating system's app-data
@@ -27,6 +30,7 @@ the updater payloads, and uploads `latest.json` with the platform artifacts:
 - Windows x64 NSIS installer
 - macOS Intel DMG
 - macOS Apple Silicon DMG
+- Linux x64 AppImage, DEB, and RPM packages
 
 The installed app checks the release `latest.json` at startup and then every
 four hours. When a newer release is available, it offers to download, install,

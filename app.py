@@ -253,13 +253,28 @@ def spreadsheet_date_text(value):
         return spreadsheet_text(value.to_pydatetime().strftime("%d/%m/%Y"))
     if isinstance(value, datetime):
         return spreadsheet_text(value.strftime("%d/%m/%Y"))
-    parsed = pd.to_datetime(value, errors="coerce")
+    parsed = parse_report_date(value)
     if not pd.isna(parsed):
         return spreadsheet_text(parsed.to_pydatetime().strftime("%d/%m/%Y"))
     text = clean_text(value)
     if text.endswith(" 00:00:00"):
         text = text[:10]
     return spreadsheet_text(text)
+
+
+def parse_report_date(value):
+    """Parse report dates as Vietnamese day/month/year values."""
+    if pd.isna(value):
+        return pd.NaT
+    if hasattr(value, "to_pydatetime") or isinstance(value, datetime):
+        return value
+    text = clean_text(value)
+    if not text:
+        return pd.NaT
+    # Keep ISO timestamps unambiguous; all other slash/dash dates are D/M/Y.
+    if re.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}", text):
+        return pd.to_datetime(text, errors="coerce")
+    return pd.to_datetime(text, errors="coerce", dayfirst=True)
 
 
 def spreadsheet_formula_text(value):
@@ -417,7 +432,7 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100):
                 elif hasattr(value, "to_pydatetime"):
                     value = value.to_pydatetime()
                 else:
-                    parsed_date = pd.to_datetime(value, errors="coerce")
+                    parsed_date = parse_report_date(value)
                     value = parsed_date.to_pydatetime() if not pd.isna(parsed_date) else clean_text(value)
             else:
                 value = format_metric(value)

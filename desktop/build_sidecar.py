@@ -21,6 +21,11 @@ def default_target() -> str:
         return "x86_64-pc-windows-msvc"
     if sys.platform == "darwin":
         return "aarch64-apple-darwin" if machine in {"arm64", "aarch64"} else "x86_64-apple-darwin"
+    if sys.platform == "linux":
+        if machine in {"x86_64", "amd64"}:
+            return "x86_64-unknown-linux-gnu"
+        if machine in {"aarch64", "arm64"}:
+            return "aarch64-unknown-linux-gnu"
     raise RuntimeError("Pass --target when building this sidecar on an unsupported platform.")
 
 
