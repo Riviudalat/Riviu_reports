@@ -38,6 +38,7 @@ from workbook_utils import (
     detect_tiktok_media_type,
     is_tiktok_photo_link,
     is_tiktok_video_link,
+    month_label_for_sheet_name,
     should_highlight_video_link,
     split_partner_value,
     summary_sheet_title_for_data_sheet,
@@ -198,6 +199,16 @@ def test_summary_sheet_title_for_data_sheet():
     assert summary_sheet_title_for_data_sheet("Tháng 5") == "Tổng kết tháng 5"
     assert is_summary_sheet_name("Tổng kết tháng 6") is True
     assert is_summary_sheet_name("Tháng 6") is False
+
+
+def test_month_label_for_sheet_name():
+    assert month_label_for_sheet_name("Tháng 6") == "T6"
+    assert month_label_for_sheet_name("Tháng 07") == "T7"
+    assert month_label_for_sheet_name("thang12") == "T12"
+    assert month_label_for_sheet_name("Tổng kết tháng 6") == "T6"
+    assert month_label_for_sheet_name("Tháng 13") == ""
+    assert month_label_for_sheet_name("") == ""
+    assert month_label_for_sheet_name("Danh sách kênh") == ""
 
 
 def test_rebuild_summary_sheet_only_one_data_sheet(tmp_path):

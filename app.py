@@ -572,7 +572,7 @@ async def run_scraper_safely(target_path, worker_count, partner=None, partners=N
             if spreadsheet_id:
                 rows = build_workbook_rows(target_path, sheet_name=scan_sheet)
                 values = build_google_push_rows(rows)
-                sheet_title = push_rows_to_new_sheet(EXCEL_DIR, spreadsheet_id, values)
+                sheet_title = push_rows_to_new_sheet(EXCEL_DIR, spreadsheet_id, values, source_sheet_name=scan_sheet)
                 await manager.broadcast_log(f"Đã đẩy kết quả lên Google Sheet: {sheet_title}.")
             else:
                 await manager.broadcast_log("BỎ QUA đẩy Google: file hiện tại chưa gắn với Google Sheet gốc.")
@@ -913,7 +913,7 @@ async def push_google_sheet(data: dict | None = None):
         if not rows:
             return JSONResponse(content={"error": f"Sheet \"{upload_sheet or 'đang chọn'}\" không có link TikTok để tạo sheet."}, status_code=400)
         values = build_google_push_rows(rows)
-        sheet_title = push_rows_to_new_sheet(EXCEL_DIR, spreadsheet_id, values)
+        sheet_title = push_rows_to_new_sheet(EXCEL_DIR, spreadsheet_id, values, source_sheet_name=upload_sheet)
         return {"success": True, "sheetTitle": sheet_title, "sourceSheet": upload_sheet}
     except Exception as error:
         return JSONResponse(content={"error": f"Đẩy dữ liệu lên Google Sheet thất bại: {str(error)}"}, status_code=500)

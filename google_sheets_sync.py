@@ -6,7 +6,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from workbook_utils import format_excel_sheet_datetime
+from workbook_utils import format_excel_sheet_datetime, month_label_for_sheet_name
 
 CLIENT_SECRET_FILENAME = "google_oauth_client.json"
 TOKEN_FILENAME = "google_oauth_token.json"
@@ -366,8 +366,10 @@ def download_google_sheet_authenticated(base_dir, spreadsheet_id, destination_pa
     return destination_path
 
 
-def create_result_sheet_title():
-    return format_excel_sheet_datetime()
+def create_result_sheet_title(source_sheet_name=""):
+    timestamp = format_excel_sheet_datetime()
+    month_label = month_label_for_sheet_name(source_sheet_name)
+    return f"{month_label} {timestamp}" if month_label else timestamp
 
 
 def ensure_unique_sheet_title(existing_titles, desired_title):
@@ -390,14 +392,14 @@ def list_google_sheet_titles(base_dir, spreadsheet_id):
     return [item["properties"]["title"] for item in spreadsheet.get("sheets", [])]
 
 
-def push_rows_to_new_sheet(base_dir, spreadsheet_id, rows):
+def push_rows_to_new_sheet(base_dir, spreadsheet_id, rows, source_sheet_name=""):
     service = sheets_service(base_dir)
     spreadsheet = service.spreadsheets().get(
         spreadsheetId=spreadsheet_id,
         fields="sheets.properties.title",
     ).execute()
     existing_titles = [item["properties"]["title"] for item in spreadsheet.get("sheets", [])]
-    title = ensure_unique_sheet_title(existing_titles, create_result_sheet_title())
+    title = ensure_unique_sheet_title(existing_titles, create_result_sheet_title(source_sheet_name))
 
     add_sheet_response = service.spreadsheets().batchUpdate(
         spreadsheetId=spreadsheet_id,

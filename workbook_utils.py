@@ -452,6 +452,17 @@ def summary_sheet_title_for_data_sheet(data_sheet_name):
     return f"{SUMMARY_SHEET_TITLE_PREFIX}{label}"[:31]
 
 
+def month_label_for_sheet_name(sheet_name):
+    """Extract a 'T<month>' label from a data sheet name (e.g. Tháng 6 -> T6)."""
+    match = re.search(r"thang\s*0*(\d{1,2})\b", normalize_key(sheet_name))
+    if not match:
+        return ""
+    month = int(match.group(1))
+    if not 1 <= month <= 12:
+        return ""
+    return f"T{month}"
+
+
 def data_sheet_name_for_summary_title(workbook_sheet_names, summary_sheet_name):
     """Resolve the source data sheet name from a per-sheet summary tab title."""
     text = clean_text(summary_sheet_name)
