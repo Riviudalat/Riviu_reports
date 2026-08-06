@@ -46,7 +46,7 @@ CHANNEL_OVERRIDE_FILENAME = "channel_name_overrides.json"
 DEFAULT_CHANNEL_OVERRIDES = {}
 RESULT_SHEET_PREFIX = "report seeding tiktok"
 RESULT_SHEET_TIMESTAMP_RE = re.compile(
-    r"^(?:\d{2}-\d{2}-\d{4}-\d{2}-\d{2}|\d{2}-\d{2}-\d{4}-\d{2}:\d{2})(?:-\d+)?$"
+    r"^(?:T\d{1,2}\s+)?\d{2}-\d{2}-\d{4}-\d{2}[:-]?\d{2}(?:-\d+)?$"
 )
 DISPLAY_DATETIME_FORMAT = "%d/%m/%Y-%H:%M"
 FILENAME_DATETIME_FORMAT = "%d-%m-%Y-%H-%M"

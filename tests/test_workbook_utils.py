@@ -163,6 +163,15 @@ def test_is_result_sheet_name_recognizes_timestamp_and_legacy_prefix():
     assert is_result_sheet_name("Tháng 6") is False
 
 
+def test_is_result_sheet_name_recognizes_month_prefixed_timestamp():
+    # Google Sheets strips ":" from tab titles on xlsx export, so the pushed
+    # "T6 <timestamp>" title can come back with the time squished together.
+    assert is_result_sheet_name("T6 06-08-2026-14:30") is True
+    assert is_result_sheet_name("T6 06-08-2026-1430") is True
+    assert is_result_sheet_name("T12 06-08-2026-1430-2") is True
+    assert is_result_sheet_name("Tháng 6") is False
+
+
 def test_google_sheet_filename_to_label():
     assert (
         google_sheet_filename_to_label("Report Seeding Tiktok 2026 05-06-2026-10-42.xlsx")
