@@ -142,13 +142,13 @@ def test_datetime_formats_are_consistent():
     moment = __import__("datetime").datetime(2026, 6, 3, 14, 30)
     assert format_display_datetime(moment) == "03/06/2026-14:30"
     assert format_filename_datetime(moment) == "03-06-2026-14-30"
-    assert format_excel_sheet_datetime(moment) == "03-06-2026-14:30"
+    assert format_excel_sheet_datetime(moment) == "03-06-2026-14-30"
     assert parse_filename_datetime_stamp("03-06-2026-14-30") == "03/06/2026-14:30"
 
 
 def test_result_sheet_display_name_uses_excel_safe_timestamp():
     name = result_sheet_display_name("17-06-2026-14:44")
-    assert name == "17-06-2026-14:44"
+    assert name == "17-06-2026-14-44"
     assert len(name) <= 31
 
 

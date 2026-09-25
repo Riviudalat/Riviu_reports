@@ -9,7 +9,7 @@
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">
     <link rel="stylesheet" href="/static/styles.css?v={{ asset_version }}">
 </head>
-<body class="compact-page" data-workspace-tab="sheet">
+<body class="compact-page" data-workspace-tab="sheet" data-platform="tiktok">
     <div class="toast-stack" id="toastStack" aria-live="assertive"></div>
     <div class="server-banner" id="serverBanner" hidden>Server đã cập nhật — restart Khoidong.bat rồi F5 trang này.</div>
     <div class="compact-drawer-backdrop" id="compactDrawerBackdrop" onclick="closeCompactDrawers()"></div>
@@ -123,6 +123,11 @@
             </div>
         </div>
 
+        <div class="platform-bar" role="group" aria-label="Nền tảng báo cáo">
+            <button class="platform-option active" id="platformTikTok" type="button" aria-pressed="true" onclick="setPlatform('tiktok')">TikTok</button>
+            <button class="platform-option" id="platformThreads" type="button" aria-pressed="false" onclick="setPlatform('threads')">Threads</button>
+        </div>
+
         <nav class="workspace-tabs" role="tablist" aria-label="Các vùng dữ liệu">
             <button class="workspace-tab active" type="button" role="tab" aria-selected="true" data-workspace-tab="sheet" onclick="setWorkspaceTab('sheet')">
                 <span class="material-icons-outlined">table_rows</span><span>Dữ liệu sheet</span><span class="workspace-tab-count" id="totalLinks">0</span>
@@ -226,7 +231,7 @@
                     <div class="upload-zone" id="uploadArea" onclick="document.getElementById('fileInput').click()">
                         <span class="material-icons-outlined" style="font-size:34px; color:#ff8a2a">cloud_upload</span>
                         <div style="margin-top:6px; font-weight:700; font-size:14px">Kéo thả hoặc click để tải file</div>
-                        <input type="file" id="fileInput" hidden accept=".xlsx,.xls" onchange="uploadFile(this)">
+                        <input type="file" id="fileInput" hidden accept=".xlsx" onchange="uploadFile(this)">
                     </div>
                 </div>
             </div>
@@ -299,11 +304,11 @@
                                 <th>ID</th>
                                 <th>SHEET</th>
                                 <th>TÊN KÊNH</th>
-                                <th>LINK TIKTOK</th>
+                                <th id="liveLinkHeader">LINK TIKTOK</th>
                                 <th style="text-align:right">LƯỢT XEM</th>
                                 <th style="text-align:right">TIM</th>
                                 <th style="text-align:right">BÌNH LUẬN</th>
-                                <th style="text-align:right">LƯỢT LƯU</th>
+                                <th id="liveSavedHeader" style="text-align:right">LƯỢT LƯU</th>
                                 <th style="text-align:right">CHIA SẺ</th>
                                 <th>STATUS</th>
                             </tr>
@@ -395,7 +400,7 @@
                     <button class="btn btn-outline btn-compact" onclick="selectAllPartners()">Chọn tất cả</button>
                     <button class="btn btn-outline btn-compact" onclick="clearAllPartners()">Bỏ chọn</button>
                 </div>
-                <div class="report-filter-row" style="display:flex; align-items:center; gap:12px; padding: 8px 12px; background:#fff; border:1px solid #e5e7eb; border-radius:8px; margin-bottom: 8px;">
+                <div class="report-filter-row" id="reportMinViewRow" style="display:flex; align-items:center; gap:12px; padding: 8px 12px; background:#fff; border:1px solid #e5e7eb; border-radius:8px; margin-bottom: 8px;">
                     <label style="display:flex; align-items:center; gap:8px; font-size: 13px; color:#1f2937; cursor:pointer; user-select:none;">
                         <input type="checkbox" id="minViewToggle" checked style="width:16px; height:16px; accent-color:#ff6b00;">
                         Lọc link dưới

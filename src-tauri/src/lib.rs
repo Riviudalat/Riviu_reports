@@ -1,9 +1,10 @@
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::sync::Mutex;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use tauri::ipc::CapabilityBuilder;
 use tauri::{AppHandle, Manager, RunEvent};
 use tauri_plugin_shell::process::CommandChild;
 use tauri_plugin_shell::ShellExt;
@@ -88,30 +89,66 @@ async fn install_update(app: AppHandle) -> Result<(), String> {
         return Ok(());
     };
 
-    update
-        .download_and_install(|_, _| {}, || {})
-        .await
-        .map_err(|error| error.to_string())?;
+    let state = app.state::<ServerState>();
+    let port = state.port;
+    let token = state.shutdown_token.clone();
+    let prepare_token = token.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        request_server_action(port, &prepare_token, "/_desktop/prepare-update")
+    })
+    .await
+    .map_err(|error| error.to_string())??;
+
+    let installation = update.download_and_install(|_, _| {}, || {}).await;
+    if let Err(error) = installation {
+        let _ = tauri::async_runtime::spawn_blocking(move || {
+            request_server_action(port, &token, "/_desktop/cancel-update")
+        })
+        .await;
+        return Err(error.to_string());
+    }
     app.restart();
 }
 
-fn request_server_shutdown(port: u16, shutdown_token: &str) {
+fn request_server_action(port: u16, shutdown_token: &str, path: &str) -> Result<(), String> {
     let address = format!("127.0.0.1:{port}");
-    let Ok(socket_address) = address.parse::<SocketAddr>() else {
-        return;
-    };
-    let Ok(mut stream) = TcpStream::connect_timeout(&socket_address, Duration::from_secs(2)) else {
-        return;
-    };
+    let socket_address = address
+        .parse::<SocketAddr>()
+        .map_err(|error| error.to_string())?;
+    let mut stream = TcpStream::connect_timeout(&socket_address, Duration::from_secs(2))
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .map_err(|error| error.to_string())?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(3)))
+        .map_err(|error| error.to_string())?;
     let request = format!(
-        "POST /_desktop/shutdown HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Riviu-Shutdown: {shutdown_token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+        "POST {path} HTTP/1.1\r\nHost: {address}\r\nX-Riviu-Shutdown: {shutdown_token}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
     );
-    let _ = stream.write_all(request.as_bytes());
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|error| error.to_string())?;
+    let mut response = String::new();
+    stream
+        .take(8192)
+        .read_to_string(&mut response)
+        .map_err(|error| error.to_string())?;
+    if response
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        == Some("200")
+    {
+        Ok(())
+    } else {
+        Err("Ứng dụng đang quét hoặc chưa sẵn sàng cập nhật. Sẽ thử lại sau.".to_string())
+    }
 }
 
 fn stop_server(app: &AppHandle) {
     if let Some(state) = app.try_state::<ServerState>() {
-        request_server_shutdown(state.port, &state.shutdown_token);
+        let _ = request_server_action(state.port, &state.shutdown_token, "/_desktop/shutdown");
         if let Ok(mut child) = state.child.lock() {
             if let Some(child) = child.take() {
                 thread::sleep(Duration::from_millis(300));
@@ -144,6 +181,18 @@ pub fn run() {
             let state = handle.state::<ServerState>();
             start_server(&handle, &state).map_err(std::io::Error::other)?;
             let url = Url::parse(&format!("http://127.0.0.1:{}", state.port))
+                .map_err(std::io::Error::other)?;
+            // Grant only the two updater commands to this app's ephemeral origin.
+            // The remote page never receives shell/plugin permissions.
+            handle
+                .add_capability(
+                    CapabilityBuilder::new("loopback-updater")
+                        .window("main")
+                        .local(false)
+                        .remote(format!("http://127.0.0.1:{}/*", state.port))
+                        .permission("allow-check-for-update")
+                        .permission("allow-install-update"),
+                )
                 .map_err(std::io::Error::other)?;
             app.get_webview_window("main")
                 .ok_or_else(|| std::io::Error::other("main window is missing"))?

@@ -6,7 +6,12 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
-from workbook_utils import format_excel_sheet_datetime, month_label_for_sheet_name
+from workbook_utils import (
+    format_google_sheet_datetime,
+    google_to_excel_sheet_titles,
+    month_label_for_sheet_name,
+    store_google_sheet_title_map,
+)
 
 CLIENT_SECRET_FILENAME = "google_oauth_client.json"
 TOKEN_FILENAME = "google_oauth_token.json"
@@ -347,6 +352,8 @@ def download_google_sheet_authenticated(base_dir, spreadsheet_id, destination_pa
     workbook = Workbook()
     workbook.remove(workbook.active)
     sheets = spreadsheet.get("sheets", [])
+    title_mapping = google_to_excel_sheet_titles(sheet["properties"]["title"] for sheet in sheets)
+    store_google_sheet_title_map(workbook, title_mapping)
     if not sheets:
         workbook.create_sheet("Sheet1")
     else:
@@ -357,7 +364,7 @@ def download_google_sheet_authenticated(base_dir, spreadsheet_id, destination_pa
                 spreadsheetId=spreadsheet_id,
                 range=f"'{escaped}'!A:ZZ",
             ).execute().get("values", [])
-            worksheet = workbook.create_sheet(title=title[:31])
+            worksheet = workbook.create_sheet(title=title_mapping[title])
             for row_index, row in enumerate(values, start=1):
                 for col_index, value in enumerate(row, start=1):
                     worksheet.cell(row=row_index, column=col_index, value=value)
@@ -366,10 +373,11 @@ def download_google_sheet_authenticated(base_dir, spreadsheet_id, destination_pa
     return destination_path
 
 
-def create_result_sheet_title(source_sheet_name=""):
-    timestamp = format_excel_sheet_datetime()
+def create_result_sheet_title(source_sheet_name="", *, platform="tiktok"):
+    timestamp = format_google_sheet_datetime()
     month_label = month_label_for_sheet_name(source_sheet_name)
-    return f"{month_label} {timestamp}" if month_label else timestamp
+    title = f"{month_label} {timestamp}" if month_label else timestamp
+    return f"Report Seeding Threads {title}" if platform == "threads" else title
 
 
 def ensure_unique_sheet_title(existing_titles, desired_title):
@@ -392,14 +400,14 @@ def list_google_sheet_titles(base_dir, spreadsheet_id):
     return [item["properties"]["title"] for item in spreadsheet.get("sheets", [])]
 
 
-def push_rows_to_new_sheet(base_dir, spreadsheet_id, rows, source_sheet_name=""):
+def push_rows_to_new_sheet(base_dir, spreadsheet_id, rows, source_sheet_name="", *, platform="tiktok"):
     service = sheets_service(base_dir)
     spreadsheet = service.spreadsheets().get(
         spreadsheetId=spreadsheet_id,
         fields="sheets.properties.title",
     ).execute()
     existing_titles = [item["properties"]["title"] for item in spreadsheet.get("sheets", [])]
-    title = ensure_unique_sheet_title(existing_titles, create_result_sheet_title(source_sheet_name))
+    title = ensure_unique_sheet_title(existing_titles, create_result_sheet_title(source_sheet_name, platform=platform))
 
     add_sheet_response = service.spreadsheets().batchUpdate(
         spreadsheetId=spreadsheet_id,

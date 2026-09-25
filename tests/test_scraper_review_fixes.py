@@ -1,0 +1,385 @@
+"""Regression fixtures for scraper/data-loss and per-request proxy fixes."""
+
+import asyncio
+from concurrent.futures import ThreadPoolExecutor
+import io
+import json
+import socket
+import threading
+import urllib.request
+
+import openpyxl
+import pytest
+from playwright.async_api import async_playwright
+
+import proxy_utils
+import scraper
+import threads_scraper
+
+
+THREADS_URL = "https://www.threads.com/@miri_viu/post/DdRIHGWCURV"
+
+
+def test_threads_browser_uses_target_actions_and_not_caption_or_recommendations():
+    html = '''<html><body><header>miri_viu</header>
+      <article><a href="/@other/post/Other">other</a>
+        <div role="button"><svg title="Like"></svg>999</div>
+        <div role="button"><svg title="Comment"></svg>888</div></article>
+      <main><a href="/@miri_viu/post/DdRIHGWCURV">Thread 377 views</a>
+      <article><a href="/@miri_viu/post/DdRIHGWCURV">miri_viu</a>
+        <p>999999 views this week!</p>
+        <div role="button" aria-label="Views">377 views</div>
+        <div class="actions">
+          <div role="button"><svg title="Like"></svg>4</div>
+          <div role="button"><svg title="Comment"></svg>1</div>
+          <div role="button"><svg title="Repost"></svg></div>
+          <div role="button"><svg title="Share"></svg>2</div>
+        </div>
+      </article></main></body></html>'''
+
+    async def check():
+        async with async_playwright() as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            # Route the real Chromium navigation; extraction still runs on real DOM.
+            original_new_page = browser.new_page
+
+            async def fixture_page():
+                page = await original_new_page()
+                await page.route("**/*", lambda route: route.fulfill(body=html, content_type="text/html"))
+                return page
+
+            browser.new_page = fixture_page
+            try:
+                return await threads_scraper.fetch_threads_browser(browser, THREADS_URL)
+            finally:
+                await browser.close()
+
+    result = asyncio.run(check())
+    assert result["error"] == ""
+    assert result["metrics"] == {"views": 377, "likes": 4, "comments": 1, "reposts": None, "shares": 2}
+
+
+def test_threads_hybrid_preserves_verified_http_metrics():
+    content = '<script type="application/json">' + json.dumps({"require": [
+        ["BarcelonaLoggedOutExpansionGating", [], {"view_counts": 377}, 7623],
+    ]}) + '</script>'
+    http = threads_scraper.parse_threads_http(content, THREADS_URL, THREADS_URL)
+    browser = {"channel": "miri_viu", "metrics": {"views": 999999, "likes": 4}, "error": ""}
+    merged = threads_scraper.merge_results(http, browser)
+    assert merged["metrics"]["views"] == 377
+    assert merged["metrics"]["likes"] == 4
+
+
+@pytest.mark.parametrize("content", [
+    '<p>"view_counts":999999</p>',
+    '<script type="application/json">{"recommended_post":{"code":"OtherPost","view_counts":999999}}</script>',
+    '<script type="application/json">{"caption":"\\\"view_counts\\\":999999"}</script>',
+])
+def test_threads_http_rejects_views_without_typed_post_provenance(content):
+    result = threads_scraper.parse_threads_http(content, THREADS_URL, THREADS_URL)
+    assert result["metrics"]["views"] is None
+
+
+def test_threads_http_ignores_caption_count_alongside_real_post_module():
+    content = '<script type="application/json">' + json.dumps({"require": [
+        ["BarcelonaLoggedOutExpansionGating", [], {"view_counts": 377}, 7623],
+        {"caption": '"view_counts":999999'},
+        {"recommended_post": {"code": "OtherPost", "view_counts": 444}},
+    ]}) + '</script>'
+    assert threads_scraper.parse_threads_http(content, THREADS_URL, THREADS_URL)["metrics"]["views"] == 377
+
+
+class _NoBrowser:
+    async def __aenter__(self):
+        return object()
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+def _scan_fixture(tmp_path, monkeypatch):
+    path = tmp_path / "report.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"])
+    sheet.append(["https://www.tiktok.com/@demo/video/123", "Demo", 10, 1, 0, 0, 0])
+    book.save(path)
+    book.close()
+    monkeypatch.setattr(scraper, "async_playwright", _NoBrowser)
+    monkeypatch.setattr(scraper, "_run_request_scrape", lambda *_a, **_kw: (
+        {"Views": "999", "Likes": "10", "Comments": "1", "Saves": "2", "Shares": "3"},
+        "Demo", "Success", 1, "https://www.tiktok.com/@demo/video/123",
+    ))
+    return path
+
+
+class _CancelAfterData:
+    def __init__(self):
+        self.statuses = []
+
+    async def broadcast_log(self, *_a, **_kw):
+        pass
+
+    async def broadcast_status(self, data):
+        self.statuses.append(data)
+
+    async def broadcast_data(self, data):
+        assert data["views"] == 999
+        raise asyncio.CancelledError()
+
+
+class _CancelAfterResultLog(_CancelAfterData):
+    async def broadcast_log(self, *_a, **kwargs):
+        if (kwargs.get("details") or {}).get("kind") == "scrape_ok":
+            raise asyncio.CancelledError()
+
+
+@pytest.mark.parametrize("manager_type", [_CancelAfterData, _CancelAfterResultLog])
+def test_tiktok_cancel_saves_results_already_sent_to_ui(tmp_path, monkeypatch, manager_type):
+    path = _scan_fixture(tmp_path, monkeypatch)
+    manager = manager_type()
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(scraper.run_scraper(path, manager, worker_count=1, retries=0, sheet_name="Data"))
+    saved = openpyxl.load_workbook(path)
+    assert saved.active["C2"].value == 999
+    saved.close()
+    assert not any(status.get("done") for status in manager.statuses)
+
+
+def test_tiktok_cancel_save_failure_surfaces_and_keeps_original(tmp_path, monkeypatch):
+    path = _scan_fixture(tmp_path, monkeypatch)
+    original = path.read_bytes()
+    manager = _CancelAfterData()
+
+    def locked(*_args):
+        raise PermissionError("fixture locked destination")
+
+    monkeypatch.setattr(scraper.os, "replace", locked)
+    with pytest.raises(RuntimeError, match="Excel"):
+        asyncio.run(scraper.run_scraper(path, manager, worker_count=1, retries=0, sheet_name="Data"))
+    assert path.read_bytes() == original
+    assert not list(tmp_path.glob("*.tmp"))
+    assert not any(status.get("done") for status in manager.statuses)
+
+
+def test_atomic_save_finishes_before_cancellation_returns(tmp_path, monkeypatch):
+    path = _scan_fixture(tmp_path, monkeypatch)
+    book = openpyxl.load_workbook(path)
+    book.active["C2"].value = 1234
+    entered = threading.Event()
+    release = threading.Event()
+    save = book.save
+
+    def slow_save(destination):
+        entered.set()
+        assert release.wait(timeout=5)
+        save(destination)
+
+    monkeypatch.setattr(book, "save", slow_save)
+
+    async def check():
+        task = asyncio.create_task(scraper.save_workbook(book, path))
+        await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    try:
+        asyncio.run(check())
+        saved = openpyxl.load_workbook(path)
+        assert saved.active["C2"].value == 1234
+        saved.close()
+        assert not list(tmp_path.glob("*.tmp"))
+    finally:
+        release.set()
+        book.close()
+
+
+def test_result_sheet_failure_does_not_skip_summary(tmp_path, monkeypatch):
+    path = _scan_fixture(tmp_path, monkeypatch)
+
+    def failed_result(*_a, **_kw):
+        raise ValueError("fixture invalid result tab")
+
+    def summary(book, **_kw):
+        book.create_sheet("Summary rebuilt").append(["fresh"])
+        return 1
+
+    monkeypatch.setattr(scraper, "build_result_sheet", failed_result)
+    monkeypatch.setattr(scraper, "rebuild_summary_sheet", summary)
+    monkeypatch.setattr(scraper, "append_scrape_history", lambda *_a: None)
+    asyncio.run(scraper.run_scraper(path, worker_count=1, retries=0, sheet_name="Data", create_result_sheet=True))
+    saved = openpyxl.load_workbook(path)
+    assert saved["Summary rebuilt"]["A1"].value == "fresh"
+    saved.close()
+
+
+def test_socks_and_direct_transports_are_isolated_during_concurrent_requests(monkeypatch):
+    import http.client
+    import socks
+
+    original_socket = socket.socket
+    original_default = socks.socksocket.default_proxy
+    routes = {}
+    barrier = threading.Barrier(3)
+
+    class FakeSocket:
+        def setsockopt(self, *_a):
+            pass
+
+        def sendall(self, *_a):
+            pass
+
+        def makefile(self, *_a):
+            return io.BytesIO(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nOK")
+
+        def close(self):
+            pass
+
+    def socks_connect(address, **kwargs):
+        routes.setdefault(threading.current_thread().name, []).append(kwargs.get("proxy_addr"))
+        barrier.wait(timeout=5)
+        return FakeSocket()
+
+    def direct_connect(address, *_a, **_kw):
+        routes.setdefault(threading.current_thread().name, []).append("direct")
+        barrier.wait(timeout=5)
+        return FakeSocket()
+
+    # The real urllib opener, request and HTTP connection run. Only sockets are fake.
+    monkeypatch.setattr(socks, "create_connection", socks_connect)
+    monkeypatch.setattr(socket, "create_connection", direct_connect)
+    configs = [proxy_utils.normalize_proxy_config({"type": "socks5", "host": host, "port": 1080})
+               for host in ("proxy-a.example", "proxy-b.example")]
+    proxy_utils.set_session_proxies([])
+
+    def request_twice(config):
+        name = threading.current_thread().name
+        for _ in range(2):
+            with proxy_utils.urlopen_with_config(urllib.request.Request("http://fixture.invalid/post"), config, timeout=1) as response:
+                assert response.read() == b"OK"
+        return routes[name]
+
+    try:
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            futures = [executor.submit(request_twice, config) for config in [*configs, None]]
+            assert [future.result() for future in futures] == [
+                ["proxy-a.example", "proxy-a.example"], ["proxy-b.example", "proxy-b.example"], ["direct", "direct"],
+            ]
+        assert socket.socket is original_socket
+        assert socks.socksocket.default_proxy == original_default
+    finally:
+        socket.socket = original_socket
+        socks.socksocket.default_proxy = original_default
+        proxy_utils.set_session_proxies([])
+
+
+def _threads_scan_fixture(tmp_path, monkeypatch, count=1):
+    path = tmp_path / "threads.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["Link", "Tên Kênh", "LƯỢT XEM"])
+    for index in range(count):
+        sheet.append([f"https://www.threads.com/@demo/post/Post{index}", "Demo", 10])
+    book.save(path)
+    book.close()
+    monkeypatch.setattr(threads_scraper, "async_playwright", _NoBrowser)
+    monkeypatch.setattr(threads_scraper, "fetch_threads_http", lambda _url: {
+        "channel": "demo", "metrics": {"views": 999, "likes": None, "comments": None, "reposts": None, "shares": None}, "error": "",
+    })
+    return path
+
+
+def test_threads_cancellation_joins_autosave_before_cleanup_save(tmp_path, monkeypatch):
+    path = _threads_scan_fixture(tmp_path, monkeypatch, count=5)
+    first_started = threading.Event()
+    release_first = threading.Event()
+    overlap_seen = threading.Event()
+    save = threads_scraper.save_workbook_atomic
+    lock = threading.Lock()
+    active = calls = 0
+
+    def tracked_save(book, destination):
+        nonlocal active, calls
+        with lock:
+            active += 1
+            calls += 1
+            number = calls
+            if active > 1:
+                overlap_seen.set()
+        try:
+            if number == 1:
+                first_started.set()
+                assert release_first.wait(timeout=5)
+            save(book, destination)
+        finally:
+            with lock:
+                active -= 1
+
+    monkeypatch.setattr(threads_scraper, "save_workbook_atomic", tracked_save)
+
+    async def check():
+        task = asyncio.create_task(threads_scraper.run_threads_scraper(path, sheet_name="Data", mode="request"))
+        try:
+            assert await asyncio.to_thread(first_started.wait, 5)
+            task.cancel()
+            # A blocked first writer forces the old implementation's cleanup
+            # writer to overlap. The fixed runner waits for the owned writer.
+            await asyncio.to_thread(overlap_seen.wait, 0.2)
+            assert not overlap_seen.is_set()
+            assert not task.done()
+        finally:
+            release_first.set()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    asyncio.run(check())
+    saved = openpyxl.load_workbook(path)
+    assert [saved.active.cell(row, 3).value for row in range(2, 7)] == [999] * 5
+    saved.close()
+
+
+def test_threads_failed_final_save_still_closes_browser_and_workbook(tmp_path, monkeypatch):
+    path = _threads_scan_fixture(tmp_path, monkeypatch)
+    original = path.read_bytes()
+    closed = {"browser": False, "workbook": False}
+
+    class Browser:
+        async def close(self):
+            closed["browser"] = True
+
+    class Chromium:
+        async def launch(self, **_kwargs):
+            return Browser()
+
+    class Playwright(_NoBrowser):
+        chromium = Chromium()
+
+        async def __aenter__(self):
+            return self
+
+    async def browser_result(_browser, _url):
+        return {"channel": "demo", "metrics": {"views": 999}, "error": ""}
+
+    def failed_save(*_args):
+        raise PermissionError("fixture locked destination")
+
+    close = openpyxl.workbook.workbook.Workbook.close
+
+    def track_close(book):
+        closed["workbook"] = True
+        close(book)
+
+    monkeypatch.setattr(threads_scraper, "async_playwright", Playwright)
+    monkeypatch.setattr(threads_scraper, "fetch_threads_browser", browser_result)
+    monkeypatch.setattr(threads_scraper, "save_workbook_atomic", failed_save)
+    monkeypatch.setattr(openpyxl.workbook.workbook.Workbook, "close", track_close)
+    with pytest.raises(PermissionError):
+        asyncio.run(threads_scraper.run_threads_scraper(path, sheet_name="Data", mode="browser"))
+    assert path.read_bytes() == original
+    assert closed == {"browser": True, "workbook": True}

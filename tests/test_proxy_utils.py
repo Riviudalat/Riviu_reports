@@ -243,7 +243,7 @@ def test_set_session_proxy_used_by_urlopen_request():
         set_session_proxy(None)
 
 
-def test_restore_thread_socket_after_socks_session():
+def test_proxy_cleanup_preserves_external_socket_implementation():
     import proxy_utils
     import socket
 
@@ -254,14 +254,14 @@ def test_restore_thread_socket_after_socks_session():
     proxy_utils._thread_local.socks_key = ("socks5", "1.1.1.1", 1080)
     try:
         proxy_utils._restore_thread_socket()
-        assert socket.socket is proxy_utils._ORIGINAL_SOCKET_CLASS
+        assert socket.socket is FakeSocksSocket
         assert getattr(proxy_utils._thread_local, "socks_key", None) is None
     finally:
         socket.socket = proxy_utils._ORIGINAL_SOCKET_CLASS
         proxy_utils._thread_local.socks_key = None
 
 
-def test_set_session_proxies_restores_socket():
+def test_set_session_proxies_preserves_external_socket_implementation():
     import proxy_utils
     import socket
 
@@ -272,7 +272,7 @@ def test_set_session_proxies_restores_socket():
     proxy_utils._thread_local.socks_key = ("socks5", "1.1.1.1", 1080)
     try:
         set_session_proxies([])
-        assert socket.socket is proxy_utils._ORIGINAL_SOCKET_CLASS
+        assert socket.socket is FakeSocksSocket
     finally:
         socket.socket = proxy_utils._ORIGINAL_SOCKET_CLASS
         proxy_utils._thread_local.socks_key = None

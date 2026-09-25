@@ -1,4 +1,5 @@
 import json
+import http.client
 import os
 import random
 import re
@@ -42,9 +43,7 @@ _ORIGINAL_SOCKET_CLASS = socket.socket
 
 
 def _restore_thread_socket():
-    """Khôi phục socket gốc trên thread hiện tại sau khi dùng SOCKS."""
-    if getattr(_thread_local, "socks_key", None) is not None or socket.socket is not _ORIGINAL_SOCKET_CLASS:
-        socket.socket = _ORIGINAL_SOCKET_CLASS
+    """Clear legacy thread state without changing process-wide sockets."""
     _thread_local.socks_key = None
 
 
@@ -57,21 +56,20 @@ def _config_cache_key(config):
         config.get("port"),
         config.get("socks_port"),
         config.get("username"),
+        config.get("password"),
     )
 
 
 def _direct_opener():
-    _restore_thread_socket()
     with _opener_cache_lock:
         opener = _opener_cache.get("direct")
         if opener is None:
-            opener = urllib.request.build_opener()
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
             _opener_cache["direct"] = opener
         return opener
 
 
 def _http_proxy_opener(config):
-    _restore_thread_socket()
     key = _config_cache_key(config)
     with _opener_cache_lock:
         opener = _opener_cache.get(key)
@@ -89,19 +87,50 @@ def _socks_urlopen(request, config, timeout):
     except ImportError as error:
         raise RuntimeError("Chưa cài PySocks. Chạy: pip install PySocks") from error
 
-    key = _config_cache_key(config)
-    if getattr(_thread_local, "socks_key", None) != key:
-        socks.set_default_proxy(
-            socks.SOCKS5,
-            config["host"],
-            config["socks_port"],
-            True,
-            config.get("username") or None,
-            config.get("password") or None,
+    # Each urllib opener owns its connections. Never change socket.socket or
+    # PySocks defaults: other request workers may use a different route.
+    proxy = dict(config)
+
+    def connect(address, timeout=socket._GLOBAL_DEFAULT_TIMEOUT, source_address=None, **_kwargs):
+        return socks.create_connection(
+            address,
+            timeout=timeout,
+            source_address=source_address,
+            proxy_type=socks.SOCKS5,
+            proxy_addr=proxy["host"],
+            proxy_port=proxy["socks_port"],
+            proxy_rdns=True,
+            proxy_username=proxy.get("username") or None,
+            proxy_password=proxy.get("password") or None,
         )
-        socket.socket = socks.socksocket
-        _thread_local.socks_key = key
-    return urllib.request.urlopen(request, timeout=timeout)
+
+    class SocksHTTPConnection(http.client.HTTPConnection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._create_connection = connect
+
+    class SocksHTTPSConnection(http.client.HTTPSConnection):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._create_connection = connect
+
+    class SocksHTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(SocksHTTPConnection, req)
+
+    class SocksHTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(SocksHTTPSConnection, req, context=self._context)
+
+    key = _config_cache_key(config)
+    with _opener_cache_lock:
+        opener = _opener_cache.get(key)
+        if opener is None:
+            opener = urllib.request.build_opener(
+                urllib.request.ProxyHandler({}), SocksHTTPHandler(), SocksHTTPSHandler(),
+            )
+            _opener_cache[key] = opener
+    return opener.open(request, timeout=timeout)
 
 
 def proxy_list_path(base_dir):
@@ -409,9 +438,6 @@ def release_thread_proxy():
     rotation = getattr(_thread_local, "proxy_rotation", 0) + 1
     _thread_local.proxy_rotation = rotation
     chosen = pool[(worker_index + rotation) % len(pool)]
-    # Chuyển SOCKS -> HTTP: phải bỏ monkeypatch socket trước khi mở HTTP.
-    if chosen.get("type") != "socks5":
-        _restore_thread_socket()
     _thread_local.proxy_config = chosen
     _thread_local.proxy_key = _config_cache_key(chosen)
     return chosen

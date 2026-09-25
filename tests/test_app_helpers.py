@@ -70,10 +70,10 @@ def test_preview_counter_does_not_break_websocket_dispatch():
     preview_source = source[source.index("async function loadPreview"):source.index("async function renderSummaryDashboard")]
     websocket_source = source[source.index("function connectWS"):source.index("function startScraping")]
 
-    assert "Array.isArray(data.data) ? data.data.length : 0" in preview_source
+    assert "visibleRows.filter(row => linkColumn && matchingLink(row[linkColumn])).length" in preview_source
     assert "data.data" not in websocket_source
     assert "else if (message.type === 'status') updateProgress(message.data);" in websocket_source
-    assert "else if (message.type === 'data') appendData(message.row);" in websocket_source
+    assert "else if (message.type === 'data') appendData(message.row, message);" in websocket_source
 
 
 def test_desktop_updater_only_activates_inside_tauri():
@@ -106,7 +106,7 @@ def test_desktop_bundle_keeps_resources_separate_from_user_data_and_release_ci()
     assert '"externalBin"' in config
     assert '"createUpdaterArtifacts": true' in config
     assert "windows-2022" in workflow
-    assert "macos-13" in workflow
+    assert "macos-15-intel" in workflow
     assert "macos-14" in workflow
     assert "TAURI_SIGNING_PRIVATE_KEY" in workflow
 
@@ -220,7 +220,7 @@ def test_build_partner_report_filters_by_min_views():
 
 def test_export_date_keeps_vietnamese_day_month_year_order():
     assert spreadsheet_date_text("02/06/2026") == "'02/06/2026"
-    assert spreadsheet_date_text("02-06-2026") == "'02-06-2026"
+    assert spreadsheet_date_text("02-06-2026") == "'02/06/2026"
 
 
 def test_build_partner_report_total_row_has_numeric_sums():

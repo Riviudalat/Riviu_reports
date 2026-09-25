@@ -4,6 +4,7 @@ import json
 import os
 import random
 import re
+import tempfile
 import threading
 import time
 import unicodedata
@@ -2505,30 +2506,46 @@ def write_result(
         sheet.cell(row=row_index, column=columns["last_update"]).value = update_time
 
 
-async def save_workbook(workbook, file_path, websocket_manager=None):
-    temp_path = f"{file_path}.tmp"
+def _save_workbook_atomic(workbook, file_path):
+    descriptor, temp_path = tempfile.mkstemp(prefix=".riviu-", suffix=".tmp", dir=os.path.dirname(os.path.abspath(file_path)))
+    os.close(descriptor)
     try:
-        await asyncio.to_thread(workbook.save, temp_path)
-        await asyncio.to_thread(os.replace, temp_path, file_path)
+        workbook.save(temp_path)
+        os.replace(temp_path, file_path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+async def save_workbook(workbook, file_path, websocket_manager=None):
+    # Shield the complete save + replace transaction so cancellation cannot
+    # close/mutate the workbook while its background writer still uses it.
+    write_task = asyncio.create_task(asyncio.to_thread(_save_workbook_atomic, workbook, file_path))
+    try:
+        await finish_pending_task(write_task)
         return True, None
     except PermissionError:
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
         if websocket_manager:
             await websocket_manager.broadcast_log("CẢNH BÁO: File Excel đang mở, không thể ghi đè. Vui lòng đóng file rồi quét lại hoặc chờ lần lưu tiếp theo.")
         return False, "permission"
     except Exception as error:
-        if os.path.exists(temp_path):
-            try:
-                os.remove(temp_path)
-            except OSError:
-                pass
         if websocket_manager:
             await websocket_manager.broadcast_log(f"CẢNH BÁO: Lỗi lưu file ({str(error)})")
         return False, "other"
+
+
+async def finish_pending_task(task):
+    """Wait for owned cleanup/write work before propagating cancellation."""
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError()
+    return result
 
 
 def format_scrape_result_log(result, processed, total):
@@ -2692,6 +2709,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             if selected_names:
                 message = f"Không tìm thấy link nào cho {partner_label}."
             await websocket_manager.broadcast_log(message)
+        workbook.close()
         return
 
     worker_count = min(worker_count, total)
@@ -2874,6 +2892,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
 
         finalize_task = asyncio.create_task(finalize_hybrid_workers()) if use_request and browser_fallback and browser_worker_count > 0 else None
 
+        interrupted = False
         try:
             stalled_seconds = 0
             while processed < total:
@@ -2941,10 +2960,6 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 else:
                     error_count += 1
 
-                if websocket_manager:
-                    log_message, log_level, log_details = format_scrape_result_log(result, processed, total)
-                    await websocket_manager.broadcast_log(log_message, level=log_level, details=log_details)
-
                 # Write the same scrape result to every spreadsheet row that shares this URL
                 for target in bucket_rows:
                     write_result(
@@ -2966,6 +2981,8 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 pending_save_count += max(len(bucket_rows), 1)
 
                 if websocket_manager:
+                    log_message, log_level, log_details = format_scrape_result_log(result, processed, total)
+                    await websocket_manager.broadcast_log(log_message, level=log_level, details=log_details)
                     primary_target = bucket_rows[0] if bucket_rows else {"sheet_name": ""}
                     # Chỉ tô cam khi dòng chính (primary) đúng 1 đối tác — khớp Excel/preview.
                     single_partner = len(primary_target.get("partners") or []) == 1
@@ -3025,8 +3042,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                         if websocket_manager:
                             await websocket_manager.broadcast_log(f"Đã lưu tạm workbook tại {processed}/{total} links.")
                     else:
-                        # Reset counter and skip saving for the next `save_every` items to avoid log spam
-                        pending_save_count = 0
+                        # Keep the dirty count for cancellation/final-save retries.
                         save_skip_until_processed = processed + save_every
 
                 result_queue.task_done()
@@ -3038,47 +3054,68 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                     await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=20.0)
                 except asyncio.TimeoutError:
                     pass
+        except BaseException:
+            interrupted = True
+            raise
         finally:
-            for task in workers:
-                if not task.done():
-                    task.cancel()
-            try:
-                await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=10.0)
-            except asyncio.TimeoutError:
-                pass
-            # Close any remaining contexts gracefully before shutting browser down
-            if browser is not None:
+            async def cleanup_and_save():
+                if finalize_task is not None and not finalize_task.done():
+                    finalize_task.cancel()
+                for task in workers:
+                    if not task.done():
+                        task.cancel()
                 try:
-                    for ctx in list(browser.contexts):
+                    cleanup_tasks = workers + ([finalize_task] if finalize_task is not None else [])
+                    await asyncio.wait_for(asyncio.gather(*cleanup_tasks, return_exceptions=True), timeout=10.0)
+                except asyncio.TimeoutError:
+                    pass
+                try:
+                    if pending_save_count:
+                        saved, _reason = await save_workbook(workbook, file_path, websocket_manager)
+                        if not saved:
+                            raise RuntimeError("Lưu file Excel khi dừng quét thất bại; kết quả mới chưa được lưu.")
+                finally:
+                    # File errors must not skip browser/proxy cleanup.
+                    if browser is not None:
                         try:
-                            await ctx.close()
-                        except Exception:
-                            pass
-                except Exception:
-                    pass
-                try:
-                    await browser.close()
-                except Exception:
-                    pass
-            # Brief grace period so the Playwright Node side can drain pending
-            # events instead of hitting EPIPE on the parent shutdown
+                            for ctx in list(browser.contexts):
+                                try:
+                                    await ctx.close()
+                                except Exception:
+                                    pass
+                        finally:
+                            try:
+                                await browser.close()
+                            except Exception:
+                                pass
+                    set_session_proxies([])
+                    # Allow the Playwright Node transport to drain.
+                    await asyncio.sleep(0.3)
+
             try:
-                await asyncio.sleep(0.3)
-            except Exception:
-                pass
-            set_session_proxies([])
+                await finish_pending_task(asyncio.create_task(cleanup_and_save()))
+            except BaseException:
+                interrupted = True
+                raise
+            finally:
+                if interrupted:
+                    workbook.close()
 
     scan_sheet_for_summary = clean_text(sheet_name) or (
         clean_text(rows_to_process[0].get("sheet_name", "")) if rows_to_process else ""
     )
-    try:
-        append_sheet_total_rows(workbook)
-        summary_update_time = format_display_datetime()
-        created_sheet_name = ""
-        if create_result_sheet:
+    summary_update_time = format_display_datetime()
+    created_sheet_name = ""
+    if create_result_sheet:
+        try:
             created_sheet_name = build_result_sheet(workbook, rows_to_process, summary_update_time)
             if websocket_manager and created_sheet_name:
                 await websocket_manager.broadcast_log(f"Đã tạo sheet kết quả mới: {created_sheet_name}.")
+        except Exception as error:
+            if websocket_manager:
+                await websocket_manager.broadcast_log(f"CẢNH BÁO: Không tạo được sheet kết quả ({str(error)})")
+    try:
+        append_sheet_total_rows(workbook)
         summary_count = rebuild_summary_sheet(
             workbook,
             summary_update_time=summary_update_time,
@@ -3114,6 +3151,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
 
     final_saved, final_save_reason = await save_workbook(workbook, file_path, websocket_manager)
     if not final_saved:
+        workbook.close()
         if final_save_reason == "permission":
             raise RuntimeError("Lưu file Excel thất bại vì file đang mở.")
         raise RuntimeError("Lưu file Excel thất bại.")
@@ -3137,6 +3175,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
         "sheetTotalLinks": sheet_totals["totalLinks"],
         **session_totals,
     }
+    workbook.close()
     append_scrape_history(base_dir or os.path.dirname(os.path.abspath(file_path)), history_entry)
     if websocket_manager:
         await websocket_manager.broadcast_status(

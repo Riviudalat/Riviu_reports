@@ -152,8 +152,8 @@ if "%DID_STASH%"=="1" (
 
 echo.
 echo %UI_ORANGE%[4/4] CAP NHAT THU VIEN%UI_RESET%
+set "VENV_PY=%~dp0.venv\Scripts\python.exe"
 if exist ".venv\Scripts\python.exe" (
-    set "VENV_PY=%~dp0.venv\Scripts\python.exe"
     echo %UI_TEXT%Dang kiem tra requirements.txt...%UI_RESET%
     "%VENV_PY%" -m pip install -r requirements.txt --upgrade --quiet
     if errorlevel 1 (

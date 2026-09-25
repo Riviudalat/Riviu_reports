@@ -30,10 +30,14 @@ jobs:
           python -m pip install --upgrade pip -r requirements.txt
           npm ci
 
-      - name: Run checks
-        run: |
-          python -m pytest -q
-          node --check static/app.js
+      - name: Install browser test runtime
+        run: python -m playwright install chromium
+
+      - name: Run Python tests
+        run: python -m pytest -q
+
+      - name: Check browser JavaScript syntax
+        run: node --check static/app.js
 
   prepare-release:
     name: Prepare GitHub release
