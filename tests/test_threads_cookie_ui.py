@@ -103,6 +103,8 @@ def test_cookie_modal_real_dom_offline_responsive(width, tmp_path):
                 page.evaluate("openScanSettingsDrawer()")
             page.locator("#threadsCookieBtn").click()
             assert page.locator("#threadsCookieModal").is_visible()
+            assert page.locator('.threads-cookie-heading-icon img').get_attribute('src') == '/static/platform-icons/threads.svg'
+            assert page.locator('.threads-cookie-heading-icon img').evaluate('node => node.complete && node.naturalWidth > 0')
             assert page.locator("#threadsCookieSavedBadge").inner_text()=="Hợp lệ"
             page.locator("#threadsCookieTabFile").focus()
             page.keyboard.press('ArrowRight')
@@ -139,6 +141,10 @@ def test_cookie_modal_real_dom_offline_responsive(width, tmp_path):
             assert rows.nth(1).get_attribute('data-source-platform') == 'threads'
             assert page.locator('#googleSheetUrlInput').is_visible()
             assert page.locator('#threadsGoogleSheetUrlInput').is_visible()
+            for platform in ('tiktok', 'threads'):
+                icon = page.locator(f'[data-source-platform="{platform}"] .platform-brand-icon')
+                assert icon.get_attribute('src') == f'/static/platform-icons/{platform}.svg'
+                assert icon.evaluate('node => node.complete && node.naturalWidth > 0')
             assert not page.locator('#threadsCookieStatus').evaluate('node => node.offsetWidth > 1 && node.offsetHeight > 1')
             page.screenshot(path=str(tmp_path / f'sources-{width}.png'), full_page=True)
             assert errors==[],errors
