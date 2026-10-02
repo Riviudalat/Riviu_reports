@@ -72,7 +72,9 @@ def test_preview_counter_does_not_break_websocket_dispatch():
 
     assert "visibleRows.filter(row => linkColumn && matchingLink(row[linkColumn])).length" in preview_source
     assert "data.data" not in websocket_source
-    assert "else if (message.type === 'status') updateProgress(message.data);" in websocket_source
+    assert "else if (message.type === 'status') {" in websocket_source
+    assert "updateProgress(message.data);" in websocket_source
+    assert "message.data?.done && activePlatform === 'threads'" in websocket_source
     assert "else if (message.type === 'data') appendData(message.row, message);" in websocket_source
 
 

@@ -81,7 +81,7 @@ def _http_proxy_opener(config):
         return opener
 
 
-def _socks_urlopen(request, config, timeout):
+def _socks_urlopen(request, config, timeout, extra_handlers=()):
     try:
         import socks  # PySocks
     except ImportError as error:
@@ -122,14 +122,17 @@ def _socks_urlopen(request, config, timeout):
         def https_open(self, req):
             return self.do_open(SocksHTTPSConnection, req, context=self._context)
 
-    key = _config_cache_key(config)
-    with _opener_cache_lock:
-        opener = _opener_cache.get(key)
-        if opener is None:
-            opener = urllib.request.build_opener(
-                urllib.request.ProxyHandler({}), SocksHTTPHandler(), SocksHTTPSHandler(),
-            )
-            _opener_cache[key] = opener
+    if extra_handlers:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), SocksHTTPHandler(), SocksHTTPSHandler(), *extra_handlers)
+    else:
+        key = _config_cache_key(config)
+        with _opener_cache_lock:
+            opener = _opener_cache.get(key)
+            if opener is None:
+                opener = urllib.request.build_opener(
+                    urllib.request.ProxyHandler({}), SocksHTTPHandler(), SocksHTTPSHandler(),
+                )
+                _opener_cache[key] = opener
     return opener.open(request, timeout=timeout)
 
 
@@ -443,7 +446,45 @@ def release_thread_proxy():
     return chosen
 
 
-def urlopen_with_config(request, config, timeout=30):
+class SessionRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, newurl):
+        from threads_session import allowed_session_url, SessionError
+        if not allowed_session_url(newurl):
+            raise SessionError("Chuyển hướng phiên Threads sang địa chỉ không được phép.")
+        return super().redirect_request(request, fp, code, message, headers, newurl)
+
+
+class ValidatedRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, validator):
+        self.validator = validator
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not self.validator(newurl):
+            raise ValueError("URL chuyển hướng không thuộc nền tảng được phép.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def urlopen_with_config(request, config, timeout=30, cookiejar=None, redirect_validator=None):
+    if redirect_validator is not None:
+        if not redirect_validator(request.full_url):
+            raise ValueError("URL không thuộc nền tảng được phép.")
+        handlers = [ValidatedRedirectHandler(redirect_validator)]
+        if cookiejar is not None:
+            handlers.extend([urllib.request.HTTPCookieProcessor(cookiejar), SessionRedirectHandler()])
+        if config and config.get("enabled") and config.get("type") == "socks5":
+            return _socks_urlopen(request, config, timeout, extra_handlers=handlers)
+        routes = {"http": build_http_proxy_url(config), "https": build_http_proxy_url(config)} if config and config.get("enabled") else {}
+        return urllib.request.build_opener(urllib.request.ProxyHandler(routes), *handlers).open(request, timeout=timeout)
+    if cookiejar is not None:
+        from threads_session import allowed_session_url, SessionError
+        if not allowed_session_url(request.full_url):
+            raise SessionError("Phiên Threads chỉ được gửi tới HTTPS Threads.")
+        handlers = (urllib.request.HTTPCookieProcessor(cookiejar), SessionRedirectHandler())
+        if config and config.get("enabled") and config.get("type") == "socks5":
+            return _socks_urlopen(request, config, timeout, extra_handlers=handlers)
+        routes = {"http": build_http_proxy_url(config), "https": build_http_proxy_url(config)} if config and config.get("enabled") else {}
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler(routes), *handlers)
+        return opener.open(request, timeout=timeout)
     if not config or not config.get("enabled"):
         return _direct_opener().open(request, timeout=timeout)
 
@@ -453,9 +494,9 @@ def urlopen_with_config(request, config, timeout=30):
     return _http_proxy_opener(config).open(request, timeout=timeout)
 
 
-def urlopen_request(request, timeout=30):
+def urlopen_request(request, timeout=30, redirect_validator=None):
     config = pick_session_proxy()
-    return urlopen_with_config(request, config, timeout=timeout)
+    return urlopen_with_config(request, config, timeout=timeout, redirect_validator=redirect_validator)
 
 
 def fetch_ip_via_config(config, timeout=25, retries=2):

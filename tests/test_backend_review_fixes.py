@@ -230,3 +230,164 @@ def test_scan_target_stays_bound_if_selection_changes(isolated_backend, monkeypa
     asyncio.run(backend.run_scraper_safely(str(isolated_backend / "A.xlsx"), 1, sheet_name="Data", push_to_google=True))
     assert observed == ["A.xlsx", "ID_A"]
     assert backend.manager.last_status["phase"] == "completed"
+
+
+@pytest.mark.parametrize("mode,use_request,browser_fallback", [
+    ("request", True, False), ("browser", False, False), ("hybrid", True, True),
+])
+@pytest.mark.parametrize("use_proxy", [False, True])
+def test_threads_dispatch_forwards_proxy_settings(isolated_backend, monkeypatch, mode, use_request, browser_fallback, use_proxy):
+    calls = []
+    async def fake_threads(path, events, **kwargs):
+        calls.append((path, kwargs))
+    monkeypatch.setattr(backend, "run_threads_scraper", fake_threads)
+    text = "http://fixture-user:fixture-password@proxy.example:8080"
+    target = str(isolated_backend / "A.xlsx")
+    asyncio.run(backend.run_scraper_safely(
+        target, 3, platform="threads", sheet_name="Data", partners=["Partner"],
+        use_request=use_request, browser_fallback=browser_fallback, use_proxy=use_proxy, proxy_text=text,
+    ))
+    assert calls == [(target, {
+        "worker_count": 3, "selected_partners": ["Partner"], "sheet_name": "Data", "mode": mode,
+        "base_dir": str(isolated_backend), "use_proxy": use_proxy, "proxy_text": text,
+    })]
+    assert backend.manager.last_status["phase"] == "completed"
+
+
+def save_fixture_proxy_list(base_dir, text):
+    path = base_dir / "data" / "proxy_list.txt"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+@pytest.mark.parametrize("inline,saved,valid", [
+    ("", "proxy.example:8080", True),
+    ("proxy.example:8080", "", True),
+    ("", "", False),
+    ("", '{"enabled":false,"host":"proxy.example","port":8080}', False),
+    ('{"enabled":false,"host":"proxy.example","port":8080}', "proxy.example:8080", False),
+    ("malformed-fixture-password", "proxy.example:8080", False),
+    ("proxy.example:8080\nmalformed-fixture-password", "", False),
+    ("", "malformed-fixture-password", False),
+    ("http://fixture-user:fixture-password@proxy.example:bad-port", "proxy.example:8080", False),
+])
+def test_threads_proxy_validation_strict_inline_or_saved(tmp_path, inline, saved, valid):
+    save_fixture_proxy_list(tmp_path, saved)
+    error = backend.validate_proxy_start(True, inline, str(tmp_path), platform="threads")
+    assert (error is None) == valid
+    if error:
+        assert "fixture-user" not in error
+        assert "fixture-password" not in error
+        assert "proxy.example" not in error
+
+
+@pytest.mark.parametrize("mode,valid", [("request", True), ("browser", False), ("hybrid", False)])
+@pytest.mark.parametrize("saved", [False, True])
+def test_threads_authenticated_socks_proxy_mode_validation(tmp_path, mode, valid, saved):
+    text = "socks5://fixture-user:fixture-password@proxy.example:1080"
+    save_fixture_proxy_list(tmp_path, text if saved else "")
+    error = backend.validate_proxy_start(True, "" if saved else text, str(tmp_path), platform="threads", mode=mode)
+    assert (error is None) == valid
+    if error:
+        assert "fixture-user" not in error
+        assert "fixture-password" not in error
+
+
+def test_proxy_validation_off_skips_threads_resolver(tmp_path, monkeypatch):
+    def unexpected(*args):
+        pytest.fail("Proxy-off validation must not resolve proxy configuration")
+    monkeypatch.setattr(backend, "resolve_threads_proxies", unexpected)
+    assert backend.validate_proxy_start(False, "malformed", str(tmp_path), platform="threads", mode="hybrid") is None
+
+
+def test_threads_proxy_validation_returns_safe_resolver_error(tmp_path, monkeypatch):
+    calls = []
+    def reject(base_dir, proxy_text, mode):
+        calls.append((base_dir, proxy_text, mode))
+        raise ValueError("Fixture safe proxy validation error")
+    monkeypatch.setattr(backend, "resolve_threads_proxies", reject)
+    error = backend.validate_proxy_start(True, "fixture input", str(tmp_path), platform="threads", mode="hybrid")
+    assert error == "Fixture safe proxy validation error"
+    assert calls == [(str(tmp_path), "fixture input", "hybrid")]
+
+
+def test_proxy_validation_preserves_tiktok_defaults_and_fallback(tmp_path):
+    assert backend.validate_proxy_start(False, "", str(tmp_path)) is None
+    assert backend.validate_proxy_start(True, "", str(tmp_path))
+    save_fixture_proxy_list(tmp_path, "proxy.example:8080")
+    # TikTok intentionally retains its existing lenient inline parsing and saved fallback.
+    assert backend.validate_proxy_start(True, "malformed", str(tmp_path)) is None
+    assert backend.validate_proxy_start(True, "proxy.example:8080\nmalformed", str(tmp_path)) is None
+    assert backend.validate_proxy_start(True, "socks5://fixture-user:fixture-password@proxy.example:1080",
+                                        str(tmp_path), platform="tiktok", mode="hybrid") is None
+
+
+async def run_fixture_websocket_start(monkeypatch, payload):
+    class FixtureSocket:
+        def __init__(self):
+            self.messages = []
+            self.received = False
+        async def accept(self):
+            pass
+        async def send_json(self, message):
+            self.messages.append(message)
+        async def receive_text(self):
+            if not self.received:
+                self.received = True
+                return backend.json.dumps({"action": "start", "sheet_name": "Data", **payload})
+            await asyncio.sleep(0)
+            raise WebSocketDisconnect()
+    monkeypatch.setattr(backend, "trusted_local_request", lambda *args, **kwargs: True)
+    monkeypatch.setattr(backend, "valid_local_session", lambda *args: True)
+    socket = FixtureSocket()
+    await backend.websocket_endpoint(socket)
+    if backend.SCRAPE_TASK:
+        await backend.SCRAPE_TASK
+    return socket.messages
+
+
+@pytest.mark.parametrize("platform", ["threads", "tiktok"])
+@pytest.mark.parametrize("input_mode,expected_mode", [
+    ("request", "request"), ("browser", "browser"), ("hybrid", "hybrid"), ("invalid", "request"),
+])
+def test_websocket_start_passes_platform_and_normalized_mode(isolated_backend, monkeypatch, platform, input_mode, expected_mode):
+    validation_calls, dispatch_calls = [], []
+    def validate(use_proxy, proxy_text, base_dir, platform="tiktok", mode="request"):
+        validation_calls.append((use_proxy, proxy_text, base_dir, platform, mode))
+    async def fake_runner(path, workers, **kwargs):
+        dispatch_calls.append(kwargs)
+    monkeypatch.setattr(backend, "validate_proxy_start", validate)
+    monkeypatch.setattr(backend, "run_scraper_safely", fake_runner)
+    asyncio.run(run_fixture_websocket_start(monkeypatch, {
+        "platform": platform, "scrape_mode": input_mode, "use_proxy": True, "proxy_text": "proxy.example:8080",
+    }))
+    assert validation_calls == [(True, "proxy.example:8080", str(isolated_backend), platform, expected_mode)]
+    assert len(dispatch_calls) == 1
+    assert dispatch_calls[0]["platform"] == platform
+    assert dispatch_calls[0]["use_proxy"] is True
+    assert dispatch_calls[0]["proxy_text"] == "proxy.example:8080"
+    assert dispatch_calls[0]["use_request"] == (expected_mode != "browser")
+    assert dispatch_calls[0]["browser_fallback"] == (expected_mode == "hybrid")
+
+
+@pytest.mark.parametrize("text,mode", [
+    ("malformed-fixture-password", "request"),
+    ('{"enabled":false,"host":"proxy.example","port":8080}', "request"),
+    ("socks5://fixture-user:fixture-password@proxy.example:1080", "hybrid"),
+])
+def test_websocket_rejects_invalid_threads_proxy_before_dispatch(isolated_backend, monkeypatch, text, mode):
+    calls = []
+    async def fake_runner(*args, **kwargs):
+        calls.append(kwargs)
+    monkeypatch.setattr(backend, "run_scraper_safely", fake_runner)
+    save_fixture_proxy_list(isolated_backend, "proxy.example:8080")
+    messages = asyncio.run(run_fixture_websocket_start(monkeypatch, {
+        "platform": "threads", "scrape_mode": mode, "use_proxy": True, "proxy_text": text,
+    }))
+    assert not calls
+    assert backend.SCRAPE_TASK is None
+    assert not backend.manager.running
+    assert any(message.get("data", {}).get("phase") == "failed" for message in messages)
+    output = backend.json.dumps(messages)
+    assert "fixture-user" not in output
+    assert "fixture-password" not in output

@@ -16,6 +16,20 @@ let scanCompletedForCurrentFile = false;
 let googleOAuthAuthorized = false;
 let activePlatform = 'tiktok';
 const platformScrapeModes = { tiktok: 'request', threads: 'hybrid' };
+const platformSources = {
+    tiktok: { fileId: '', label: '', displaySheet: '', scanSheet: '', pushSheet: '', sheets: [], url: '', dirty: false, ready: false },
+    threads: { fileId: '', label: '', displaySheet: '', scanSheet: '', pushSheet: '', sheets: [], url: '', dirty: false, ready: false }
+};
+let sourceBusy = false;
+let sourceRevision = 0;
+let sourcesInitialized = false;
+let sourcePreferencesLoad = null;
+let sourcePreferencesReady = false;
+let sourcePreferencesGeneration = 0;
+let sourcePreferencesPending = null;
+let sourcePreferencesWriting = false;
+let sourcePreferencesSaveFailed = false;
+let sourcePreferencesScheduled = false;
 let activeWorkspaceTab = 'sheet';
 let pendingLiveResults = 0;
 let desktopUpdateCheckInFlight = false;
@@ -24,6 +38,8 @@ let websocketSessionReady = false;
 let scanPhase = 'idle';
 let currentRunContext = null;
 let lastTerminalStatus = '';
+const liveResultClasses = new Map();
+let lastProgressData = null;
 const readRequestSequence = { files: 0, preview: 0, summary: 0, partners: 0 };
 const startBtn = document.getElementById('startBtn');
 const cancelBtn = document.getElementById('cancelBtn');
@@ -38,6 +54,11 @@ const proxyConfigBtn = document.getElementById('proxyConfigBtn');
 let proxyListText = '';
 let proxySavedCount = 0;
 const SERVER_BUILD_KEY = 'serverProxyBuild';
+let threadsCookieState = { configured: false, state: 'none', generation: '' };
+let threadsCookieBusy = false;
+let threadsCookieFocus = null;
+let threadsCookieSource = 'file';
+let threadsCookieRevision = 0;
 
 const BTN_START_IDLE = '<span class="material-icons-outlined">play_arrow</span><span>Bắt đầu quét</span>';
 const BTN_START_BUSY = '<span class="material-icons-outlined">hourglass_top</span><span>Đang quét...</span>';
@@ -63,6 +84,8 @@ function applyPlatformUI(platform) {
     platformScrapeModes[activePlatform] = scrapeModeSelect.value;
     activePlatform = platform;
     document.body.dataset.platform = platform;
+    const sessionControls = document.getElementById('threadsSessionControls');
+    if (sessionControls) sessionControls.hidden = platform !== 'threads';
     scrapeModeSelect.value = platformScrapeModes[platform];
     document.querySelectorAll('.platform-option').forEach(button => {
         const selected = button.id === (platform === 'threads' ? 'platformThreads' : 'platformTikTok');
@@ -72,11 +95,27 @@ function applyPlatformUI(platform) {
     document.getElementById('liveLinkHeader').textContent = platform === 'threads' ? 'LINK THREADS' : 'LINK TIKTOK';
     document.getElementById('liveSavedHeader').textContent = platform === 'threads' ? 'REPOST' : 'LƯỢT LƯU';
     document.getElementById('reportMinViewRow').hidden = platform === 'threads';
+    const reportIcon = document.getElementById('reportPlatformIcon');
+    const reportLabel = document.getElementById('reportPlatformLabel');
+    if (reportIcon) reportIcon.src = `/static/platform-icons/${platform}.svg`;
+    if (reportLabel) reportLabel.textContent = `Đối tác & báo cáo ${platform === 'threads' ? 'Threads' : 'TikTok'}`;
 }
 
-function setPlatform(platform) {
-    if (!['tiktok', 'threads'].includes(platform) || scanIsBusy() || desktopUpdateInstalling || activePlatform === platform) return;
-    applyPlatformUI(platform);
+async function setPlatform(platform) {
+    if (!['tiktok', 'threads'].includes(platform) || scanIsBusy() || desktopUpdateInstalling || sourceBusy || threadsCookieBusy || activePlatform === platform) return;
+    saveActiveSource();
+    sourceBusy = true;
+    ++sourceRevision;
+    syncScanControls();
+    try {
+        if (platformSources[platform].fileId) await activateSource(platform);
+        applyPlatformUI(platform);
+        restoreActiveSource();
+    } catch (error) {
+        notify(error.message || 'Không chuyển được nguồn dữ liệu.', 'error');
+        return;
+    } finally { sourceBusy = false; syncScanControls(); }
+    liveResultClasses.clear(); lastProgressData = null;
     document.getElementById('dataFeed').innerHTML = '<tr><td colspan="10" class="workspace-empty">Chưa có kết quả mới</td></tr>';
     for (const id of ['processedLinks', 'successLinks', 'hiddenCountBadge', 'failedCountBadge']) {
         document.getElementById(id).textContent = '0';
@@ -505,7 +544,7 @@ function renderScanSheetOptions(sheets, selectedSheet = '') {
 
 function renderPushSheetOptions(sheets, selectedSheet = '') {
     renderSheetSelect(
-        pushSheetSelect,
+        sourceControls(activePlatform).sheet,
         sheets,
         selectedSheet || currentPushSheetName || currentScanSheetName,
         value => { currentPushSheetName = value; setGooglePushState(); }
@@ -513,24 +552,18 @@ function renderPushSheetOptions(sheets, selectedSheet = '') {
 }
 
 function hasGoogleTargetUrl() {
-    return Boolean(googleSheetUrlInput.value.trim());
+    return Boolean(sourceControls(activePlatform).url?.value.trim());
 }
 
 
 function setGooglePushState() {
-    const button = document.getElementById('pushGoogleBtn');
-    if (!button) return;
-    const hasUrl = hasGoogleTargetUrl();
-    const enabled = Boolean(
-        !scanIsBusy() && !desktopUpdateInstalling && googleOAuthAuthorized
-        && hasUrl
-        && currentFileId
-        && (pushSheetSelect.value || currentPushSheetName)
-    );
-    button.disabled = !enabled;
-    button.title = enabled
-        ? ''
-        : 'Cần: đăng nhập Google, URL sheet đích, file local và sheet nguồn.';
+    for (const platform of ['tiktok', 'threads']) {
+        const source = platformSources[platform], controls = sourceControls(platform);
+        const fileId = platform === activePlatform ? currentFileId : source.fileId;
+        const enabled = Boolean(!scanIsBusy() && !desktopUpdateInstalling && !sourceBusy && !threadsCookieBusy
+            && googleOAuthAuthorized && controls.url?.value.trim() && fileId && (controls.sheet?.value || source.pushSheet));
+        if (controls.push) { controls.push.disabled = !enabled; controls.push.title = enabled ? '' : 'Cần đăng nhập Google, link đích và file/sheet của nền tảng này.'; }
+    }
 }
 
 function rememberServerBuild(build) {
@@ -670,7 +703,7 @@ async function refreshProxyStatus() {
 function updateProxyModalSummary(count) {
     if (!proxyModalSummary) return;
     if (count > 0) {
-        proxyModalSummary.textContent = `Đã lưu ${count} proxy. Mỗi dòng 1 proxy — nhiều dòng sẽ chọn ngẫu nhiên khi quét.`;
+        proxyModalSummary.textContent = `Đã lưu ${count} proxy. Mỗi dòng 1 proxy — các tuyến proxy được phân bổ cho luồng quét tùy nền tảng và chế độ.`;
     } else {
         proxyModalSummary.textContent = 'Chưa có proxy. Dán vào ô bên dưới rồi Test hoặc Lưu.';
     }
@@ -825,22 +858,189 @@ function renderSummaryTableCell(column, value, { footer = false } = {}) {
 }
 
 function setPreviewTableVisible(visible) {
-    document.querySelector('#previewTable').closest('.table-wrap').style.display = visible ? '' : 'none';
+    const wrapper = document.querySelector('#previewTable')?.closest('.table-wrap');
+    if (wrapper) wrapper.style.display = visible ? '' : 'none';
     document.getElementById('summaryDashboard').classList.toggle('active', !visible);
+}
+
+function sourceControls(platform) {
+    return platform === 'threads'
+        ? { url: document.getElementById('threadsGoogleSheetUrlInput'), sheet: document.getElementById('threadsPushSheetSelect'), sync: document.getElementById('threadsSyncSheetBtn'), push: document.getElementById('threadsPushGoogleBtn'), label: document.getElementById('sourceFileThreads') }
+        : { url: googleSheetUrlInput, sheet: pushSheetSelect, sync: document.getElementById('syncSheetBtn'), push: document.getElementById('pushGoogleBtn'), label: document.getElementById('sourceFileTikTok') };
+}
+
+function validatedSourcePreferences(sources) {
+    if (!sources || typeof sources !== 'object' || Array.isArray(sources)) throw new Error('Nguồn đã lưu không hợp lệ.');
+    const result = {};
+    for (const platform of ['tiktok', 'threads']) {
+        const item = sources[platform];
+        if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Nguồn đã lưu không hợp lệ.');
+        const source = {};
+        for (const key of ['fileId', 'displaySheet', 'scanSheet', 'pushSheet', 'url']) {
+            const value = item[key] ?? '';
+            if (typeof value !== 'string' || /[\x00-\x1f\x7f]/.test(value)) throw new Error('Nguồn đã lưu không hợp lệ.');
+            source[key] = key === 'url' ? value.trim() : value;
+        }
+        if (source.fileId.length > 1024 || /^(?:[\\/]|[A-Za-z]:)/.test(source.fileId)
+            || source.fileId.split(/[\\/]/).some(part => ['.', '..'].includes(part))) throw new Error('Tên file đã lưu không hợp lệ.');
+        for (const key of ['displaySheet', 'scanSheet', 'pushSheet']) {
+            if (source[key].length > 31 || /[\\/?*\[\]:]/.test(source[key])) throw new Error('Tên sheet đã lưu không hợp lệ.');
+        }
+        if (source.url) {
+            const url = new URL(source.url);
+            const path = url.pathname.match(/^\/spreadsheets\/d\/([A-Za-z0-9_-]+)(?:\/(?:edit|view|copy))?\/?$/);
+            if (source.url.length >= 4096 || url.protocol !== 'https:' || url.hostname !== 'docs.google.com' || url.port || url.username || url.password || !path) throw new Error('URL Google Sheet đã lưu không hợp lệ.');
+            const gid = url.searchParams.get('gid') || new URLSearchParams(url.hash.slice(1)).get('gid');
+            source.url = `https://docs.google.com/spreadsheets/d/${path[1]}/edit${gid && /^\d+$/.test(gid) ? `#gid=${gid}` : ''}`;
+        }
+        result[platform] = source;
+    }
+    return result;
+}
+
+function sourcePreferencesSnapshot() {
+    // Do not include cookies, proxy settings, labels or runtime state in persistent preferences.
+    const sources = {};
+    for (const platform of ['tiktok', 'threads']) {
+        const { fileId, displaySheet, scanSheet, pushSheet, url } = platformSources[platform];
+        sources[platform] = { fileId, displaySheet, scanSheet, pushSheet, url };
+    }
+    // A partially typed/invalid URL is UI state, not a persistable Google target.
+    for (const platform of ['tiktok', 'threads']) {
+        const source = sources[platform];
+        try { source.url = validatedSourcePreferences({ tiktok: source, threads: source }).tiktok.url; }
+        catch { source.url = ''; }
+    }
+    return validatedSourcePreferences(sources);
+}
+
+function storeSourcePreferencesFallback(sources) {
+    try { localStorage.setItem('riviuPlatformSourcesV1', JSON.stringify(sources)); } catch {}
+}
+
+function loadSourcePreferences() {
+    if (sourcePreferencesLoad) return sourcePreferencesLoad;
+    const generation = sourcePreferencesGeneration;
+    sourcePreferencesLoad = (async () => {
+        let sources;
+        try {
+            const response = await fetch('/source-preferences');
+            const data = await response.json();
+            if (!response.ok || data.error) throw new Error(data.error || 'Không tải được nguồn đã lưu.');
+            sources = validatedSourcePreferences(data.sources);
+        } catch {
+            sourcePreferencesSaveFailed = true;
+            try { sources = validatedSourcePreferences(JSON.parse(localStorage.getItem('riviuPlatformSourcesV1') || 'null')); } catch {}
+        }
+        if (sources && generation === sourcePreferencesGeneration) {
+            for (const platform of ['tiktok', 'threads']) Object.assign(platformSources[platform], sources[platform]);
+        }
+        sourcePreferencesReady = true;
+        scheduleSourcePreferencesSave();
+    })();
+    return sourcePreferencesLoad;
+}
+
+function scheduleSourcePreferencesSave() {
+    if (!sourcePreferencesReady || !sourcePreferencesPending || sourcePreferencesScheduled || sourcePreferencesWriting
+        || sourceBusy || scanIsBusy() || desktopUpdateInstalling) return;
+    sourcePreferencesScheduled = true;
+    Promise.resolve().then(() => {
+        sourcePreferencesScheduled = false;
+        void flushSourcePreferences();
+    });
+}
+
+async function flushSourcePreferences() {
+    if (!sourcePreferencesReady || sourcePreferencesWriting || !sourcePreferencesPending
+        || sourceBusy || scanIsBusy() || desktopUpdateInstalling) return;
+    sourcePreferencesWriting = true;
+    try {
+        while (sourcePreferencesPending && !sourceBusy && !scanIsBusy() && !desktopUpdateInstalling) {
+            const pending = sourcePreferencesPending;
+            sourcePreferencesPending = null;
+            try {
+                const response = await fetch('/source-preferences', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sources: pending.sources }) });
+                const data = await response.json();
+                if (response.status === 409) {
+                    sourcePreferencesPending ||= pending;
+                    break; // Retry on the next idle control sync, not while the backend is locked.
+                }
+                if (!response.ok || !data.success) throw new Error(data.error || 'Không lưu được nguồn dữ liệu.');
+                sourcePreferencesSaveFailed = false;
+                try { localStorage.removeItem('riviuPlatformSourcesV1'); } catch {}
+            } catch {
+                sourcePreferencesSaveFailed = true;
+                storeSourcePreferencesFallback(sourcePreferencesPending?.sources || pending.sources);
+            }
+        }
+    } finally {
+        sourcePreferencesWriting = false;
+    }
+}
+
+function persistSources() {
+    ++sourcePreferencesGeneration;
+    try {
+        sourcePreferencesPending = { generation: sourcePreferencesGeneration, sources: sourcePreferencesSnapshot() };
+        if (sourcePreferencesSaveFailed) storeSourcePreferencesFallback(sourcePreferencesPending.sources);
+        scheduleSourcePreferencesSave();
+    } catch {}
+}
+
+function saveActiveSource() {
+    const source = platformSources[activePlatform];
+    Object.assign(source, { fileId: currentFileId, displaySheet: currentSheetName, scanSheet: currentScanSheetName, pushSheet: currentPushSheetName, dirty: googleSheetUrlDirty, ready: googlePushReady });
+    source.url = sourceControls(activePlatform).url?.value || source.url;
+    persistSources();
+}
+
+function renderSourceRows() {
+    for (const platform of ['tiktok', 'threads']) {
+        const source = platformSources[platform], controls = sourceControls(platform);
+        if (controls.url && controls.url.value !== source.url) controls.url.value = source.url;
+        if (controls.sheet) renderSheetSelect(controls.sheet, source.sheets, source.pushSheet || source.scanSheet, value => { source.pushSheet = value; });
+        if (controls.label) { controls.label.textContent = source.label || source.fileId || 'Chưa chọn file'; controls.label.title = source.label || source.fileId; }
+        if (controls.push) controls.push.disabled = sourceBusy || scanIsBusy() || desktopUpdateInstalling || !source.fileId || !source.ready;
+    }
+}
+
+function restoreActiveSource() {
+    const source = platformSources[activePlatform];
+    currentFileId = source.fileId; currentSheetName = source.displaySheet;
+    currentScanSheetName = source.scanSheet; currentPushSheetName = source.pushSheet;
+    googleSheetUrlDirty = source.dirty; googlePushReady = source.ready;
+    renderScanSheetOptions(source.sheets, currentScanSheetName);
+    renderSourceRows();
+    document.getElementById('excelFileSelect').value = currentFileId;
+    syncCompactSourceSummary(source.label || source.fileId, currentScanSheetName);
+    setGooglePushState();
+}
+
+async function activateSource(platform) {
+    const source = platformSources[platform];
+    if (!source.fileId) return;
+    const response = await fetch('/select-file', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ filename: source.fileId, platform, sheet_name: source.displaySheet, scan_sheet: source.scanSheet }) });
+    const data = await response.json();
+    if (!response.ok || !data.success) throw new Error(data.error || 'Không chọn được workbook.');
+    source.displaySheet = data.sheet || ''; source.scanSheet = data.scanSheet || source.displaySheet;
+    source.pushSheet = source.sheets.includes(source.pushSheet) ? source.pushSheet : source.scanSheet;
+    persistSources();
+}
+
+function sourceQuery(extra = {}, platform = activePlatform, fileId = currentFileId) {
+    return new URLSearchParams({ ...extra, file_id: fileId, platform });
 }
 
 function setGoogleSheetUrlField(url, { force = false } = {}) {
     const normalized = String(url || '').trim();
-    if (!normalized) return;
     if (force || !googleSheetUrlDirty) {
-        googleSheetUrlInput.value = normalized;
-        if (force) googleSheetUrlDirty = false;
+        const source = platformSources[activePlatform];
+        source.url = normalized;
+        if (sourceControls(activePlatform).url) sourceControls(activePlatform).url.value = normalized;
+        if (force) googleSheetUrlDirty = source.dirty = false;
     }
-}
-
-function markGoogleSheetUrlDirty() {
-    googleSheetUrlDirty = true;
-    setGooglePushState();
 }
 
 function beginReadRequest(kind, sheetName = undefined) {
@@ -848,7 +1048,8 @@ function beginReadRequest(kind, sheetName = undefined) {
     const fileId = currentFileId;
     const platform = activePlatform;
     const displaySheet = currentSheetName;
-    return (data = {}) => sequence === readRequestSequence[kind]
+    const revision = sourceRevision;
+    return (data = {}) => revision === sourceRevision && sequence === readRequestSequence[kind]
         && fileId === currentFileId && platform === activePlatform
         && (sheetName === undefined || displaySheet === currentSheetName)
         && (!fileId || !(data.file || data.current) || (data.file || data.current) === fileId);
@@ -857,16 +1058,43 @@ function beginReadRequest(kind, sheetName = undefined) {
 async function updateFileList({ applyGoogleSheetUrl = false } = {}) {
     const isCurrent = beginReadRequest('files');
     try {
-        const res = await fetch('/list-files');
+        const query = sourcesInitialized ? `?${sourceQuery()}` : '';
+        const res = await fetch(`/list-files${query}`);
         const data = await res.json();
         if (!isCurrent(data)) return;
+        if (!res.ok || data.error) throw new Error(data.error || 'Không tải được nguồn dữ liệu.');
         const select = document.getElementById('excelFileSelect');
         select.innerHTML = '';
 
-        if (applyGoogleSheetUrl) {
-            setGoogleSheetUrlField(data.googleSheetUrl);
+        const firstLoad = !sourcesInitialized;
+        if (firstLoad) {
+            sourcesInitialized = true;
+            const saved = platformSources[activePlatform];
+            if (saved.fileId && (data.files || []).some(file => file.id === saved.fileId)) {
+                sourceBusy = true; syncScanControls();
+                try {
+                    // Sheet options belong to the saved workbook, not the server's previous current file.
+                    let savedData = data;
+                    if (saved.fileId !== data.current) {
+                        const savedResponse = await fetch(`/list-files?${sourceQuery({}, activePlatform, saved.fileId)}`);
+                        savedData = await savedResponse.json();
+                        if (!isCurrent()) return;
+                        if (!savedResponse.ok || savedData.error || savedData.current !== saved.fileId) throw new Error(savedData.error || 'Không tải được workbook đã lưu.');
+                    }
+                    saved.sheets = savedData.sheets || [];
+                    saved.label = savedData.currentLabel || saved.fileId;
+                    await activateSource(activePlatform);
+                    restoreActiveSource();
+                    await updateFileList({ applyGoogleSheetUrl: !saved.url });
+                } finally { sourceBusy = false; syncScanControls(); }
+                return;
+            }
         }
+        if (applyGoogleSheetUrl) setGoogleSheetUrlField(data.googleSheetUrl);
         currentFileId = data.current || '';
+        platformSources[activePlatform].sheets = data.sheets || [];
+        platformSources[activePlatform].label = data.currentLabel || currentFileId;
+        currentSheetName = (data.sheets || []).includes(currentSheetName) ? currentSheetName : data.currentSheet || data.scanSheet || '';
         currentScanSheetName = (data.sheets || []).includes(currentScanSheetName)
             ? currentScanSheetName : data.scanSheet || data.currentSheet || '';
         currentPushSheetName = currentPushSheetName || currentScanSheetName;
@@ -881,6 +1109,7 @@ async function updateFileList({ applyGoogleSheetUrl = false } = {}) {
             renderScanSheetOptions([], '');
             renderPushSheetOptions([], '');
             syncCompactSourceSummary('', '');
+            saveActiveSource(); renderSourceRows();
             return;
         }
 
@@ -893,6 +1122,8 @@ async function updateFileList({ applyGoogleSheetUrl = false } = {}) {
         });
         syncCompactSourceSummary('', currentScanSheetName);
         await refreshGoogleOauthStatus();
+        saveActiveSource();
+        renderSourceRows();
     } catch (error) {
         if (!isCurrent()) return;
         console.error(error);
@@ -904,7 +1135,9 @@ async function updateFileList({ applyGoogleSheetUrl = false } = {}) {
 }
 
 async function selectFile(fileId) {
-    if (!fileId) return;
+    if (!fileId || sourceBusy || scanIsBusy() || threadsCookieBusy || desktopUpdateInstalling) return;
+    const platform = activePlatform;
+    sourceBusy = true; ++sourceRevision; syncScanControls();
     try {
         scanCompletedForCurrentFile = false;
         currentSheetName = '';
@@ -912,7 +1145,7 @@ async function selectFile(fileId) {
         const res = await fetch('/select-file', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ filename: fileId })
+            body: JSON.stringify({ filename: fileId, platform })
         });
         const data = await res.json();
         if (!data.success) throw new Error(data.error || 'Không chọn được file');
@@ -920,22 +1153,27 @@ async function selectFile(fileId) {
         currentSheetName = data.sheet || '';
         currentScanSheetName = data.scanSheet || currentSheetName;
         currentPushSheetName = currentScanSheetName;
-        await updateFileList({ applyGoogleSheetUrl: !googleSheetUrlDirty });
+        Object.assign(platformSources[platform], { fileId: currentFileId, displaySheet: currentSheetName, scanSheet: currentScanSheetName, pushSheet: currentPushSheetName, dirty: false });
+        googleSheetUrlDirty = false;
+        await updateFileList({ applyGoogleSheetUrl: true });
         await loadPreview();
         addLog(`Đã chuyển sang sheet: ${fileDisplayLabel({ id: currentFileId, label: currentFileId })}`);
     } catch (error) {
         addLog(`Lỗi: ${error.message}`);
-    }
+    } finally { sourceBusy = false; syncScanControls(); }
 }
 
-async function syncGoogleSheet() {
-    const url = googleSheetUrlInput.value.trim();
+async function syncGoogleSheet(platform = activePlatform) {
+    if (!['tiktok', 'threads'].includes(platform) || sourceBusy || scanIsBusy() || threadsCookieBusy || desktopUpdateInstalling) return;
+    const controls = sourceControls(platform);
+    const url = controls.url.value.trim();
     if (!url) {
         addLog('Vui lòng nhập URL Google Sheet.');
         return;
     }
 
-    const btn = document.getElementById('syncSheetBtn');
+    sourceBusy = true; const revision = ++sourceRevision; syncScanControls();
+    const btn = controls.sync;
     const originalHtml = btn.innerHTML;
     btn.disabled = true;
     btn.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> Đang đồng bộ...';
@@ -946,35 +1184,44 @@ async function syncGoogleSheet() {
         const res = await fetch('/sync-google-sheet', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url })
+            body: JSON.stringify({ url, platform, activate: false })
         });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Không đồng bộ được Google Sheet');
 
-        currentFileId = data.file;
-        currentSheetName = data.currentSheet || '';
-        currentScanSheetName = data.scanSheet || currentSheetName;
-        currentPushSheetName = currentScanSheetName;
-        setGoogleSheetUrlField(url, { force: true });
-        await updateFileList();
-        await loadPreview();
+        if (revision !== sourceRevision) return;
+        const source = platformSources[platform];
+        Object.assign(source, { fileId: data.file, label: data.label || data.file, displaySheet: data.currentSheet || '', scanSheet: data.scanSheet || data.currentSheet || '', pushSheet: data.scanSheet || data.currentSheet || '', sheets: data.sheets || [], url, dirty: false, ready: googleOAuthAuthorized });
+        if (platform === activePlatform) {
+            await activateSource(platform);
+            restoreActiveSource();
+            await updateFileList();
+            await loadPreview();
+        }
+        persistSources(); renderSourceRows();
         notify(`Đã nạp Google Sheet: ${data.label || data.file || ''}`, 'success');
     } catch (error) {
         notify(`Lỗi đồng bộ Google Sheet: ${error.message}`, 'error');
     } finally {
-        btn.disabled = false;
         btn.innerHTML = originalHtml;
+        sourceBusy = false;
+        syncScanControls();
     }
 }
 
 async function uploadFile(input) {
+    if (sourceBusy || scanIsBusy() || threadsCookieBusy || desktopUpdateInstalling) return;
+    const platform = activePlatform;
     const file = input.files[0];
     if (!file) return;
+    sourceBusy = true; ++sourceRevision; syncScanControls();
     addLog(`Đang tải lên: ${file.name}...`);
     scanCompletedForCurrentFile = false;
     setGooglePushState();
     const formData = new FormData();
     formData.append('file', file);
+    formData.append('platform', platform);
+    formData.append('activate', 'false');
     try {
         const res = await fetch('/upload-excel', { method: 'POST', body: formData });
         const data = await res.json();
@@ -983,13 +1230,17 @@ async function uploadFile(input) {
         currentSheetName = data.sheet || '';
         currentScanSheetName = data.scanSheet || currentSheetName;
         currentPushSheetName = currentScanSheetName;
-        await updateFileList();
+        Object.assign(platformSources[platform], { fileId: currentFileId, displaySheet: currentSheetName, scanSheet: currentScanSheetName, pushSheet: currentPushSheetName, sheets: data.sheets || [], url: '', dirty: false });
+        await activateSource(platform);
+        restoreActiveSource();
+        await updateFileList({ applyGoogleSheetUrl: true });
         await loadPreview();
         notify(`Tải lên thành công: ${file.name}`, 'success');
     } catch (error) {
         notify(`Lỗi tải file: ${error.message}`, 'error');
     }
     input.value = '';
+    sourceBusy = false; syncScanControls();
 }
 
 async function uploadGoogleOauthClient(input) {
@@ -1030,22 +1281,28 @@ async function connectGoogleOAuth() {
     }
 }
 
-async function pushCurrentSheetToGoogle(event) {
-    const button = event?.currentTarget;
+async function pushCurrentSheetToGoogle(event, platform = activePlatform) {
+    if (sourceBusy || scanIsBusy() || threadsCookieBusy || desktopUpdateInstalling) return;
+    if (platform === activePlatform) saveActiveSource();
+    const source = platformSources[platform], controls = sourceControls(platform);
+    const fileId = source.fileId, sourceSheet = controls.sheet.value || source.pushSheet;
+    if (!fileId) { notify('Chưa chọn file cho nền tảng này.', 'warn'); return; }
+    const button = event?.currentTarget || controls.push;
     if (button && button.disabled) {
         addLog('Nút Tạo sheet cần đăng nhập Google, URL sheet đích, file local và sheet nguồn.');
         return;
     }
-    const url = googleSheetUrlInput.value.trim();
+    const url = controls.url.value.trim();
     if (!url) {
         addLog('Vui lòng nhập URL Google Sheet đích trước khi tạo sheet.');
         return;
     }
-    currentPushSheetName = pushSheetSelect.value || currentPushSheetName;
-    if (!currentPushSheetName) {
+    source.pushSheet = sourceSheet;
+    if (!sourceSheet) {
         addLog('Vui lòng chọn sheet nguồn trước khi tạo sheet Google.');
         return;
     }
+    sourceBusy = true; syncScanControls();
     const originalHtml = button ? button.innerHTML : '';
     if (button) {
         button.disabled = true;
@@ -1055,7 +1312,7 @@ async function pushCurrentSheetToGoogle(event) {
         const res = await fetch('/push-google-sheet', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, sourceSheet: currentPushSheetName, platform: activePlatform })
+            body: JSON.stringify({ url, sourceSheet, platform, file_id: fileId })
         });
         const data = await res.json();
         if (!res.ok || !data.success) throw new Error(data.error || 'Không tạo được sheet trên Google');
@@ -1063,16 +1320,16 @@ async function pushCurrentSheetToGoogle(event) {
     } catch (error) {
         addLog(`Lỗi tạo sheet Google: ${error.message}`);
     } finally {
-        if (button) {
-            button.innerHTML = originalHtml;
-            setGooglePushState();
-        }
+        sourceBusy = false;
+        if (button) button.innerHTML = originalHtml;
+        syncScanControls();
     }
 }
 
 async function downloadCurrentWorkbook() {
+    if (!currentFileId || sourceBusy) return;
     const link = document.createElement('a');
-    link.href = '/download-excel';
+    link.href = `/download-excel?${sourceQuery()}`;
     link.click();
 }
 
@@ -1092,21 +1349,51 @@ function renderSheetTabs(sheets, currentSheet) {
 }
 
 async function switchSheet(sheetName) {
+    if (sourceBusy || scanIsBusy()) return;
     currentSheetName = sheetName;
+    saveActiveSource();
     await loadPreview(sheetName);
 }
 
+function matchesPlatformLink(value, platform = activePlatform) {
+    const text = String(value || '').trim();
+    if (!text || /[\x00-\x20\x7f\\]/.test(text)) return false;
+    try {
+        const url = new URL(text.startsWith('//') ? `https:${text}` : /^[a-z][a-z0-9+.-]*:/i.test(text) ? text : `https://${text}`);
+        if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password || url.port) return false;
+        if (platform === 'threads') return ['threads.com', 'www.threads.com', 'threads.net', 'www.threads.net'].includes(url.hostname)
+            && /^(?:\/@[^/]+\/post\/|\/share\/)[A-Za-z0-9_-]+\/?$/.test(url.pathname);
+        return ['tiktok.com', 'www.tiktok.com', 'm.tiktok.com', 'mobile.tiktok.com', 'vm.tiktok.com', 'vt.tiktok.com'].includes(url.hostname)
+            && url.pathname.length > 1;
+    } catch { return false; }
+}
+
 async function loadPreview(sheetName = '') {
+    if (sourcesInitialized && !currentFileId) {
+        ++readRequestSequence.preview;
+        ++readRequestSequence.summary;
+        setPreviewTableVisible(true);
+        document.getElementById('summaryDashboard').innerHTML = '';
+        document.getElementById('previewHeader').innerHTML = '';
+        document.getElementById('previewBody').innerHTML = '<tr><td colspan="10" class="workspace-empty">Chưa chọn nguồn cho nền tảng này.</td></tr>';
+        window.lastWorkbookSheets = [];
+        for (const id of ['totalLinks', 'processedLinks', 'successLinks', 'hiddenCountBadge', 'failedCountBadge']) {
+            document.getElementById(id).textContent = '0';
+        }
+        renderSheetTabs([], ''); return;
+    }
     const isCurrent = beginReadRequest('preview', sheetName || currentSheetName);
     try {
-        const query = sheetName || currentSheetName ? `?sheet_name=${encodeURIComponent(sheetName || currentSheetName)}` : '';
-        const res = await fetch(`/preview-excel${query}`);
+        const query = sourceQuery({ sheet_name: sheetName || currentSheetName });
+        const res = await fetch(`/preview-excel?${query}`);
         const data = await res.json();
         if (!isCurrent(data)) return;
         const header = document.getElementById('previewHeader');
         const body = document.getElementById('previewBody');
 
         if (data.error || data.message) {
+            setPreviewTableVisible(true);
+            document.getElementById('summaryDashboard').innerHTML = '';
             body.innerHTML = `<tr><td colspan="10" style="text-align:center; padding:40px">${escapeHtml(data.message || data.error)}</td></tr>`;
             header.innerHTML = '';
             return;
@@ -1116,12 +1403,14 @@ async function loadPreview(sheetName = '') {
         syncCompactSourceSummary(data.fileLabel || data.file || '', currentSheetName);
         renderSheetTabs(data.sheets || [], currentSheetName);
         renderScanSheetOptions(data.sheets || [], currentScanSheetName);
-        renderPushSheetOptions(data.sheets || [], currentPushSheetName);
+        platformSources[activePlatform].sheets = data.sheets || [];
+        platformSources[activePlatform].label = data.fileLabel || currentFileId;
+        saveActiveSource(); renderSourceRows();
 
         window.lastWorkbookSheets = data.sheets || [];
         if (isSummarySheetName(currentSheetName)) {
             await renderSummaryDashboard(
-                dataSheetNameForSummaryTab(currentSheetName, data.sheets || [])
+                data.summarySource || dataSheetNameForSummaryTab(currentSheetName, data.sheets || [])
             );
             return;
         }
@@ -1135,9 +1424,7 @@ async function loadPreview(sheetName = '') {
         }
 
         const linkColumn = data.columns.find(column => ['link', 'link air', 'url'].includes(normalizeVietnameseKey(column)));
-        const matchingLink = value => activePlatform === 'threads'
-            ? /https?:\/\/(?:www\.)?threads\.(?:com|net)\//i.test(String(value || ''))
-            : /(?:tiktok\.com|vt\.tiktok\.com)\//i.test(String(value || ''));
+        const matchingLink = value => matchesPlatformLink(value);
         const visibleRows = (data.data || []).filter(row => !linkColumn || matchingLink(row[linkColumn]) || (activePlatform === 'tiktok' && normalizeVietnameseKey(row[linkColumn]) === 'tong'));
         const displayColumns = activePlatform === 'threads' && data.columns.includes('LƯỢT LƯU')
             ? data.columns.filter(column => column !== 'LƯỢT LƯU' && column !== 'REPOST').reduce((columns, column) => {
@@ -1185,6 +1472,7 @@ async function loadPreview(sheetName = '') {
 }
 
 async function renderSummaryDashboard(dataSheetName = '') {
+    if (sourcesInitialized && !currentFileId) return;
     const isCurrent = beginReadRequest('summary', currentSheetName);
     const dashboard = document.getElementById('summaryDashboard');
     const header = document.getElementById('previewHeader');
@@ -1199,7 +1487,7 @@ async function renderSummaryDashboard(dataSheetName = '') {
         || currentScanSheetName
         || filterDataSheets(window.lastWorkbookSheets || [])[0]
         || '';
-    const query = resolvedDataSheet ? `?sheet_name=${encodeURIComponent(resolvedDataSheet)}` : '';
+    const query = `?${sourceQuery({ sheet_name: resolvedDataSheet || '' })}`;
 
     try {
         const res = await fetch(`/summary-dashboard${query}`);
@@ -1241,6 +1529,7 @@ async function renderSummaryDashboard(dataSheetName = '') {
             </div>
         `;
     } catch (error) {
+        if (!isCurrent()) return;
         dashboard.innerHTML = `<div class="summary-empty">${escapeHtml(error.message)}</div>`;
         addLog(`Lỗi tổng kết: ${error.message}`);
     }
@@ -1251,7 +1540,13 @@ function scanIsBusy() {
 }
 
 function syncScanControls() {
-    const busy = scanIsBusy() || desktopUpdateInstalling;
+    scheduleSourcePreferencesSave();
+    const busy = scanIsBusy() || desktopUpdateInstalling || threadsCookieBusy || sourceBusy;
+    for (const id of ['threadsCookieBtn', 'threadsCookieImport', 'threadsCookieVerify', 'threadsCookieDelete', 'threadsCookieDeleteAccept', 'threadsCookieDeleteCancel', 'threadsCookieTabFile', 'threadsCookieTabPaste', 'threadsSessionUse', 'threadsCookieFile', 'threadsCookieText']) {
+        const input = document.getElementById(id);
+        if (input) input.disabled = busy || (['threadsSessionUse', 'threadsCookieVerify', 'threadsCookieDelete'].includes(id) && !threadsCookieState.configured);
+    }
+    document.querySelectorAll('.threads-cookie-close').forEach(button => { button.disabled = threadsCookieBusy; });
     startBtn.disabled = busy;
     startBtn.innerHTML = busy ? BTN_START_BUSY : BTN_START_IDLE;
     cancelBtn.disabled = !scanIsBusy() || ['saving', 'cancelling'].includes(scanPhase);
@@ -1259,7 +1554,7 @@ function syncScanControls() {
     for (const input of [workerCountSelect, scrapeModeSelect, scanSheetSelect, proxyUseCheckbox, proxyConfigBtn]) {
         if (input) input.disabled = busy;
     }
-    for (const id of ['excelFileSelect', 'fileInput', 'syncSheetBtn', 'googleSheetUrlInput', 'pushSheetSelect']) {
+    for (const id of ['excelFileSelect', 'fileInput', 'syncSheetBtn', 'googleSheetUrlInput', 'pushSheetSelect', 'threadsGoogleSheetUrlInput', 'threadsSyncSheetBtn', 'threadsPushSheetSelect', 'threadsPushGoogleBtn']) {
         const input = document.getElementById(id);
         if (input) input.disabled = busy;
     }
@@ -1275,18 +1570,26 @@ function applyRunContext(context) {
         ['runId', 'platform', 'fileId', 'sheetName'].map(key => [key, context[key] ?? currentRunContext?.[key]])
     );
     if (changedRun) {
+        liveResultClasses.clear(); lastProgressData = null;
         document.getElementById('dataFeed').innerHTML = '';
         clearDuplicateLinks(false);
         clearFailedLinks(false);
         lastTerminalStatus = '';
     }
-    if (context.platform && activePlatform !== context.platform) applyPlatformUI(context.platform);
+    if (context.platform && activePlatform !== context.platform) {
+        saveActiveSource();
+        applyPlatformUI(context.platform);
+        restoreActiveSource();
+    }
+    const slot = platformSources[context.platform || activePlatform];
     if (context.fileId) {
         currentFileId = context.fileId;
+        slot.fileId = context.fileId;
         document.getElementById('excelFileSelect').value = context.fileId;
     }
     if (context.sheetName) {
         currentScanSheetName = context.sheetName;
+        slot.scanSheet = context.sheetName;
         scanSheetSelect.value = context.sheetName;
     }
 }
@@ -1302,8 +1605,9 @@ function connectWS() {
             websocketSessionReady = true;
             const session = message.data || {};
             scanPhase = session.running ? (session.status?.phase || 'running') : 'idle';
-            if (session.running || !currentFileId || session.fileId === currentFileId) {
+            if (session.running || session.platform === activePlatform && session.fileId === currentFileId && currentFileId) {
                 applyRunContext(session);
+                liveResultClasses.clear(); lastProgressData = null;
                 document.getElementById('dataFeed').innerHTML = '';
                 clearFailedLinks(false);
                 for (const row of session.results || []) appendData(row, session);
@@ -1316,11 +1620,15 @@ function connectWS() {
             syncScanControls();
             return;
         }
+        if (message.data?.done && message.platform && (message.platform !== activePlatform || message.fileId !== currentFileId)) return;
         if (message.runId && message.type !== 'log') applyRunContext(message);
         if (message.type === 'log') {
             addLog(message.message, { level: message.level || '', details: message.details || null });
         }
-        else if (message.type === 'status') updateProgress(message.data);
+        else if (message.type === 'status') {
+            updateProgress(message.data);
+            if (message.data?.done && activePlatform === 'threads') void refreshThreadsCookieStatus();
+        }
         else if (message.type === 'data') appendData(message.row, message);
         else if (message.type === 'duplicates') setDuplicateLinks(message.data);
     };
@@ -1332,8 +1640,161 @@ function connectWS() {
     };
 }
 
+function formatCookieCheckedAt(value) {
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return String(value);
+    return date.toLocaleString('vi-VN', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+}
+
+function renderThreadsCookieStatus(status) {
+    const previousGeneration = threadsCookieState.generation;
+    threadsCookieState = status || { configured: false, state: 'unknown', generation: '' };
+    if (previousGeneration !== threadsCookieState.generation) {
+        const use = document.getElementById('threadsSessionUse');
+        if (use) use.checked = false;
+    }
+    const labels = { none: 'Chưa import', unchecked: 'Chưa kiểm tra', valid: 'Hợp lệ', expired: 'Hết hạn', invalid: 'Không hợp lệ', checkpoint: 'Cần xác minh', unknown: 'Chưa xác định', storage_unavailable: 'Kho bảo mật không khả dụng' };
+    const text = labels[threadsCookieState.state] || 'Chưa xác định';
+    const badge = document.getElementById('threadsCookieStatus');
+    if (badge) { badge.textContent = text; badge.dataset.state = threadsCookieState.state; }
+    const card = document.getElementById('threadsCookieCard');
+    if (card) card.dataset.state = threadsCookieState.state;
+    const savedBadge = document.getElementById('threadsCookieSavedBadge');
+    if (savedBadge) { savedBadge.textContent = text; savedBadge.dataset.state = threadsCookieState.state; }
+    const meta = document.getElementById('threadsCookieSavedMeta');
+    if (meta) meta.textContent = threadsCookieState.configured
+        ? `${threadsCookieState.count || 0} cookie${threadsCookieState.checkedAt ? ` • ${formatCookieCheckedAt(threadsCookieState.checkedAt)}` : ' • Chưa kiểm tra'}`
+        : 'Chưa có cookie để sử dụng.';
+    const savedMessage = document.getElementById('threadsCookieSavedMessage');
+    if (savedMessage) {
+        savedMessage.hidden = ['valid', 'none', 'unchecked'].includes(threadsCookieState.state);
+        savedMessage.textContent = savedMessage.hidden ? '' : threadsCookieState.message || '';
+    }
+    if (badge) badge.title = threadsCookieState.message || text;
+    const use = document.getElementById('threadsSessionUse');
+    if (use && !threadsCookieState.configured) use.checked = false;
+    if (!threadsCookieState.configured) cancelThreadsCookieDelete();
+    syncScanControls();
+}
+
+async function refreshThreadsCookieStatus() {
+    const revision = ++threadsCookieRevision;
+    try {
+        const response = await fetch('/threads-session/status', { cache: 'no-store' });
+        const status = await response.json();
+        if (revision === threadsCookieRevision && !threadsCookieBusy) renderThreadsCookieStatus(status);
+    } catch {
+        if (revision === threadsCookieRevision && !threadsCookieBusy) renderThreadsCookieStatus({ configured: false, state: 'unknown', message: 'Không tải được trạng thái cookie.' });
+    }
+}
+
+function clearThreadsCookieInputs() {
+    for (const id of ['threadsCookieText', 'threadsCookieFile']) {
+        const input = document.getElementById(id);
+        if (input) input.value = '';
+    }
+    const meta = document.getElementById('threadsCookieFileMeta');
+    if (meta) meta.textContent = '';
+}
+
+function setThreadsCookieSource(source) {
+    if (threadsCookieBusy || !['file', 'paste'].includes(source)) return;
+    if (threadsCookieSource !== source) clearThreadsCookieInputs();
+    threadsCookieSource = source;
+    for (const [value, suffix] of [['file', 'File'], ['paste', 'Paste']]) {
+        const tab = document.getElementById(`threadsCookieTab${suffix}`);
+        const panel = document.getElementById(`threadsCookiePanel${suffix}`);
+        if (tab) { tab.setAttribute('aria-selected', String(value === source)); tab.tabIndex = value === source ? 0 : -1; }
+        if (panel) panel.hidden = value !== source;
+    }
+}
+
+function cancelThreadsCookieDelete() {
+    if (threadsCookieBusy) return;
+    const confirm = document.getElementById('threadsCookieDeleteConfirm');
+    if (confirm) confirm.hidden = true;
+}
+
+function openThreadsCookieModal() {
+    if (scanIsBusy() || desktopUpdateInstalling || threadsCookieBusy || sourceBusy) return;
+    threadsCookieFocus = document.activeElement;
+    const modal = document.getElementById('threadsCookieModal');
+    modal.classList.add('active');
+    modal.setAttribute('aria-hidden', 'false');
+    cancelThreadsCookieDelete();
+    document.getElementById('threadsCookieModalStatus').textContent = '';
+    setThreadsCookieSource(threadsCookieSource);
+    document.getElementById(threadsCookieSource === 'file' ? 'threadsCookieFile' : 'threadsCookieText').focus();
+    void refreshThreadsCookieStatus();
+}
+
+function closeThreadsCookieModal() {
+    if (threadsCookieBusy) return;
+    const modal = document.getElementById('threadsCookieModal');
+    modal.classList.remove('active');
+    modal.setAttribute('aria-hidden', 'true');
+    clearThreadsCookieInputs();
+    cancelThreadsCookieDelete();
+    if (threadsCookieFocus?.focus) threadsCookieFocus.focus();
+}
+
+async function threadsCookieAction(action) {
+    if (scanIsBusy() || desktopUpdateInstalling || threadsCookieBusy || sourceBusy) return;
+    const source = threadsCookieSource;
+    const file = document.getElementById('threadsCookieFile').files?.[0];
+    let body = '';
+    threadsCookieBusy = true;
+    ++threadsCookieRevision;
+    syncScanControls();
+    document.querySelector('#threadsCookieModal [role="dialog"]')?.focus();
+    const detail = document.getElementById('threadsCookieModalStatus');
+    detail.textContent = action === 'import' ? 'Đang đọc và kiểm tra cookie...' : 'Đang xử lý phiên Threads...';
+    try {
+        if (action === 'import') {
+            if (source === 'file') {
+                if (!file) throw new Error('Chọn file JSON trước khi import.');
+                if (file.size > 262144) throw new Error('File cookie quá lớn, tối đa 256 KiB.');
+                body = await file.text();
+            } else {
+                body = document.getElementById('threadsCookieText').value;
+            }
+            if (!body.trim() || new TextEncoder().encode(body).length > 262144) throw new Error('Nhập JSON cookie hợp lệ, tối đa 256 KiB.');
+        }
+        const response = await fetch(action === 'delete' ? '/threads-session' : `/threads-session/${action}`, {
+            method: action === 'delete' ? 'DELETE' : 'POST', headers: { 'Content-Type': 'application/json' },
+            body: action === 'import' ? body : undefined, cache: 'no-store'
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Không xử lý được phiên Threads.');
+        renderThreadsCookieStatus(data.status || data);
+        detail.textContent = action === 'delete' ? 'Đã xóa phiên khỏi kho bảo mật.' : action === 'verify' ? 'Đã kiểm tra lại phiên.' : 'Đã import và lưu phiên an toàn.';
+        if (data.check && data.check.state !== 'valid') detail.textContent = `${data.check.message || 'Cookie chưa xác minh hợp lệ.'}${action === 'import' ? ' Phiên đã lưu trước đó được giữ nguyên.' : ''}`;
+    } catch (error) {
+        detail.textContent = error.message || 'Không xử lý được phiên Threads.';
+    } finally {
+        body = '';
+        clearThreadsCookieInputs();
+        threadsCookieBusy = false;
+        cancelThreadsCookieDelete();
+        syncScanControls();
+    }
+}
+
+function importThreadsCookie() { return threadsCookieAction('import'); }
+function verifyThreadsCookie() { return threadsCookieAction('verify'); }
+function deleteThreadsCookie() {
+    if (threadsCookieBusy || sourceBusy || scanIsBusy() || desktopUpdateInstalling || !threadsCookieState.configured) return;
+    document.getElementById('threadsCookieDeleteConfirm').hidden = false;
+    document.getElementById('threadsCookieDeleteCancel').focus();
+}
+function confirmThreadsCookieDelete() {
+    if (document.getElementById('threadsCookieDeleteConfirm').hidden) return;
+    return threadsCookieAction('delete');
+}
+
 function startScraping(partners = [], sheetName = '') {
-    if (scanIsBusy() || desktopUpdateInstalling) return;
+    if (scanIsBusy() || desktopUpdateInstalling || threadsCookieBusy || sourceBusy) return;
+    if (sourcesInitialized && !currentFileId) { notify('Chưa chọn nguồn cho nền tảng này.', 'warn'); return; }
     if (!ws || ws.readyState !== WebSocket.OPEN) {
         notify('Lỗi: Chưa kết nối được server. Vui lòng kiểm tra CMD.', 'error');
         return;
@@ -1341,10 +1802,15 @@ function startScraping(partners = [], sheetName = '') {
     scanCompletedForCurrentFile = false;
     setGooglePushState();
     const selected = Array.isArray(partners) ? partners : (partners ? [partners] : []);
-    const useProxy = activePlatform === 'tiktok' && Boolean(proxyUseCheckbox && proxyUseCheckbox.checked);
+    const useProxy = Boolean(proxyUseCheckbox && proxyUseCheckbox.checked);
     const workers = Number(workerCountSelect.value || 10);
     const scrapeMode = scrapeModeSelect.value || 'request';
     const proxyText = useProxy ? currentProxyText() : '';
+    const useThreadsSession = activePlatform === 'threads' && Boolean(document.getElementById('threadsSessionUse')?.checked);
+    if (useThreadsSession && (!threadsCookieState.configured || !threadsCookieState.generation)) {
+        notify('Import và kiểm tra cookie Threads trước khi dùng phiên.', 'warn');
+        openThreadsCookieModal(); return;
+    }
     if (useProxy && !proxyText.trim()) {
         notify('Bật proxy nhưng chưa có danh sách. Bấm Cấu hình để dán proxy.', 'warn');
         openProxyModal();
@@ -1370,6 +1836,7 @@ function startScraping(partners = [], sheetName = '') {
         scrape_mode: scrapeMode,
         use_proxy: useProxy,
         proxy_text: proxyText,
+        ...(useThreadsSession ? { use_threads_session: true, threads_session_generation: threadsCookieState.generation } : {}),
         sheet_name: currentScanSheetName,
         partners: selected,
         partner: selected.length === 1 ? selected[0] : ''
@@ -1379,6 +1846,7 @@ function startScraping(partners = [], sheetName = '') {
     scanPhase = 'starting';
     lastTerminalStatus = '';
     syncScanControls();
+    liveResultClasses.clear(); lastProgressData = null;
     document.getElementById('dataFeed').innerHTML = '';
     pendingLiveResults = 0;
     updatePendingLiveResults();
@@ -1457,12 +1925,33 @@ function formatDuration(seconds) {
     return `${hours}h ${remainMin}m`;
 }
 
+function classifyLiveResult(row, platform) {
+    const status = String(row.status || '');
+    const confirmed = [row.views, row.likes, row.comments, row.saves, row.shares].some(value => value !== null && value !== undefined && value !== '');
+    if (status === 'Success' || platform === 'threads' && status.startsWith('Partial:') && confirmed) return 'success';
+    return isNoStatsStatus(status) ? 'nostats' : 'error';
+}
+
+function progressResultCounts(data) {
+    const platform = data.platform || currentRunContext?.platform || activePlatform;
+    const counts = { success: Number(data.success || 0), hidden: Number(data.hidden || 0), error: Number(data.error || 0) };
+    // An older runner may count Partial as hidden while this UI correctly renders
+    // those same rows OK. Reconcile only when the complete processed batch is known.
+    if (platform === 'threads' && Number(data.processed || 0) > 0 && liveResultClasses.size === Number(data.processed)) {
+        counts.success = counts.hidden = counts.error = 0;
+        for (const kind of liveResultClasses.values()) counts[kind === 'nostats' ? 'hidden' : kind] += 1;
+    }
+    return counts;
+}
+
 function updateProgress(data) {
+    lastProgressData = data;
+    const counts = progressResultCounts(data);
     document.getElementById('totalLinks').textContent = data.total;
     document.getElementById('processedLinks').textContent = data.processed;
-    document.getElementById('successLinks').textContent = data.success;
-    const hiddenCount = Number(data.hidden || 0);
-    const errorCount = Number(data.error || 0);
+    document.getElementById('successLinks').textContent = counts.success;
+    const hiddenCount = counts.hidden;
+    const errorCount = counts.error;
     document.getElementById('errorLinks').textContent = errorCount;
     const hiddenBadge = document.getElementById('hiddenCountBadge');
     const failedBadge = document.getElementById('failedCountBadge');
@@ -1501,7 +1990,9 @@ function updateProgress(data) {
             statusEl.textContent = 'Đã huỷ';
             statusEl.className = 'progress-status cancelled';
         } else if (hiddenCount > 0 || errorCount > 0) {
-            statusEl.textContent = 'Hoàn tất, có link thiếu số';
+            statusEl.textContent = activePlatform === 'threads'
+                ? (errorCount > 0 ? 'Hoàn tất, có link lỗi' : 'Hoàn tất, có link không trả số liệu')
+                : 'Hoàn tất, có link thiếu số';
             statusEl.className = 'progress-status warn';
         } else {
             statusEl.textContent = 'Thành công';
@@ -1535,9 +2026,13 @@ function appendData(row, context = {}) {
     const tbody = document.getElementById('dataFeed');
     if (tbody.innerText.includes('Chưa có kết quả')) tbody.innerHTML = '';
     const wrapper = document.querySelector('.live-results-wrap');
-    const isSuccess = row.status === 'Success';
-    const noStats = !isSuccess && isNoStatsStatus(row.status);
-    const resultStatus = isSuccess ? 'success' : (noStats ? 'nostats' : 'error');
+    const resultStatus = classifyLiveResult(row, platform);
+    const isSuccess = resultStatus === 'success';
+    const missingMetricDetail = Array.isArray(row.missingMetrics) && row.missingMetrics.length
+        ? ` • Nguồn chưa trả: ${row.missingMetrics.join(', ')}` : '';
+    const statusDetail = `${row.status || ''}${missingMetricDetail}`;
+    const noStats = resultStatus === 'nostats';
+    liveResultClasses.set(String(row.id ?? row.url), resultStatus);
     const visibleInCurrentTab = activeWorkspaceTab === 'live'
         || (activeWorkspaceTab === 'success' && isSuccess);
     const preserveScroll = Boolean(wrapper && visibleInCurrentTab && wrapper.scrollTop > 32);
@@ -1565,7 +2060,7 @@ function appendData(row, context = {}) {
         <td data-label="Bình luận" style="text-align:right; font-weight:bold">${escapeHtml(comments)}</td>
         <td data-label="${platform === 'threads' ? 'Repost' : 'Lượt lưu'}" style="text-align:right; font-weight:bold">${escapeHtml(saves)}</td>
         <td data-label="Chia sẻ" style="text-align:right; font-weight:bold">${escapeHtml(shares)}</td>
-        <td data-label="Trạng thái"><span class="col-status" title="${escapeHtml(row.status || '')}" style="color:${statusColor}">${statusLabel}</span></td>
+        <td data-label="Trạng thái"><span class="col-status" title="${escapeHtml(statusDetail)}" style="color:${statusColor}">${statusLabel}</span></td>
     `;
     tbody.prepend(tr);
     if (preserveScroll && wrapper) {
@@ -1573,8 +2068,12 @@ function appendData(row, context = {}) {
         pendingLiveResults += 1;
         updatePendingLiveResults();
     }
-    if (!isSuccess) {
-        appendFailedLink(row);
+    if (!isSuccess) appendFailedLink(row);
+    if (lastProgressData) {
+        const counts = progressResultCounts(lastProgressData);
+        document.getElementById('successLinks').textContent = counts.success;
+        document.getElementById('hiddenCountBadge').textContent = counts.hidden;
+        document.getElementById('failedCountBadge').textContent = counts.error;
     }
 }
 
@@ -1594,7 +2093,6 @@ async function checkDesktopUpdate() {
         showToast(`Đang cài đặt Riviu Reports ${version}...`, 'info');
         await invoke('install_update');
     } catch (error) {
-        if (!isCurrent()) return;
         console.warn('Desktop updater check failed:', error);
         addLog(`Chưa cập nhật được ứng dụng: ${String(error)}`);
     } finally {
@@ -1829,6 +2327,9 @@ async function openReportModal() {
     document.getElementById('partnerSearch').value = '';
     reportPartners = [];
     reportSheetName = '';
+    const sheetSelect = document.getElementById('reportSheetSelect');
+    sheetSelect.innerHTML = '';
+    sheetSelect.disabled = true;
     selectedPartners = new Set();
     list.innerHTML = '<div class="empty-state">Đang tải danh sách đối tác...</div>';
     updateReportSummary();
@@ -1878,6 +2379,7 @@ function renderReportSheetOptions(sheets, selectedSheet = '') {
 }
 
 async function loadReportPartners(sheetName = '') {
+    if (sourcesInitialized && !currentFileId) return;
     const isCurrent = beginReadRequest('partners');
     const list = document.getElementById('partnerList');
     const requestedSheet = sheetName || reportSheetName || document.getElementById('reportSheetSelect')?.value || '';
@@ -1887,6 +2389,7 @@ async function loadReportPartners(sheetName = '') {
     params.set('apply_min_views', applyMinViews ? 'true' : 'false');
     params.set('min_views', String(minViews));
     params.set('platform', activePlatform);
+    params.set('file_id', currentFileId);
     const query = params.toString() ? `?${params.toString()}` : '';
     list.innerHTML = '<div class="empty-state">Đang tải danh sách đối tác...</div>';
     selectedPartners = new Set();
@@ -2094,6 +2597,7 @@ function downloadBlob(blob, filename) {
 }
 
 async function exportPartnerReport() {
+    if (!currentFileId || sourceBusy) return;
     const partners = partnerNamesFromSelection();
     if (partners.length === 0) {
         addLog('Vui lòng chọn ít nhất một đối tác để xuất báo cáo.');
@@ -2112,7 +2616,7 @@ async function exportPartnerReport() {
         const res = await fetch('/export-report', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ partners, applyMinViews, minViews, sheetName: reportSheetName || document.getElementById('reportSheetSelect')?.value || '', platform: activePlatform })
+            body: JSON.stringify({ partners, applyMinViews, minViews, sheetName: reportSheetName || document.getElementById('reportSheetSelect')?.value || '', platform: activePlatform, file_id: currentFileId })
         });
         if (!res.ok) {
             const data = await res.json().catch(() => ({}));
@@ -2200,8 +2704,34 @@ document.getElementById('proxyModal').addEventListener('click', (event) => {
     if (event.target.id === 'proxyModal') closeProxyModal();
 });
 
+document.getElementById('threadsCookieModal')?.addEventListener('click', (event) => {
+    if (event.target.id === 'threadsCookieModal') closeThreadsCookieModal();
+});
+document.getElementById('threadsCookieModal')?.addEventListener('keydown', (event) => {
+    if (event.key !== 'Tab') return;
+    const nodes = [...event.currentTarget.querySelectorAll('button:not(:disabled),input:not(:disabled),textarea:not(:disabled),summary')]
+        .filter(node => node.tabIndex >= 0 && node.getClientRects().length && !node.closest('[hidden]'));
+    if (!nodes.length) { event.preventDefault(); return; }
+    if (event.shiftKey && (document.activeElement === nodes[0] || !nodes.includes(document.activeElement))) { event.preventDefault(); nodes[nodes.length - 1].focus(); }
+    else if (!event.shiftKey && (document.activeElement === nodes[nodes.length - 1] || !nodes.includes(document.activeElement))) { event.preventDefault(); nodes[0].focus(); }
+});
+for (const [source, suffix] of [['file', 'File'], ['paste', 'Paste']]) {
+    document.getElementById(`threadsCookieTab${suffix}`)?.addEventListener('keydown', event => {
+        if (threadsCookieBusy || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const next = event.key === 'Home' ? 'file' : event.key === 'End' ? 'paste' : source === 'file' ? 'paste' : 'file';
+        setThreadsCookieSource(next);
+        document.getElementById(next === 'file' ? 'threadsCookieTabFile' : 'threadsCookieTabPaste').focus();
+    });
+}
+document.getElementById('threadsCookieFile')?.addEventListener('change', event => {
+    const file = event.target.files?.[0];
+    document.getElementById('threadsCookieFileMeta').textContent = file ? `${file.name} · ${(file.size / 1024).toFixed(1)} KiB` : '';
+});
+
 document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
+    if (document.getElementById('threadsCookieModal')?.classList.contains('active')) { closeThreadsCookieModal(); return; }
     if (document.getElementById('reportModal').classList.contains('active')) {
         closeReportModal();
     } else if (document.getElementById('historyModal').classList.contains('active')) {
@@ -2216,16 +2746,28 @@ document.addEventListener('keydown', (event) => {
 scanSheetSelect.addEventListener('change', () => {
     currentScanSheetName = scanSheetSelect.value;
     syncCompactSourceSummary('', currentScanSheetName);
+    saveActiveSource();
 });
 
-pushSheetSelect.addEventListener('change', () => {
-    currentPushSheetName = pushSheetSelect.value;
-    setGooglePushState();
-});
-
-['input', 'change', 'paste', 'keydown'].forEach(eventName => {
-    googleSheetUrlInput.addEventListener(eventName, markGoogleSheetUrlDirty);
-});
+for (const platform of ['tiktok', 'threads']) {
+    const controls = sourceControls(platform);
+    controls.sheet?.addEventListener('change', () => {
+        const sheet = controls.sheet.value;
+        Object.assign(platformSources[platform], { pushSheet: sheet, scanSheet: sheet, displaySheet: sheet });
+        if (platform === activePlatform) {
+            currentPushSheetName = currentScanSheetName = currentSheetName = sheet;
+            renderScanSheetOptions(platformSources[platform].sheets, sheet);
+            void loadPreview(sheet);
+        }
+        persistSources(); setGooglePushState();
+    });
+    ['input', 'change'].forEach(eventName => controls.url?.addEventListener(eventName, () => {
+        platformSources[platform].url = controls.url.value;
+        platformSources[platform].dirty = true;
+        if (platform === activePlatform) googleSheetUrlDirty = true;
+        persistSources(); setGooglePushState();
+    }));
+}
 
 if (proxyUseCheckbox) {
     proxyUseCheckbox.addEventListener('change', syncProxyCardActiveState);
@@ -2237,9 +2779,21 @@ window.onload = async () => {
     syncCompactDrawerState();
     setWorkspaceTab('sheet');
     await checkServerVersion();
+    await loadSourcePreferences();
     await updateFileList({ applyGoogleSheetUrl: true });
+    for (const platform of ['tiktok', 'threads']) {
+        if (platform === activePlatform || !platformSources[platform].fileId) continue;
+        try {
+            const res = await fetch(`/list-files?${sourceQuery({}, platform, platformSources[platform].fileId)}`);
+            const data = await res.json();
+            if (!res.ok) { platformSources[platform].fileId = ''; continue; }
+            Object.assign(platformSources[platform], { sheets: data.sheets || [], label: data.currentLabel || data.current, ready: Boolean(data.googlePushReady) });
+        } catch {}
+    }
+    renderSourceRows();
     await loadPreview();
     await refreshProxyStatus();
+    await refreshThreadsCookieStatus();
     connectWS();
     scheduleDesktopUpdates();
 };

@@ -1,3 +1,4 @@
+import hashlib
 import html
 import json
 import os
@@ -159,6 +160,17 @@ def resolve_channel_name(link, raw_channel, channel_overrides=None):
         if override_name:
             return override_name
     return ""
+
+
+def set_cell_literal(cell, value):
+    """Write untrusted input literally, without altering its displayed text.
+
+    Generated formulas must use normal cell assignment instead of this helper.
+    """
+    cell.value = value
+    if isinstance(value, str):
+        cell.data_type = "s"
+    return cell
 
 
 def clean_preview_value(value):
@@ -499,11 +511,15 @@ def read_sheet_frame(file_path, sheet_name):
 
 
 def summary_sheet_title_for_data_sheet(data_sheet_name):
-    """Build Excel tab title for a data sheet's partner summary (e.g. Tháng 6 → Tổng kết tháng 6)."""
-    label = clean_text(data_sheet_name).casefold()
+    """Build a stable per-source summary title without truncation collisions."""
+    label = clean_text(data_sheet_name).lower()
     if not label:
         return SUMMARY_SHEET_NAME
-    return f"{SUMMARY_SHEET_TITLE_PREFIX}{label}"[:31]
+    title = f"{SUMMARY_SHEET_TITLE_PREFIX}{label}"
+    if len(title) <= 31:
+        return title
+    digest = hashlib.sha256(label.encode("utf-8")).hexdigest()[:8]
+    return f"{title[:22]}-{digest}"
 
 
 def month_label_for_sheet_name(sheet_name):
@@ -531,7 +547,7 @@ def data_sheet_name_for_summary_title(workbook_sheet_names, summary_sheet_name):
     for candidate in workbook_sheet_names:
         if is_summary_sheet_name(candidate) or is_result_sheet_name(candidate):
             continue
-        if clean_text(candidate).casefold() == suffix:
+        if summary_sheet_title_for_data_sheet(candidate).lower() == text.lower():
             return candidate
     return ""
 
@@ -559,7 +575,7 @@ def is_total_label(value):
 
 
 def is_tiktok_link(value):
-    return "tiktok.com" in clean_text(value).casefold()
+    return bool(normalize_tiktok_url(value))
 
 
 def normalize_threads_url(value):
@@ -581,28 +597,36 @@ def is_threads_link(value):
     )
 
 
+TIKTOK_HOSTS = {"tiktok.com", "www.tiktok.com", "m.tiktok.com", "mobile.tiktok.com", "vm.tiktok.com", "vt.tiktok.com"}
+
+
 def normalize_tiktok_url(value):
-    """Ensure TikTok URLs have a scheme so browsers can navigate them."""
+    """Normalize supported TikTok URLs; reject unsafe schemes/hosts/authorities."""
     text = clean_text(value)
-    if not text:
+    if not text or re.search(r"[\s\\\x00-\x1f\x7f]", text):
         return ""
-    lower = text.casefold()
-    if "tiktok.com" not in lower and "vt.tiktok.com" not in lower:
-        return text
-    if lower.startswith("http://") or lower.startswith("https://"):
-        return text
     if text.startswith("//"):
-        return f"https:{text}"
-    return f"https://{text.lstrip('/')}"
+        text = f"https:{text}"
+    elif not re.match(r"^[a-z][a-z0-9+.-]*:", text, flags=re.IGNORECASE):
+        text = f"https://{text}"
+    try:
+        parsed = urlparse(text)
+        if (
+            parsed.scheme.casefold() not in {"http", "https"}
+            or (parsed.hostname or "").casefold() not in TIKTOK_HOSTS
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.port not in {None, 80 if parsed.scheme.casefold() == "http" else 443}
+        ):
+            return ""
+    except ValueError:
+        return ""
+    return text
 
 
 def is_scrapable_tiktok_url(value):
-    """True when the cell value is a TikTok link row worth scraping (not TỔNG, not junk)."""
-    url = normalize_tiktok_url(value)
-    if not url or is_total_label(url):
-        return False
-    lower = url.casefold()
-    return "tiktok.com" in lower or "vt.tiktok.com" in lower
+    """True only for a supported TikTok HTTP(S) URL, including short links."""
+    return bool(normalize_tiktok_url(value))
 
 
 def detect_tiktok_media_type(url, *, resolved_url=""):
@@ -655,7 +679,7 @@ def should_highlight_video_link(
     )
 
 
-def fill_preview_total_row(frame, link_column, metric_columns):
+def fill_preview_total_row(frame, link_column, metric_columns, *, platform=None):
     if not link_column or link_column not in frame.columns:
         return frame
 
@@ -672,11 +696,16 @@ def fill_preview_total_row(frame, link_column, metric_columns):
         return frame
 
     source_frame = frame.iloc[:total_position]
+    if platform in {"tiktok", "threads"}:
+        link_predicate = is_threads_link if platform == "threads" else is_tiktok_link
+        source_frame = frame[frame[link_column].map(link_predicate)]
     for column in metric_columns:
         if not column or column not in frame.columns:
             continue
         total_value = sum(metric_number(value) for value in source_frame[column])
-        if normalize_key(column) == "repost" and not any(clean_text(value) for value in source_frame[column]):
+        if (platform == "threads" and any(not clean_text(value) for value in source_frame[column])) or (
+            normalize_key(column) == "repost" and not any(clean_text(value) for value in source_frame[column])
+        ):
             total_value = ""
         # pandas 3 string columns reject assigning numeric totals. Display rows
         # are intentionally mixed, while the original workbook stays untouched.
@@ -707,7 +736,7 @@ def fill_missing_dates_from_previous(frame, date_column, link_column):
     return frame
 
 
-def read_sheet_preview(file_path, sheet_name=None, limit=None):
+def read_sheet_preview(file_path, sheet_name=None, limit=None, *, platform=None):
     workbook = load_excel_file(file_path)
     try:
         sheets = list(workbook.sheet_names)
@@ -745,7 +774,11 @@ def read_sheet_preview(file_path, sheet_name=None, limit=None):
         frame = fill_missing_dates_from_previous(frame, date_column, link_column)
         for column in frame.select_dtypes(include=["datetime"]).columns:
             frame[column] = frame[column].dt.strftime(DISPLAY_DATETIME_FORMAT)
-        frame = fill_preview_total_row(frame, link_column, metric_columns)
+        if platform in {"tiktok", "threads"} and link_column and not is_summary_sheet_name(current_sheet):
+            link_predicate = is_threads_link if platform == "threads" else is_tiktok_link
+            frame = frame[frame[link_column].map(lambda value: link_predicate(value) or is_total_label(value))].copy()
+            frame.reset_index(drop=True, inplace=True)
+        frame = fill_preview_total_row(frame, link_column, metric_columns, platform=platform)
 
         preview_frame = frame
         if limit and link_column and len(frame.index) > limit:
@@ -1335,7 +1368,7 @@ def build_partner_summary_rows(
 
         for row_index in range(2, (worksheet.max_row or 0) + 1):
             link = clean_text(worksheet.cell(row=row_index, column=link_column).value)
-            if not link or ("tiktok.com" not in link and "vt.tiktok.com" not in link):
+            if not is_tiktok_link(link):
                 continue
 
             partners = worksheet_row_partners(worksheet, row_index, partner_columns)
@@ -1479,7 +1512,7 @@ def rebuild_summary_sheet(
 
     for row_index, row in enumerate(rows, start=2):
         for column_index, header in enumerate(SUMMARY_COLUMNS, start=1):
-            cell = worksheet.cell(row=row_index, column=column_index, value=row.get(header, ""))
+            cell = set_cell_literal(worksheet.cell(row=row_index, column=column_index), row.get(header, ""))
             if header == "ĐỐI TÁC":
                 cell.alignment = Alignment(wrap_text=True, vertical="top")
             elif header == LAST_UPDATE_COLUMN:
@@ -1550,7 +1583,7 @@ def highlight_single_partner_link_rows(workbook, data_sheet_name):
     for row_index in range(2, max_row + 1):
         link = clean_text(worksheet.cell(row=row_index, column=link_column).value)
         should_highlight = False
-        if link and ("tiktok.com" in link or "vt.tiktok.com" in link):
+        if is_scrapable_tiktok_url(link):
             partners = worksheet_row_partners(worksheet, row_index, partner_columns)
             is_active_video = should_highlight_video_link(
                 link,

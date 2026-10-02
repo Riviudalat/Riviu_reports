@@ -1,6 +1,9 @@
 import io
 import asyncio
+import json
 import os
+
+import threads_scraper
 
 import openpyxl
 import pytest
@@ -48,11 +51,134 @@ def test_http_parser_keeps_missing_counts_unknown():
     assert share["channel"] == "trangxinh718"
 
 
+def target_media(**overrides):
+    media = {
+        "code": "DdRIHGWCURV", "user": {"username": "miri_viu"},
+        "like_count": 0, "like_and_view_counts_disabled": False,
+        "text_post_app_info": {"direct_reply_count": 0, "repost_count": 0, "reshare_count": None, "quote_count": 99},
+    }
+    media.update(overrides)
+    return media
+
+
+def target_payload(*media):
+    return {"require": [["RelayPrefetchedStreamCache", "next", [], [
+        "adp_BarcelonaPostPageTargetQueryRelayPreloader_fixture",
+        {"__bbox": {"result": {"data": {"media": item}}}},
+    ]] for item in media]}
+
+
+def json_script(document):
+    return '<script type="application/json">' + json.dumps(document) + '</script>'
+
+
+def test_target_json_preserves_explicit_zeros_and_null_shares():
+    content = json_script(target_payload(target_media()))
+    result = parse_threads_http(content, URL, URL)
+    assert result["metrics"] == {"views": None, "likes": 0, "comments": 0, "reposts": 0, "shares": None}
+    assert result_status(result) == "Success"
+    assert threads_scraper.missing_metric_labels(result) == ["LƯỢT XEM", "CHIA SẺ"]
+
+
+@pytest.mark.parametrize("value, expected", [(0, 0), (12, 12), (None, None), (True, None), (-1, None), ("12", None), (1.5, None)])
+def test_target_json_validates_count_types(value, expected):
+    media = target_media(like_count=value, text_post_app_info={
+        "direct_reply_count": value, "repost_count": value, "reshare_count": value,
+    })
+    metrics = parse_threads_http(json_script(target_payload(media)), URL, URL)["metrics"]
+    assert all(metrics[key] == expected for key in ("likes", "comments", "reposts", "shares"))
+
+
+@pytest.mark.parametrize("flag", [True, None, "false", 0])
+def test_target_json_does_not_expose_hidden_or_unverified_likes(flag):
+    media = target_media(like_count=12, like_and_view_counts_disabled=flag)
+    metrics = parse_threads_http(json_script(target_payload(media)), URL, URL)["metrics"]
+    assert metrics["likes"] is None
+    assert metrics["comments"] == 0
+
+
+@pytest.mark.parametrize("media", [target_media(code="Other"), target_media(user={"username": "other"}), target_media(user=None)])
+def test_target_json_rejects_wrong_identity(media):
+    assert all(value is None for value in parse_threads_http(json_script(target_payload(media)), URL, URL)["metrics"].values())
+
+
+def test_target_json_rejects_decoys_outside_typed_target_query():
+    media = target_media(like_count=999)
+    content = json_script({"caption": json.dumps(target_payload(media)), "recommended_post": media})
+    content += json_script({"require": [["RelayPrefetchedStreamCache", "next", [], [
+        "adp_BarcelonaLoggedOutRelatedPostsQueryRelayPreloader_fixture",
+        {"__bbox": {"result": {"data": {"media": media}}}},
+    ]]]})
+    assert all(value is None for value in parse_threads_http(content, URL, URL)["metrics"].values())
+
+
+@pytest.mark.parametrize("second", [target_media(like_count=7), target_media(like_count=None), target_media(like_and_view_counts_disabled=True)])
+def test_target_json_conflicting_values_remain_unknown(second):
+    metrics = parse_threads_http(json_script(target_payload(target_media(), second)), URL, URL)["metrics"]
+    assert metrics["likes"] is None
+    assert metrics["reposts"] == 0
+
+
+def test_partial_hybrid_keeps_browser_diagnostic_without_losing_views():
+    first = {"channel": "miri_viu", "metrics": {"views": 135}, "error": ""}
+    second = {"channel": "", "metrics": threads_scraper.empty_metrics(), "error": "Browser: timeout"}
+    merged = threads_scraper.merge_results(first, second)
+    assert merged["metrics"]["views"] == 135
+    assert merged["diagnostic"] == "Browser: timeout"
+    assert result_status(merged) == "Success"
+
+
+def test_target_json_missing_fields_and_malformed_scripts_are_unknown():
+    media = target_media(text_post_app_info=None)
+    media.pop("like_count")
+    content = '<script type="application/json">{broken</script>' + json_script(target_payload(media))
+    assert all(value is None for value in parse_threads_http(content, URL, URL)["metrics"].values())
+
+
+def test_hybrid_saves_explicit_zero_counts_and_partial_status(tmp_path, monkeypatch):
+    path = tmp_path / "zero_counts.xlsx"
+    book = openpyxl.Workbook()
+    book.active.append(["Link", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "REPOST", "CHIA SẺ"])
+    book.active.append([URL])
+    book.save(path)
+    book.close()
+    monkeypatch.setattr(threads_scraper, "fetch_threads_http", lambda _url: {
+        "channel": "miri_viu", "metrics": {**threads_scraper.empty_metrics(), "views": 135}, "error": "",
+    })
+
+    async def rendered(_browser, _url):
+        return parse_threads_http(json_script(target_payload(target_media())), URL, URL)
+
+    monkeypatch.setattr(threads_scraper, "fetch_threads_browser", rendered)
+    asyncio.run(run_threads_scraper(path, mode="hybrid"))
+    saved = openpyxl.load_workbook(path)
+    try:
+        assert [saved.active.cell(2, col).value for col in range(2, 7)] == [135, 0, 0, 0, None]
+        col = threads_scraper.column_index(saved.active, threads_scraper.THREADS_SCAN_STATUS_HEADER)
+        assert saved.active.cell(2, col).value == "Success"
+    finally:
+        saved.close()
+
+
+@pytest.mark.parametrize("metrics", [
+    {"views": 0}, {"likes": 0}, {"views": 314, "likes": 2, "comments": 6, "reposts": 0},
+    {"likes": 0, "comments": 0, "reposts": 0, "shares": 0},
+])
+def test_confirmed_metrics_including_zero_are_success(metrics):
+    result = {"metrics": {**threads_scraper.empty_metrics(), **metrics}, "error": ""}
+    assert result_status(result) == "Success"
+
+
+def test_no_metric_evidence_is_not_success():
+    assert result_status({"metrics": threads_scraper.empty_metrics(), "error": ""}).startswith("Ẩn số liệu:")
+    assert result_status({"metrics": {"views": 0}, "error": "Không đọc được bài"}).startswith("Error:")
+
+
 def test_action_count_does_not_convert_blank_to_zero():
     assert parse_action_count("4") == 4
     assert parse_action_count("1.2K") == 1200
     assert parse_action_count("") is None
-    assert result_status({"metrics": {"views": 372, "likes": 4, "comments": 1, "reposts": None, "shares": 2}, "error": ""}).startswith("Partial:")
+    assert result_status({"metrics": {"views": 372, "likes": 4, "comments": 1, "reposts": None, "shares": 2}, "error": ""}) == "Success"
 
 
 def test_workbook_filters_platform_and_preserves_missing_metrics(tmp_path):
@@ -170,19 +296,41 @@ def test_live_threads_http_and_browser_agree_on_post(tmp_path):
     async def browser_check():
         async with async_playwright() as playwright:
             browser = await playwright.chromium.launch(headless=True)
+            original_new_page = browser.new_page
+            source = {}
+
+            async def capture_page():
+                page = await original_new_page()
+                close = page.close
+
+                async def capture_close():
+                    content = await page.content()
+                    source.update(parse_threads_http(content, url, page.url))
+                    _, source["has_target"] = threads_scraper._embedded_post_metrics(content, threads_scraper.post_identity(page.url))
+                    await close()
+
+                page.close = capture_close
+                return page
+
+            browser.new_page = capture_page
             try:
-                return await fetch_threads_browser(browser, url)
+                return await fetch_threads_browser(browser, url), source
             finally:
                 await browser.close()
 
-    rendered = asyncio.run(browser_check())
+    rendered, source = asyncio.run(browser_check())
     assert not request["error"], request
     assert not rendered["error"], rendered
     assert rendered["channel"] == request["channel"]
     assert rendered["metrics"]["views"] is not None
     assert rendered["metrics"]["likes"] is not None
     assert rendered["metrics"]["comments"] is not None
-    assert rendered["metrics"]["shares"] is not None
+    # Verify against the same rendered target payload, including explicit null shares.
+    if source["has_target"]:
+        for key in threads_scraper.ACTION_TITLES:
+            assert rendered["metrics"][key] == source["metrics"][key]
+    else:
+        assert rendered["metrics"]["shares"] is not None
 
     path = tmp_path / "live_threads.xlsx"
     workbook = openpyxl.Workbook()
@@ -196,7 +344,10 @@ def test_live_threads_http_and_browser_agree_on_post(tmp_path):
     assert saved.active["B2"].value == rendered["channel"]
     assert isinstance(saved.active["C2"].value, int)
     assert saved.active["F2"].value is None
-    assert saved.active["G2"].value is not None
+    for key, header in threads_scraper.METRICS.items():
+        column = threads_scraper.column_index(saved.active, header)
+        actual = saved.active.cell(2, column).value if column else None
+        assert actual == rendered["metrics"][key]
     saved.close()
 
 
@@ -256,7 +407,7 @@ def test_threads_ui_uses_repost_column_not_tiktok_saves():
                 assert page.locator("#progressStatus").inner_text() == ""
                 page.evaluate("updateProgress({phase: 'completed', total: 1, processed: 1, success: 0, hidden: 1, error: 0, done: true})")
                 assert not page.locator("#startBtn").is_disabled()
-                assert "thiếu số" in page.locator("#progressStatus").inner_text()
+                assert "không trả số liệu" in page.locator("#progressStatus").inner_text()
                 assert not errors, errors
                 page.close()
         finally:

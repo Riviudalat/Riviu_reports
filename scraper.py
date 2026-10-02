@@ -11,12 +11,14 @@ import unicodedata
 import urllib.error
 import urllib.request
 from datetime import datetime
+from urllib.parse import urljoin
 
 import openpyxl
 from playwright.async_api import async_playwright
 
 from workbook_utils import (
     clean_text,
+    set_cell_literal,
     highlight_single_partner_link_rows,
     highlight_video_link_rows,
     is_generated_username_channel,
@@ -630,8 +632,8 @@ def is_total_row(sheet, row_index, url_column):
     return normalize_text(value) == "TỔNG" or normalize_text(value) == "TONG"
 
 
-def clear_existing_total_rows(workbook):
-    for sheet_name in workbook_data_sheet_names(workbook):
+def clear_existing_total_rows(workbook, sheet_name=None):
+    for sheet_name in selected_data_sheet_names(workbook, sheet_name):
         sheet = workbook[sheet_name]
         url_column = detect_columns(sheet)["url"]
         if not url_column:
@@ -641,29 +643,43 @@ def clear_existing_total_rows(workbook):
                 sheet.delete_rows(row_index, 1)
 
 
-def append_sheet_total_rows(workbook):
-    for sheet_name in workbook_data_sheet_names(workbook):
+def append_sheet_total_rows(workbook, sheet_name=None):
+    for sheet_name in selected_data_sheet_names(workbook, sheet_name):
         sheet = workbook[sheet_name]
-        columns = ensure_columns(sheet)
+        columns = detect_columns(sheet)
         url_column = columns.get("url")
         if not url_column:
             continue
 
-        last_link_row = 1
-        for row_index in range(2, sheet.max_row + 1):
-            url = clean_text(sheet.cell(row=row_index, column=url_column).value)
-            if "tiktok.com" in url or "vt.tiktok.com" in url:
-                last_link_row = row_index
-        if last_link_row < 2:
+        link_rows = [
+            row_index for row_index in range(2, sheet.max_row + 1)
+            if is_scrapable_tiktok_url(sheet.cell(row=row_index, column=url_column).value)
+        ]
+        if not link_rows:
             continue
-
-        total_row = last_link_row + 1
+        columns = ensure_columns(sheet)
+        occupied_rows = [
+            row_index for row_index in range(2, sheet.max_row + 1)
+            if any(cell.value is not None for cell in sheet[row_index])
+        ]
+        total_row = max(occupied_rows, default=1) + 1
         sheet.cell(row=total_row, column=url_column).value = "TỔNG"
+        # Sum only TikTok rows; contiguous ranges keep large-sheet formulas short.
+        ranges = []
+        start = end = link_rows[0]
+        for row_index in link_rows[1:]:
+            if row_index == end + 1:
+                end = row_index
+            else:
+                ranges.append((start, end))
+                start = end = row_index
+        ranges.append((start, end))
         for metric_key in METRIC_HEADERS:
             column_index = columns.get(metric_key)
             if column_index:
                 col_letter = openpyxl.utils.get_column_letter(column_index)
-                sheet.cell(row=total_row, column=column_index).value = f"=SUM({col_letter}2:{col_letter}{last_link_row})"
+                references = ",".join(f"{col_letter}{start}:{col_letter}{end}" for start, end in ranges)
+                sheet.cell(row=total_row, column=column_index).value = f"=SUM({references})"
 
 
 def build_result_sheet(workbook, rows_to_process, summary_update_time):
@@ -717,6 +733,8 @@ def build_result_sheet(workbook, rows_to_process, summary_update_time):
             worksheet.cell(row=output_row, column=12).value = clean_text(source_sheet.cell(row=source_row_index, column=columns.get("scan_status")).value) if columns.get("scan_status") else ""
             worksheet.cell(row=output_row, column=13).value = clean_text(source_sheet.cell(row=source_row_index, column=columns.get("resolved_url")).value) if columns.get("resolved_url") else ""
             worksheet.cell(row=output_row, column=14).value = clean_text(source_sheet.cell(row=source_row_index, column=columns.get("source_url")).value) if columns.get("source_url") else ""
+            for cell in worksheet[output_row]:
+                set_cell_literal(cell, cell.value)
             output_row += 1
             sequence += 1
 
@@ -1644,9 +1662,13 @@ async def read_profile_channel_name(page, profile_username, channel_cache=None, 
         ):
             return cached
 
-    profile_url = f"https://www.tiktok.com/@{profile_username}"
+    profile_url = normalize_tiktok_url(f"https://www.tiktok.com/@{profile_username}")
+    if not profile_url:
+        return ""
     try:
-        await page.goto(profile_url, wait_until="domcontentloaded", timeout=timeout_ms)
+        await navigate_tiktok_page(page, profile_url, timeout_ms=timeout_ms)
+        if not is_scrapable_tiktok_url(page.url):
+            return ""
         for _ in range(20):
             content = await page.content()
             candidate = parse_profile_channel_name(content, profile_username)
@@ -1845,6 +1867,9 @@ def hybrid_browser_worker_count(request_workers, total_links):
 
 
 def fetch_tiktok_html(url, timeout=DEFAULT_REQUEST_TIMEOUT):
+    url = normalize_tiktok_url(url)
+    if not url:
+        raise ValueError("URL TikTok không hợp lệ.")
     wait_if_request_blocked()
     request = urllib.request.Request(
         url,
@@ -1859,8 +1884,11 @@ def fetch_tiktok_html(url, timeout=DEFAULT_REQUEST_TIMEOUT):
         },
     )
     with _request_semaphore:
-        with urlopen_request(request, timeout=timeout) as response:
-            return response.geturl(), response.read().decode("utf-8", errors="replace")
+        with urlopen_request(request, timeout=timeout, redirect_validator=is_scrapable_tiktok_url) as response:
+            final_url = normalize_tiktok_url(response.geturl())
+            if not final_url:
+                raise ValueError("Chuyển hướng TikTok tới URL không được phép.")
+            return final_url, response.read().decode("utf-8", errors="replace")
 
 
 def scrape_link_request(url, timeout=DEFAULT_REQUEST_TIMEOUT):
@@ -2040,10 +2068,66 @@ def scrape_link_with_retries_request(
 
 
 async def block_heavy_resources(route):
-    if route.request.resource_type in BLOCKED_RESOURCE_TYPES:
+    request = route.request
+    if request.is_navigation_request():
+        if not is_scrapable_tiktok_url(request.url):
+            await route.abort()
+            return
+        response = None
+        try:
+            # Routes are not re-entered for server redirects. Fetch one hop and
+            # never fulfill a 30x: Chromium could otherwise follow it unchecked.
+            response = await route.fetch(max_redirects=0, timeout=15000)
+            if 300 <= response.status < 400:
+                await route.abort()
+            else:
+                await route.fulfill(response=response)
+        except Exception:
+            await route.abort()
+        finally:
+            if response is not None:
+                await response.dispose()
+    elif request.resource_type in BLOCKED_RESOURCE_TYPES:
         await route.abort()
     else:
         await route.continue_()
+
+
+async def navigate_tiktok_page(page, url, *, timeout_ms=45000):
+    """Resolve only allowed redirect hops, then perform a no-redirect navigation.
+
+    The context's navigation route still checks the final refetch, so a changed
+    redirect response fails closed instead of sending Chromium to a new host.
+    """
+    target = normalize_tiktok_url(url)
+    if not target:
+        raise ValueError("URL TikTok không hợp lệ.")
+    deadline = time.monotonic() + timeout_ms / 1000
+    for _hop in range(10):
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            raise TimeoutError("Hết thời gian kiểm tra chuyển hướng TikTok.")
+        response = await page.context.request.get(
+            target, max_redirects=0, timeout=min(15000, remaining_ms),
+            headers={"Accept": "text/html", "Referer": "https://www.tiktok.com/"},
+        )
+        try:
+            if 300 <= response.status < 400:
+                location = response.headers.get("location")
+                if response.status not in {301, 302, 303, 307, 308} or not location:
+                    raise ValueError("Chuyển hướng TikTok không hợp lệ.")
+                next_target = normalize_tiktok_url(urljoin(target, location))
+                if not next_target:
+                    raise ValueError("Chuyển hướng TikTok tới URL không được phép.")
+                target = next_target
+                continue
+        finally:
+            await response.dispose()
+        remaining_ms = int((deadline - time.monotonic()) * 1000)
+        if remaining_ms <= 0:
+            raise TimeoutError("Hết thời gian kiểm tra chuyển hướng TikTok.")
+        return await page.goto(target, wait_until="domcontentloaded", timeout=remaining_ms)
+    raise ValueError("Quá nhiều chuyển hướng TikTok.")
 
 
 async def make_browser_context(browser, proxy_configs=None):
@@ -2054,6 +2138,7 @@ async def make_browser_context(browser, proxy_configs=None):
         "timezone_id": BROWSER_TIMEZONE,
         "geolocation": BROWSER_GEOLOCATION,
         "permissions": ["geolocation"],
+        "service_workers": "block",
     }
     configs = [item for item in (proxy_configs or []) if item and item.get("enabled")]
     if configs:
@@ -2068,9 +2153,11 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
     data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
     channel_name = ""
     url = normalize_tiktok_url(url)
+    if not url:
+        return data, channel_name, "Error: URL TikTok không hợp lệ", ""
     profile_username = extract_profile_username(url)
     try:
-        await page.goto(url, wait_until="domcontentloaded", timeout=timeout_ms)
+        await navigate_tiktok_page(page, url, timeout_ms=timeout_ms)
         try:
             await page.wait_for_selector(
                 'script#__UNIVERSAL_DATA_FOR_REHYDRATION__, script#SIGI_STATE, script#api-data',
@@ -2085,6 +2172,9 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
             page_url = page.url or url
         except Exception:
             page_url = url
+        page_url = normalize_tiktok_url(page_url)
+        if not page_url:
+            return data, channel_name, "Error: URL chuyển hướng không thuộc TikTok.", ""
         if not profile_username:
             profile_username = extract_profile_username(page_url)
         source_media_id = extract_media_id(url)
@@ -2395,7 +2485,7 @@ async def request_worker_loop(
 
             started_at = time.perf_counter()
             try:
-                data, channel_name, status, attempts, resolved_url = await loop.run_in_executor(
+                request_future = loop.run_in_executor(
                     None,
                     lambda url=item["url"]: _run_request_scrape(
                         worker_index,
@@ -2407,7 +2497,12 @@ async def request_worker_loop(
                         cache_lock=cache_lock,
                     ),
                 )
+                data, channel_name, status, attempts, resolved_url = await finish_pending_task(request_future)
             except Exception as error:
+                # A failed HTTP future must not turn a pending cancellation into
+                # an ordinary result and allow the worker to dequeue more URLs.
+                if asyncio.current_task().cancelling():
+                    raise asyncio.CancelledError() from error
                 data = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
                 channel_name = ""
                 status = f"Error: Request worker {worker_label} crash ({str(error)})"
@@ -2477,7 +2572,7 @@ def write_result(
                 sheet.cell(row=row_index, column=column_index).value = value
 
     if columns.get("scan_status"):
-        sheet.cell(row=row_index, column=columns["scan_status"]).value = clean_text(status)
+        set_cell_literal(sheet.cell(row=row_index, column=columns["scan_status"]), clean_text(status))
     if status == "Success" and resolved_url and columns.get("resolved_url"):
         sheet.cell(row=row_index, column=columns["resolved_url"]).value = normalize_tiktok_url(resolved_url)
     if status == "Success" and columns.get("source_url"):
@@ -2499,7 +2594,7 @@ def write_result(
             channel_value = existing
         elif channel_name_quality(existing, item["url"]) > channel_name_quality(channel_value, item["url"]):
             channel_value = existing
-        sheet.cell(row=row_index, column=columns["channel"]).value = channel_value
+        set_cell_literal(sheet.cell(row=row_index, column=columns["channel"]), channel_value)
 
     # Chỉ cập nhật timestamp khi quét thành công — tránh hiểu nhầm đã quét OK.
     if status == "Success" and columns.get("last_update"):
@@ -2647,12 +2742,15 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     partner_label = selected_partner_label(selected_names)
     scrape_base_dir = base_dir or os.path.dirname(os.path.abspath(file_path))
     proxy_configs = resolve_proxy_configs(scrape_base_dir, proxy_text=proxy_text) if use_proxy else []
+    proxy_configs = [config for config in proxy_configs if config and config.get("enabled", True)]
+    if use_proxy and not proxy_configs:
+        raise ValueError("Đã bật proxy nhưng không có proxy enabled hợp lệ; không quét direct.")
     has_proxy = bool(proxy_configs)
     worker_count = clamp_worker_count(worker_count, proxy_count=len(proxy_configs))
     heavy_proxy_load = has_proxy and (worker_count / len(proxy_configs)) > MAX_WORKERS_PER_PROXY
 
     workbook = openpyxl.load_workbook(file_path)
-    clear_existing_total_rows(workbook)
+    clear_existing_total_rows(workbook, sheet_name=sheet_name)
     sheet_contexts = build_sheet_contexts(workbook, sheet_name=sheet_name)
     rows_to_process = collect_rows(workbook, selected_partners=selected_names, sheet_name=sheet_name)
 
@@ -3064,11 +3162,10 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 for task in workers:
                     if not task.done():
                         task.cancel()
-                try:
-                    cleanup_tasks = workers + ([finalize_task] if finalize_task is not None else [])
-                    await asyncio.wait_for(asyncio.gather(*cleanup_tasks, return_exceptions=True), timeout=10.0)
-                except asyncio.TimeoutError:
-                    pass
+                cleanup_tasks = workers + ([finalize_task] if finalize_task is not None else [])
+                # Request workers shield and join their active executor before exiting.
+                # Never replace the shared proxy pool while that HTTP work is alive.
+                await asyncio.gather(*cleanup_tasks, return_exceptions=True)
                 try:
                     if pending_save_count:
                         saved, _reason = await save_workbook(workbook, file_path, websocket_manager)
@@ -3115,7 +3212,8 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             if websocket_manager:
                 await websocket_manager.broadcast_log(f"CẢNH BÁO: Không tạo được sheet kết quả ({str(error)})")
     try:
-        append_sheet_total_rows(workbook)
+        for processed_sheet in dict.fromkeys(item["sheet_name"] for item in rows_to_process):
+            append_sheet_total_rows(workbook, sheet_name=processed_sheet)
         summary_count = rebuild_summary_sheet(
             workbook,
             summary_update_time=summary_update_time,

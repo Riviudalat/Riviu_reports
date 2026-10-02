@@ -85,6 +85,33 @@ def main() -> None:
         "jinja2",
         str(ROOT / "desktop_server.py"),
     ]
+    # PyInstaller's default keyring hook collects *all* backends. Override that
+    # hook locally for this build; the runtime explicitly instantiates only the
+    # native backend and never uses plugin/chain discovery.
+    native_backend = {
+        "darwin": "keyring.backends.macOS",
+        "linux": "keyring.backends.SecretService",
+    }.get(sys.platform)
+    if native_backend:
+        native_hooks = build_root / "native-hooks"
+        native_hooks.mkdir()
+        (native_hooks / "hook-keyring.py").write_text(
+            "from PyInstaller.utils.hooks import copy_metadata\n"
+            f"hiddenimports = [{native_backend!r}]\n"
+            "datas = copy_metadata('keyring')\n",
+            encoding="utf-8",
+        )
+        command[-1:-1] = [
+            "--additional-hooks-dir", str(native_hooks),
+            "--hidden-import", native_backend,
+            "--exclude-module", "keyrings.alt",
+            "--exclude-module", "keyring.backends.chainer",
+        ]
+        if sys.platform == "linux":
+            command[-1:-1] = ["--collect-all", "secretstorage", "--collect-all", "jeepney"]
+    else:
+        # Windows uses ctypes DPAPI and does not install or bundle keyring.
+        command[-1:-1] = ["--exclude-module", "keyring"]
     subprocess.run(command, cwd=ROOT, check=True, env=playwright_env)
 
     built_binary = dist_dir / f"{SIDECAR_NAME}{extension}"

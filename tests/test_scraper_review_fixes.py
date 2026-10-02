@@ -20,7 +20,8 @@ import threads_scraper
 THREADS_URL = "https://www.threads.com/@miri_viu/post/DdRIHGWCURV"
 
 
-def test_threads_browser_uses_target_actions_and_not_caption_or_recommendations():
+@pytest.mark.parametrize("hydrated, delayed, has_card", [(False, False, True), (True, False, True), (True, True, True), (True, False, False)])
+def test_threads_browser_uses_target_actions_and_not_caption_or_recommendations(hydrated, delayed, has_card):
     html = '''<html><body><header>miri_viu</header>
       <article><a href="/@other/post/Other">other</a>
         <div role="button"><svg title="Like"></svg>999</div>
@@ -36,6 +37,23 @@ def test_threads_browser_uses_target_actions_and_not_caption_or_recommendations(
           <div role="button"><svg title="Share"></svg>2</div>
         </div>
       </article></main></body></html>'''
+
+    if hydrated:
+        html = html.replace('</svg>4', '</svg>').replace('</svg>1', '</svg>').replace('</svg>2', '</svg>')
+        document = {"require": [["RelayPrefetchedStreamCache", "next", [], [
+            "adp_BarcelonaPostPageTargetQueryRelayPreloader_fixture",
+            {"__bbox": {"result": {"data": {"media": {
+                "code": "DdRIHGWCURV", "user": {"username": "miri_viu"},
+                "like_count": 0, "like_and_view_counts_disabled": False,
+                "text_post_app_info": {"direct_reply_count": 0, "repost_count": 0, "reshare_count": None},
+            }}}}},
+        ]]]}
+        if delayed:
+            html += '<script>setTimeout(() => { const s = document.createElement("script"); s.type = "application/json"; s.textContent = ' + json.dumps(json.dumps(document)) + '; document.body.append(s); }, 600);</script>'
+        else:
+            html += '<script type="application/json">' + json.dumps(document) + '</script>'
+        if not has_card:
+            html = html.replace('/@miri_viu/post/DdRIHGWCURV', '/@other/post/Wrong')
 
     async def check():
         async with async_playwright() as playwright:
@@ -56,7 +74,12 @@ def test_threads_browser_uses_target_actions_and_not_caption_or_recommendations(
 
     result = asyncio.run(check())
     assert result["error"] == ""
-    assert result["metrics"] == {"views": 377, "likes": 4, "comments": 1, "reposts": None, "shares": 2}
+    if hydrated:
+        assert result["metrics"] == {"views": 377 if has_card else None, "likes": 0, "comments": 0, "reposts": 0, "shares": None}
+        if not has_card:
+            assert result["diagnostic"] == "Không xác minh được card Threads cần quét"
+    else:
+        assert result["metrics"] == {"views": 377, "likes": 4, "comments": 1, "reposts": None, "shares": 2}
 
 
 def test_threads_hybrid_preserves_verified_http_metrics():

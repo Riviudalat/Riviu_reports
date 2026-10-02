@@ -39,7 +39,7 @@ el('scanSheetSelect').value='Sheet A';
 const sent=[]; const sockets=[];
 class WebSocket {static OPEN=1; constructor(url){this.url=url;this.readyState=1;sockets.push(this);} send(x){sent.push(JSON.parse(x));}}
 const context = vm.createContext({console,document,WebSocket,Map,Set,Date,Number,JSON,Promise,URL,
-  URLSearchParams,
+  URLSearchParams,TextEncoder,
   window:{location:{protocol:'http:',hostname:'localhost',host:'localhost:1231',port:'1231'},
     matchMedia(){return {matches:true};},addEventListener(){},setInterval(){},__TAURI__:null},
   setTimeout(){},clearTimeout(){},localStorage:{getItem(){return null;},setItem(){}},
@@ -62,6 +62,58 @@ def run_js(source):
     command = NODE_HARNESS + "\n(async()=>{await vm.runInContext(" + json.dumps(source) + ",context);})().catch(e=>{console.error(e);process.exitCode=1;});"
     result = subprocess.run([node, "-e", command], cwd=ROOT, capture_output=True, text=True, encoding="utf-8")
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("platform", ["threads", "tiktok"])
+@pytest.mark.parametrize("use_proxy", [False, True])
+@pytest.mark.parametrize("has_proxy", [False, True])
+def test_scan_start_shared_proxy_settings_and_safe_logs(platform, use_proxy, has_proxy):
+    run_js(f"""
+      ws=new WebSocket('test'); activePlatform={json.dumps(platform)};
+      currentFileId='Fixture.xlsx'; currentSheetName='Data';
+      el('proxyUseCheckbox').checked={json.dumps(use_proxy)};
+      el('proxyTextInput').value={json.dumps('http://fixture-user:fixture-password@proxy.example:8080' if has_proxy else '')};
+      const logs=[]; const warnings=[]; const consoleLogs=[]; let modalOpened=false;
+      addLog=(...args)=>logs.push(args); notify=(...args)=>warnings.push(args);
+      console={{log:(...args)=>consoleLogs.push(args),warn:(...args)=>consoleLogs.push(args),
+        error:(...args)=>consoleLogs.push(args)}};
+      openProxyModal=()=>{{modalOpened=true;}};
+      startScraping(['Fixture partner'],'Data');
+      if ({json.dumps(use_proxy and not has_proxy)}) {{
+        assert.equal(sent.length,0); assert.equal(modalOpened,true);
+        assert.equal(warnings.length,1); assert.equal(warnings[0][1],'warn');
+        assert.match(warnings[0][0],/proxy/); assert.equal(scanPhase,'idle');
+      }} else {{
+        assert.equal(sent.length,1); assert.equal(sent[0].platform,{json.dumps(platform)});
+        assert.equal(sent[0].use_proxy,{json.dumps(use_proxy)});
+        assert.equal(sent[0].proxy_text,{json.dumps('http://fixture-user:fixture-password@proxy.example:8080' if use_proxy and has_proxy else '')});
+        assert.equal(modalOpened,false); assert.equal(warnings.length,0);
+        assert.equal(scanPhase,'starting');
+      }}
+      const output=JSON.stringify([logs,warnings,consoleLogs]);
+      assert.ok(!output.includes('fixture-user')); assert.ok(!output.includes('fixture-password'));
+    """)
+
+
+def test_proxy_settings_survive_platform_switch_and_use_saved_text():
+    run_js("""
+      ws=new WebSocket('test'); el('proxyUseCheckbox').checked=true;
+      proxyListText='proxy.example:8080'; el('proxyTextInput').value='';
+      applyPlatformUI('threads'); applyPlatformUI('tiktok'); applyPlatformUI('threads');
+      assert.equal(el('proxyUseCheckbox').checked,true);
+      assert.equal(currentProxyText(),'proxy.example:8080');
+      startScraping([],'Data');
+      assert.equal(sent[0].platform,'threads'); assert.equal(sent[0].use_proxy,true);
+      assert.equal(sent[0].proxy_text,'proxy.example:8080');
+      updateProxyModalSummary(2);
+      assert.match(el('proxyModalSummary').textContent,/phân bổ/);
+      assert.ok(!el('proxyModalSummary').textContent.includes('ngẫu nhiên'));
+    """)
+
+
+def test_threads_proxy_toolbar_is_not_hidden_by_platform_css():
+    css = (ROOT / 'static' / 'styles.css').read_text(encoding='utf-8')
+    assert not re.search(r'\[data-platform\s*=\s*[\"\']threads[\"\']\]\s+\.toolbar-proxy\s*\{[^}]*display\s*:\s*none', css)
 
 
 def test_partner_refresh_uses_the_modal_sheet():
@@ -172,6 +224,26 @@ def test_idle_session_and_completed_old_run_do_not_lock_or_change_selected_file(
     """)
 
 
+def test_mobile_tiktok_host_is_visible_in_platform_preview():
+    run_js("""
+      assert.equal(matchesPlatformLink('https://mobile.tiktok.com/@demo/video/123','tiktok'),true);
+      assert.equal(matchesPlatformLink('https://mobile.tiktok.com.evil.example/@demo/video/123','tiktok'),false);
+    """)
+
+
+def test_threads_zero_result_is_ok_with_missing_detail_not_error():
+    run_js("""
+      activePlatform='threads';
+      appendData({id:1,platform:'threads',url:'https://www.threads.com/@author/post/abc',status:'Success',
+        views:0,likes:0,comments:0,saves:0,shares:null,missingMetrics:['CHIA SẺ']});
+      const row=el('dataFeed').children[0];
+      assert.equal(row.dataset.resultStatus,'success');
+      assert.match(row.innerHTML,/>OK<\\/span>/);
+      assert.match(row.innerHTML,/Nguồn chưa trả: CHIA SẺ/);
+      assert.match(row.innerHTML,/data-label="Chia sẻ"[^>]*><\\/td>/);
+    """)
+
+
 def test_threads_result_metadata_preserves_unknown_metrics_when_ui_was_tiktok():
     run_js("""
       activePlatform='tiktok';
@@ -181,6 +253,48 @@ def test_threads_result_metadata_preserves_unknown_metrics_when_ui_was_tiktok():
       assert.match(html,/data-label="Repost"[^>]*><\\/td>/);
       assert.match(html,/data-label="Tim"[^>]*><\\/td>/);
       assert.match(html,/>372<\\/td>/);
+      assert.equal(el('dataFeed').children[0].dataset.resultStatus,'success');
+      assert.match(html,/>OK<\\/span>/);
+    """)
+
+
+def test_threads_legacy_partial_rows_and_progress_counts_use_same_classification():
+    run_js("""
+      activePlatform='threads';
+      for(let id=1;id<=88;id++) appendData({id,platform:'threads',url:'https://www.threads.com/@demo/post/P'+id,
+        likes:0,comments:0,saves:0,views:null,shares:null,status:'Partial: thiếu LƯỢT XEM, CHIA SẺ'});
+      for(let id=89;id<=96;id++) appendData({id,platform:'threads',url:'https://www.threads.com/@demo/post/P'+id,status:'Error: hidden'});
+      updateProgress({platform:'threads',total:96,processed:96,success:0,hidden:88,error:8,phase:'completed',done:true});
+      assert.equal(el('successLinks').textContent,88);
+      assert.equal(el('hiddenCountBadge').textContent,0);
+      assert.equal(el('failedCountBadge').textContent,8);
+      assert.equal(el('dataFeed').children.filter(row=>row.dataset.resultStatus==='success').length,88);
+      assert.equal(el('dataFeed').children.filter(row=>row.dataset.resultStatus==='error').length,8);
+    """)
+
+
+def test_status_before_rows_reconciles_when_batch_is_complete():
+    run_js("""
+      activePlatform='threads';
+      updateProgress({total:2,processed:2,success:0,hidden:2,error:0,phase:'running'});
+      appendData({id:1,likes:0,status:'Partial: views'});
+      assert.equal(el('hiddenCountBadge').textContent,2);
+      appendData({id:2,likes:0,status:'Partial: views'});
+      assert.equal(el('successLinks').textContent,2);
+      assert.equal(el('hiddenCountBadge').textContent,0);
+      appendData({id:2,likes:0,status:'Partial: views'});
+      assert.equal(el('successLinks').textContent,2);
+    """)
+
+
+def test_truncated_or_tiktok_results_do_not_rewrite_server_counts():
+    run_js("""
+      activePlatform='threads'; appendData({id:1,likes:0,status:'Partial: shares'});
+      updateProgress({total:100,processed:100,success:5,hidden:90,error:5,phase:'running'});
+      assert.equal(el('successLinks').textContent,5); assert.equal(el('hiddenCountBadge').textContent,90);
+      activePlatform='tiktok';
+      updateProgress({platform:'tiktok',total:1,processed:1,success:0,hidden:1,error:0,phase:'running'});
+      assert.equal(el('successLinks').textContent,0); assert.equal(el('hiddenCountBadge').textContent,1);
     """)
 
 
@@ -294,6 +408,9 @@ def test_real_dom_threads_snapshot_keeps_blank_metrics_and_locked_controls():
                 }})});
             }""")
             assert page.locator('#liveSavedHeader').inner_text() == 'REPOST'
+            assert page.locator('#successLinks').inner_text() == '1'
+            assert page.locator('#hiddenCountBadge').inner_text() == '0'
+            assert page.locator('#dataFeed .col-status').inner_text() == 'OK'
             assert page.locator('#dataFeed td[data-label="Repost"]').inner_text() == ''
             assert page.locator('#dataFeed td[data-label="Tim"]').inner_text() == ''
             assert page.locator('#reportMinViewRow').is_hidden()

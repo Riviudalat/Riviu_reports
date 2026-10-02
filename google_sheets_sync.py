@@ -11,6 +11,7 @@ from workbook_utils import (
     google_to_excel_sheet_titles,
     month_label_for_sheet_name,
     store_google_sheet_title_map,
+    set_cell_literal,
 )
 
 CLIENT_SECRET_FILENAME = "google_oauth_client.json"
@@ -367,7 +368,7 @@ def download_google_sheet_authenticated(base_dir, spreadsheet_id, destination_pa
             worksheet = workbook.create_sheet(title=title_mapping[title])
             for row_index, row in enumerate(values, start=1):
                 for col_index, value in enumerate(row, start=1):
-                    worksheet.cell(row=row_index, column=col_index, value=value)
+                    set_cell_literal(worksheet.cell(row=row_index, column=col_index), value)
     os.makedirs(os.path.dirname(destination_path), exist_ok=True)
     workbook.save(destination_path)
     return destination_path
@@ -418,9 +419,23 @@ def push_rows_to_new_sheet(base_dir, spreadsheet_id, rows, source_sheet_name="",
     service.spreadsheets().values().update(
         spreadsheetId=spreadsheet_id,
         range=f"'{title}'!A1",
-        valueInputOption="USER_ENTERED",
+        valueInputOption="RAW",
         body={"values": rows},
     ).execute()
+    # Only the app-generated final metric totals may be interpreted as formulas.
+    # All channel, partner, date, and source text above remains RAW, unchanged.
+    if len(rows) > 2 and len(rows[-1]) > 2 and rows[-1][2] == "TỔNG":
+        for index in range(4, min(9, len(rows[-1]))):
+            column = chr(ord("A") + index)
+            expected = f"=SUM({column}2:{column}{len(rows) - 1})"
+            if rows[-1][index] != expected:
+                continue
+            service.spreadsheets().values().update(
+                spreadsheetId=spreadsheet_id,
+                range=f"'{title}'!{column}{len(rows)}",
+                valueInputOption="USER_ENTERED",
+                body={"values": [[expected]]},
+            ).execute()
     format_result_sheet(service, spreadsheet_id, sheet_id, len(rows), max(len(row) for row in rows))
     apply_link_formatting(service, spreadsheet_id, sheet_id, rows)
     return title

@@ -1,4 +1,5 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Query
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, UploadFile, File, Form, Query
+from typing import Annotated
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -8,6 +9,7 @@ import json
 import os
 import re
 import secrets
+import shutil
 import tempfile
 import threading
 import sys
@@ -15,7 +17,7 @@ import zipfile
 from collections import deque
 from datetime import datetime
 import urllib.error
-from urllib.parse import quote, urlsplit
+from urllib.parse import quote, urlsplit, parse_qs, urlunsplit
 
 import pandas as pd
 from openpyxl import Workbook, load_workbook
@@ -28,7 +30,8 @@ from openpyxl.utils.cell import coordinate_from_string
 from openpyxl.utils.units import pixels_to_EMU
 
 from scraper import run_scraper, read_scrape_history
-from threads_scraper import run_threads_scraper
+from threads_scraper import resolve_threads_proxies, run_threads_scraper
+from threads_session import ThreadsSession, SessionError, MAX_IMPORT_BYTES
 from google_sheets_sync import (
     authorize_google,
     download_google_sheet_authenticated,
@@ -76,6 +79,8 @@ from workbook_utils import (
     google_sheet_sync_label,
     workbook_file_entries,
     workbook_sheet_names,
+    set_cell_literal,
+    data_sheet_name_for_summary_title,
 )
 
 
@@ -99,6 +104,18 @@ if os.path.isdir(_STATIC_DIR):
 LOCAL_SESSION_TOKEN = secrets.token_urlsafe(32)
 LOCAL_SESSION_COOKIE = f"riviu_session_{secrets.token_hex(6)}"
 LOCAL_HOSTS = {"127.0.0.1", "localhost", "::1"}
+THREADS_SESSION = None
+THREADS_SESSION_ROOT = ""
+
+
+def threads_session_manager():
+    global THREADS_SESSION, THREADS_SESSION_ROOT
+    root = os.path.realpath(EXCEL_DIR)
+    if THREADS_SESSION is None or THREADS_SESSION_ROOT != root:
+        THREADS_SESSION = ThreadsSession(root)
+        THREADS_SESSION_ROOT = root
+    return THREADS_SESSION
+
 GOOGLE_IO_LOCK = threading.RLock()
 
 
@@ -143,6 +160,8 @@ async def protect_local_api(request: Request, call_next):
     if request.headers.get("sec-fetch-site") == "cross-site" and not top_navigation:
         return JSONResponse({"error": "Nguồn truy cập không hợp lệ"}, status_code=403)
     response = await call_next(request)
+    if request.url.path.startswith("/threads-session"):
+        response.headers["Cache-Control"] = "no-store"
     if bootstrap:
         response.set_cookie(LOCAL_SESSION_COOKIE, LOCAL_SESSION_TOKEN, httponly=True, samesite="strict", path="/")
         response.headers["Cache-Control"] = "no-store"
@@ -292,6 +311,49 @@ def resolve_file_path(file_id):
     if not file_id:
         return ""
     return safe_join(EXCEL_DIR, file_id.replace("\\", "/"))
+
+
+class SourceRequestError(ValueError):
+    def __init__(self, message, status_code=400):
+        super().__init__(message)
+        self.status_code = status_code
+
+    def response(self):
+        return JSONResponse({"error": str(self)}, status_code=self.status_code)
+
+
+def validate_platform(platform="tiktok"):
+    platform = clean_text(platform).lower()
+    if platform not in {"tiktok", "threads"}:
+        raise SourceRequestError("Nền tảng không hợp lệ")
+    return platform
+
+
+def resolve_source_file(file_id=None, platform="tiktok", *, allow_empty=False):
+    """Capture an exact source; only an omitted ID may use legacy selection."""
+    platform = validate_platform(platform)
+    if file_id is None:
+        file_id = ensure_selected_file()
+    elif not isinstance(file_id, str):
+        raise SourceRequestError("File không hợp lệ")
+    else:
+        file_id = file_id.replace("\\", "/")
+        if not file_id:
+            if allow_empty:
+                return "", "", "", platform
+            raise SourceRequestError("Chưa chọn workbook hợp lệ")
+        if file_id not in {entry["id"] for entry in file_entries()}:
+            raise SourceRequestError("File không tồn tại", 404)
+    target_path = resolve_file_path(file_id)
+    if file_id and (not target_path or not os.path.isfile(target_path)):
+        raise SourceRequestError("File không tồn tại", 404)
+    return file_id, target_path, file_display_label(file_id), platform
+
+
+def source_sheet_default(file_id, *, scan=False, explicit=False):
+    if not explicit:
+        return (CURRENT_SCAN_SHEET if scan else "") or CURRENT_SELECTED_SHEET or ""
+    return default_sheet_for_file(file_id)
 
 
 def ensure_selected_file():
@@ -540,18 +602,21 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100, 
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
     ws.row_dimensions[1].height = 42
-    ws.row_dimensions[2].height = 22
+    ws.row_dimensions[2].height = 26
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
     add_centered_image_to_cell(ws, "A1", LOGO_PATH)
 
     ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=len(report_columns))
     title_cell = ws["B1"]
-    title_cell.value = f"BÁO CÁO {'THREADS - ' if threads else ''}ĐỐI TÁC: {partner}"
+    title_cell.value = f"BÁO CÁO {'THREADS' if threads else 'TIKTOK'} - ĐỐI TÁC: {partner}"
     title_cell.fill = title_fill
     title_cell.font = Font(color="FFFFFF", bold=True, size=14)
     title_cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(report_columns))
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(report_columns) - 1)
+    platform_icon = os.path.join(APP_RESOURCE_DIR, "static", "platform-icons", f"{'threads' if threads else 'tiktok'}.png")
+    ws.column_dimensions[last_column].width = 32 if threads else 12
+    add_centered_image_to_cell(ws, f"{last_column}2", platform_icon, max_height_px=22)
     ws["A2"] = f"Tổng link: {len(frame)} • Ngày cập nhật: {updated_at}"
     ws["A2"].font = Font(color="9A3412", italic=True, bold=True)
     ws["A2"].alignment = Alignment(horizontal="center")
@@ -587,7 +652,8 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100, 
             else:
                 value = format_metric(value)
 
-            cell = ws.cell(row=row_index, column=col_index, value=value)
+            cell = ws.cell(row=row_index, column=col_index)
+            set_cell_literal(cell, value)
             cell.border = border
             cell.alignment = Alignment(vertical="top", wrap_text=(header in {"LINK AIR", "TÊN KÊNH"}))
             if header == "LINK AIR" and isinstance(value, str) and value.startswith("http"):
@@ -664,10 +730,16 @@ def content_disposition(filename):
     return f"attachment; filename*=UTF-8''{quote(filename)}"
 
 
-def validate_proxy_start(use_proxy: bool, proxy_text: str, base_dir: str) -> str | None:
+def validate_proxy_start(use_proxy: bool, proxy_text: str, base_dir: str, platform: str = "tiktok", mode: str = "request") -> str | None:
     if not use_proxy:
         return None
-    if resolve_proxy_configs(base_dir, proxy_text):
+    if platform == "threads":
+        try:
+            resolve_threads_proxies(base_dir, proxy_text, mode)
+        except ValueError as error:
+            return str(error)
+        return None
+    if any(config.get("enabled", True) for config in resolve_proxy_configs(base_dir, proxy_text)):
         return None
     return "Bật proxy nhưng chưa có proxy hợp lệ. Mở Cấu hình và dán proxy."
 
@@ -726,7 +798,7 @@ class RunEvents:
         await self.manager.broadcast_duplicates(data)
 
 
-async def run_scraper_safely(target_path, worker_count, partner=None, partners=None, create_result_sheet=False, push_to_google=False, sheet_name="", use_request=True, browser_fallback=False, use_proxy=False, proxy_text="", platform="tiktok", run_context=None):
+async def run_scraper_safely(target_path, worker_count, partner=None, partners=None, create_result_sheet=False, push_to_google=False, sheet_name="", use_request=True, browser_fallback=False, use_proxy=False, proxy_text="", platform="tiktok", run_context=None, threads_cookies=None, threads_proxies=None, threads_generation=None):
     base_dir = EXCEL_DIR
     events = RunEvents(manager)
     try:
@@ -741,10 +813,14 @@ async def run_scraper_safely(target_path, worker_count, partner=None, partners=N
             raise ValueError("Sheet không tồn tại trong file đã chọn")
         if platform == "threads":
             mode = "browser" if not use_request else ("hybrid" if browser_fallback else "request")
+            session_options = {}
+            if threads_cookies is not None:
+                session_options = {"session_cookies": threads_cookies, "proxy_configs": threads_proxies}
             await run_threads_scraper(
                 target_path, events, worker_count=worker_count,
                 selected_partners=partners or ([partner] if partner else []),
                 sheet_name=scan_sheet, mode=mode,
+                base_dir=base_dir, use_proxy=use_proxy, proxy_text=proxy_text, **session_options,
             )
         else:
             await run_scraper(
@@ -777,8 +853,14 @@ async def run_scraper_safely(target_path, worker_count, partner=None, partners=N
         await manager.broadcast_status({**manager.last_status, "done": True, "cancelled": True, "phase": "cancelled"})
         raise
     except Exception as error:
-        await manager.broadcast_log(f"Lỗi quét: {str(error)}")
-        await manager.broadcast_status({**manager.last_status, "error": max(1, manager.last_status.get("error", 0)), "done": True, "phase": "failed", "message": str(error)})
+        if threads_cookies is not None:
+            try:
+                await complete_blocking(threads_session_manager().invalidate, threads_generation, error.state if isinstance(error, SessionError) else "unknown")
+            except Exception:
+                pass
+        message = str(error) if isinstance(error, SessionError) or threads_cookies is None else "Phiên quét Threads đăng nhập thất bại; kiểm tra cookie và tuyến kết nối."
+        await manager.broadcast_log(f"Lỗi quét: {message}")
+        await manager.broadcast_status({**manager.last_status, "error": max(1, manager.last_status.get("error", 0)), "done": True, "phase": "failed", "message": message})
 
 
 def finalize_unstarted_run(task, run_id):
@@ -849,6 +931,15 @@ def build_google_push_rows(rows, *, platform="tiktok"):
 
 
 def build_export_payload(target_path, selected_partners, apply_min_views, min_views, requested_sheet_name="", platform="tiktok"):
+    # One immutable copy feeds discovery and every partner report in this export.
+    # Atomic scan saves may replace the source while this function is running.
+    with tempfile.TemporaryDirectory(prefix="riviu-export-") as directory:
+        snapshot = os.path.join(directory, os.path.basename(target_path))
+        shutil.copyfile(target_path, snapshot)
+        return _build_export_payload(snapshot, selected_partners, apply_min_views, min_views, requested_sheet_name, platform)
+
+
+def _build_export_payload(target_path, selected_partners, apply_min_views, min_views, requested_sheet_name="", platform="tiktok"):
     data_sheets = find_data_sheet_names(target_path)
     report_sheet = clean_text(requested_sheet_name) or (data_sheets[0] if data_sheets else "")
     if report_sheet and report_sheet not in data_sheets:
@@ -948,9 +1039,12 @@ async def riviu_logo():
 
 
 @app.get("/list-files")
-async def list_files():
-    ensure_selected_file()
-    google_source = current_google_sheet_source()
+async def list_files(file_id: str | None = None, platform: str = "tiktok"):
+    try:
+        selected_id, target_path, file_label, platform = resolve_source_file(file_id, platform, allow_empty=True)
+    except SourceRequestError as error:
+        return error.response()
+    google_source = dict(google_sheet_source_for_file(EXCEL_DIR, selected_id)) if selected_id else {}
     target_sheet_url = google_source.get("url", "")
     target_spreadsheet_id = ""
     if target_sheet_url:
@@ -958,14 +1052,22 @@ async def list_files():
             target_spreadsheet_id = parse_google_spreadsheet_id(target_sheet_url)
         except Exception:
             target_spreadsheet_id = ""
+    try:
+        sheets = await asyncio.to_thread(find_data_sheet_names, target_path) if target_path else []
+    except Exception:
+        sheets = []
+    selected_sheet = CURRENT_SELECTED_SHEET if file_id is None else (sheets[0] if sheets else "")
+    scan_sheet = (CURRENT_SCAN_SHEET or selected_sheet) if file_id is None else selected_sheet
     state = {
         "files": file_entries(),
-        "current": CURRENT_SELECTED_FILE,
-        "currentLabel": current_display_label(),
-        "currentSheet": CURRENT_SELECTED_SHEET,
-        "sheets": sheets_for_current_file(),
-        "scanSheet": CURRENT_SCAN_SHEET or CURRENT_SELECTED_SHEET,
+        "current": selected_id,
+        "file_id": selected_id,
+        "currentLabel": file_label,
+        "currentSheet": selected_sheet,
+        "sheets": sheets,
+        "scanSheet": scan_sheet,
         "googleSheetUrl": target_sheet_url,
+        "platform": platform,
     }
     oauth = await asyncio.to_thread(google_io, oauth_status, EXCEL_DIR)
     state.update({
@@ -979,28 +1081,42 @@ async def list_files():
 @app.post("/select-file")
 async def select_file(data: dict):
     global CURRENT_SELECTED_FILE, CURRENT_SELECTED_SHEET, CURRENT_SCAN_SHEET, SOURCE_BUSY
+    try:
+        platform = validate_platform(data.get("platform", "tiktok"))
+    except SourceRequestError as error:
+        return error.response()
     if source_mutation_blocked():
         return JSONResponse({"error": "Đang xử lý dữ liệu, hãy chờ hoàn tất trước khi đổi file"}, status_code=409)
-    file_id = data.get("filename")
-    if file_id not in {entry["id"] for entry in file_entries()}:
-        return {"success": False, "error": "File không tồn tại"}
-    target_path = resolve_file_path(file_id) if file_id else ""
-    if target_path and os.path.exists(target_path):
-        SOURCE_BUSY = True
-        try:
-            names = await asyncio.to_thread(find_data_sheet_names, target_path)
-            CURRENT_SELECTED_FILE = file_id.replace("\\", "/")
-            CURRENT_SELECTED_SHEET = names[0] if names else ""
-            CURRENT_SCAN_SHEET = CURRENT_SELECTED_SHEET
-            return {"success": True, "selected": CURRENT_SELECTED_FILE, "sheet": CURRENT_SELECTED_SHEET, "scanSheet": CURRENT_SCAN_SHEET}
-        finally:
-            SOURCE_BUSY = False
-    return {"success": False, "error": "File không tồn tại"}
+    try:
+        file_id, target_path, _, platform = resolve_source_file(data.get("file_id", data.get("filename", "")), platform)
+    except SourceRequestError as error:
+        return error.response()
+    SOURCE_BUSY = True
+    try:
+        names = await asyncio.to_thread(find_data_sheet_names, target_path)
+        all_names = await asyncio.to_thread(workbook_sheet_names, target_path)
+        selected_sheet = clean_text(data.get("display_sheet", data.get("sheet_name", ""))) or (names[0] if names else "")
+        scan_sheet = clean_text(data.get("scan_sheet", "")) or (selected_sheet if selected_sheet in names else (names[0] if names else ""))
+        if (selected_sheet and selected_sheet not in all_names) or (scan_sheet and scan_sheet not in names):
+            return JSONResponse({"error": "Sheet không tồn tại"}, status_code=400)
+        CURRENT_SELECTED_FILE = file_id
+        CURRENT_SELECTED_SHEET = selected_sheet
+        CURRENT_SCAN_SHEET = scan_sheet
+        return {"success": True, "selected": file_id, "file_id": file_id, "sheet": selected_sheet, "scanSheet": scan_sheet, "platform": platform}
+    finally:
+        SOURCE_BUSY = False
 
 
 @app.post("/sync-google-sheet")
 async def sync_google_sheet(data: dict):
     global CURRENT_SELECTED_FILE, CURRENT_SELECTED_SHEET, CURRENT_SCAN_SHEET, SOURCE_BUSY
+    try:
+        platform = validate_platform(data.get("platform", "tiktok"))
+    except SourceRequestError as error:
+        return error.response()
+    activate = data.get("activate", True)
+    if not isinstance(activate, bool):
+        return JSONResponse({"error": "activate phải là boolean"}, status_code=400)
     if source_mutation_blocked():
         return JSONResponse({"error": "Đang xử lý dữ liệu, hãy chờ hoàn tất trước khi đồng bộ"}, status_code=409)
     source_url = (data.get("url") or "").strip()
@@ -1032,21 +1148,26 @@ async def sync_google_sheet(data: dict):
             register_google_sheet_source(base_dir, file_id, source_url, title=file_label)
             return file_id, file_label, preview
         file_id, file_label, preview = await complete_blocking(download_and_publish)
-        CURRENT_SELECTED_FILE = file_id
-        CURRENT_SELECTED_SHEET = preview.get("currentSheet", "")
-        CURRENT_SCAN_SHEET = CURRENT_SELECTED_SHEET
+        selected_sheet = preview.get("currentSheet", "")
+        if activate:
+            CURRENT_SELECTED_FILE = file_id
+            CURRENT_SELECTED_SHEET = selected_sheet
+            CURRENT_SCAN_SHEET = selected_sheet
         await manager.broadcast_log(
-            f"Đã nạp Google Sheet thành file mới: {file_label} → {os.path.basename(file_id)} • sheet={CURRENT_SELECTED_SHEET or ''} • url={source_url}",
+            f"Đã nạp Google Sheet thành file mới: {file_label} → {os.path.basename(file_id)} • sheet={selected_sheet} • url={source_url}",
             level="OK",
         )
         return {
             "success": True,
             "file": file_id,
+            "file_id": file_id,
             "label": file_label,
             "sheets": preview.get("sheets", []),
-            "currentSheet": CURRENT_SELECTED_SHEET,
-            "scanSheet": CURRENT_SCAN_SHEET,
+            "currentSheet": selected_sheet,
+            "scanSheet": selected_sheet,
             "spreadsheetId": spreadsheet_id,
+            "platform": platform,
+            "activate": activate,
         }
     except Exception as error:
         return JSONResponse(content={"error": f"Lỗi đồng bộ Google Sheet: {str(error)}"}, status_code=500)
@@ -1139,15 +1260,24 @@ async def google_oauth_login():
 @app.post("/push-google-sheet")
 async def push_google_sheet(data: dict | None = None):
     global SOURCE_BUSY
+    data = data or {}
+    try:
+        platform = validate_platform(data.get("platform", "tiktok"))
+    except SourceRequestError as error:
+        return error.response()
     if source_mutation_blocked():
         return JSONResponse({"error": "Đang xử lý dữ liệu, hãy chờ lưu xong trước khi xuất"}, status_code=409)
-    target_path = current_excel_path()
+    try:
+        file_id, target_path, _, platform = resolve_source_file(data.get("file_id"), platform)
+    except SourceRequestError as error:
+        return error.response()
     if not os.path.exists(target_path):
         return JSONResponse(content={"error": "File không tồn tại"}, status_code=404)
 
-    request_url = clean_text((data or {}).get("url", ""))
-    source_url = request_url or current_google_sheet_source().get("url", "")
-    upload_sheet = clean_text((data or {}).get("sourceSheet", "")) or CURRENT_SCAN_SHEET or CURRENT_SELECTED_SHEET
+    source = dict(google_sheet_source_for_file(EXCEL_DIR, file_id))
+    request_url = clean_text(data.get("url", ""))
+    source_url = request_url or source.get("url", "")
+    upload_sheet = clean_text(data.get("sourceSheet", "")) or source_sheet_default(file_id, scan=True, explicit=data.get("file_id") is not None)
     spreadsheet_id = ""
     try:
         spreadsheet_id = parse_google_spreadsheet_id(source_url)
@@ -1158,9 +1288,6 @@ async def push_google_sheet(data: dict | None = None):
 
     SOURCE_BUSY = True
     try:
-        platform = clean_text((data or {}).get("platform", "tiktok")).lower()
-        if platform not in {"tiktok", "threads"}:
-            return JSONResponse(content={"error": "Nền tảng không hợp lệ"}, status_code=400)
         available_sheets = await asyncio.to_thread(find_data_sheet_names, target_path)
         if upload_sheet and upload_sheet not in available_sheets:
             return JSONResponse(content={"error": f"Sheet {upload_sheet} không tồn tại trong file."}, status_code=400)
@@ -1169,7 +1296,7 @@ async def push_google_sheet(data: dict | None = None):
             return JSONResponse(content={"error": f"Sheet \"{upload_sheet or 'đang chọn'}\" không có link {platform} để tạo sheet."}, status_code=400)
         values = build_google_push_rows(rows, platform=platform)
         sheet_title = await complete_blocking(google_io, push_rows_to_new_sheet, EXCEL_DIR, spreadsheet_id, values, source_sheet_name=upload_sheet, platform=platform)
-        return {"success": True, "sheetTitle": sheet_title, "sourceSheet": upload_sheet}
+        return {"success": True, "sheetTitle": sheet_title, "sourceSheet": upload_sheet, "file": file_id, "file_id": file_id, "platform": platform}
     except Exception as error:
         return JSONResponse(content={"error": f"Đẩy dữ liệu lên Google Sheet thất bại: {str(error)}"}, status_code=500)
     finally:
@@ -1177,52 +1304,64 @@ async def push_google_sheet(data: dict | None = None):
 
 
 @app.get("/preview-excel")
-async def preview_excel(sheet_name: str = Query(default="")):
+async def preview_excel(sheet_name: str = "", file_id: str | None = None, platform: str = "tiktok"):
     global CURRENT_SELECTED_SHEET
-    target_path = current_excel_path()
-    file_id = CURRENT_SELECTED_FILE
-    file_label = file_display_label(file_id)
+    explicit = file_id is not None
+    try:
+        file_id, target_path, file_label, platform = resolve_source_file(file_id, platform)
+    except SourceRequestError as error:
+        return error.response()
     if not os.path.exists(target_path):
         return {"sheets": [], "currentSheet": "", "columns": [], "data": [], "message": f"Không tìm thấy file {CURRENT_SELECTED_FILE}."}
     try:
-        requested_sheet = sheet_name or CURRENT_SELECTED_SHEET or default_sheet_for_file(CURRENT_SELECTED_FILE)
+        requested_sheet = sheet_name or source_sheet_default(file_id, explicit=explicit) or default_sheet_for_file(file_id)
 
         def _load_preview():
-            return read_sheet_preview(target_path, sheet_name=requested_sheet)
+            return read_sheet_preview(target_path, sheet_name=requested_sheet, platform=platform)
 
         preview = await asyncio.to_thread(_load_preview)
-        if CURRENT_SELECTED_FILE == file_id:
+        if not explicit and CURRENT_SELECTED_FILE == file_id:
             CURRENT_SELECTED_SHEET = preview.get("currentSheet", CURRENT_SELECTED_SHEET)
         preview["file"] = file_id
+        preview["file_id"] = file_id
         preview["fileLabel"] = file_label
+        preview["platform"] = platform
+        preview["summarySource"] = data_sheet_name_for_summary_title(preview.get("sheets", []), preview.get("currentSheet", ""))
         return preview
     except Exception as error:
         return {"file": file_id, "sheets": [], "currentSheet": "", "columns": [], "data": [], "message": f"File đang bận hoặc lỗi: {str(error)}"}
 
 
 @app.get("/summary-dashboard")
-async def summary_dashboard(sheet_name: str = Query(default="")):
-    target_path = current_excel_path()
-    file_id = CURRENT_SELECTED_FILE
-    file_label = file_display_label(file_id)
+async def summary_dashboard(sheet_name: str = "", file_id: str | None = None, platform: str = "tiktok"):
+    explicit = file_id is not None
+    try:
+        file_id, target_path, file_label, platform = resolve_source_file(file_id, platform)
+    except SourceRequestError as error:
+        return error.response()
     if not os.path.exists(target_path):
         return JSONResponse(content={"error": "File không tồn tại"}, status_code=404)
     try:
-        requested_sheet = clean_text(sheet_name) or CURRENT_SCAN_SHEET or CURRENT_SELECTED_SHEET or ""
+        requested_sheet = clean_text(sheet_name) or source_sheet_default(file_id, scan=True, explicit=explicit)
         summary = await asyncio.to_thread(read_summary_dashboard, target_path, requested_sheet or None)
         summary["file"] = file_id
+        summary["file_id"] = file_id
         summary["fileLabel"] = file_label
+        summary["platform"] = platform
         return summary
     except Exception as error:
         return JSONResponse(content={"error": f"Không đọc được sheet Tổng kết: {str(error)}"}, status_code=500)
 
 
 @app.get("/download-excel")
-async def download_excel():
-    target_path = current_excel_path()
+async def download_excel(file_id: str | None = None, platform: str = "tiktok"):
+    try:
+        file_id, target_path, _, platform = resolve_source_file(file_id, platform)
+    except SourceRequestError as error:
+        return error.response()
     if not os.path.exists(target_path):
         return JSONResponse(content={"error": "File không tồn tại"}, status_code=404)
-    download_name = os.path.basename(CURRENT_SELECTED_FILE)
+    download_name = os.path.basename(file_id)
     return FileResponse(
         path=target_path,
         filename=download_name,
@@ -1238,16 +1377,16 @@ async def scrape_history(limit: int = Query(default=50)):
 
 @app.get("/report-partners")
 async def report_partners(
-    sheet_name: str = Query(default=""),
-    apply_min_views: bool = Query(default=True),
-    min_views: int = Query(default=100),
-    platform: str = Query(default="tiktok"),
+    sheet_name: str = "",
+    apply_min_views: bool = True,
+    min_views: int = 100,
+    platform: str = "tiktok",
+    file_id: str | None = None,
 ):
-    if platform not in {"tiktok", "threads"}:
-        return JSONResponse(content={"error": "Nền tảng không hợp lệ"}, status_code=400)
-    target_path = current_excel_path()
-    file_id = CURRENT_SELECTED_FILE
-    file_label = file_display_label(file_id)
+    try:
+        file_id, target_path, file_label, platform = resolve_source_file(file_id, platform)
+    except SourceRequestError as error:
+        return error.response()
     if not os.path.exists(target_path):
         return JSONResponse(content={"error": "File không tồn tại"}, status_code=404)
 
@@ -1273,11 +1412,13 @@ async def report_partners(
             "partners": partners,
             "total": len(partners),
             "file": file_id,
+            "file_id": file_id,
             "fileLabel": file_label,
             "sheets": data_sheets,
             "currentSheet": requested_sheet,
             "dataSheet": requested_sheet,
             "allSheets": all_sheets,
+            "platform": platform,
         }
     except Exception as error:
         return JSONResponse(content={"error": f"Không đọc được danh sách đối tác: {str(error)}"}, status_code=500)
@@ -1285,14 +1426,14 @@ async def report_partners(
 
 @app.post("/export-report")
 async def export_report(data: dict):
-    target_path = current_excel_path()
+    try:
+        _, target_path, _, platform = resolve_source_file(data.get("file_id"), data.get("platform", "tiktok"))
+    except SourceRequestError as error:
+        return error.response()
     if not os.path.exists(target_path):
         return JSONResponse(content={"error": "File không tồn tại"}, status_code=404)
 
     selected_partners = data.get("partners") or []
-    platform = clean_text(data.get("platform", "tiktok")).lower()
-    if platform not in {"tiktok", "threads"}:
-        return JSONResponse(content={"error": "Nền tảng không hợp lệ"}, status_code=400)
     if not isinstance(selected_partners, list) or not selected_partners:
         return JSONResponse(content={"error": "Vui lòng chọn ít nhất một đối tác"}, status_code=400)
 
@@ -1326,8 +1467,16 @@ async def export_report(data: dict):
 
 
 @app.post("/upload-excel")
-async def upload_excel(file: UploadFile = File(...)):
+async def upload_excel(
+    file: UploadFile = File(...),
+    platform: Annotated[str, Form()] = "tiktok",
+    activate: Annotated[bool, Form()] = True,
+):
     global CURRENT_SELECTED_FILE, CURRENT_SELECTED_SHEET, CURRENT_SCAN_SHEET, SOURCE_BUSY
+    try:
+        platform = validate_platform(platform)
+    except SourceRequestError as error:
+        return error.response()
     if source_mutation_blocked():
         return {"success": False, "error": "Đang xử lý dữ liệu, hãy chờ hoàn tất trước khi nạp file"}
     SOURCE_BUSY = True
@@ -1348,20 +1497,174 @@ async def upload_excel(file: UploadFile = File(...)):
                 import shutil
                 shutil.copyfileobj(file.file, destination)
             preview = validate_workbook(staged_path)
+            sheets = find_data_sheet_names(staged_path)
             published = publish_new_workbook(staged_path, desired_path)
-            return published, preview
-        save_path, preview = await complete_blocking(validate_and_publish)
+            return published, preview, sheets
+        save_path, preview, sheets = await complete_blocking(validate_and_publish)
         file_id = os.path.relpath(save_path, EXCEL_DIR).replace("\\", "/")
-        CURRENT_SELECTED_FILE = file_id
-        sheets = [name for name in preview.get("sheets", []) if name in find_data_sheet_names(save_path)]
-        CURRENT_SELECTED_SHEET = sheets[0] if sheets else ""
-        CURRENT_SCAN_SHEET = CURRENT_SELECTED_SHEET
-        return {"success": True, "filename": file_id, "sheet": CURRENT_SELECTED_SHEET, "scanSheet": CURRENT_SCAN_SHEET}
+        selected_sheet = sheets[0] if sheets else ""
+        if activate:
+            CURRENT_SELECTED_FILE = file_id
+            CURRENT_SELECTED_SHEET = selected_sheet
+            CURRENT_SCAN_SHEET = selected_sheet
+        return {"success": True, "filename": file_id, "file_id": file_id, "sheet": selected_sheet, "scanSheet": selected_sheet, "sheets": sheets, "platform": platform, "activate": activate}
     except Exception as error:
         return {"success": False, "error": str(error)}
     finally:
         if staged_path and os.path.exists(staged_path):
             os.unlink(staged_path)
+        SOURCE_BUSY = False
+
+
+def normalize_source_preferences(payload):
+    if not isinstance(payload, dict) or not isinstance(payload.get("sources"), dict):
+        raise ValueError("Cấu hình nguồn không hợp lệ.")
+    sources = {}
+    for platform in ("tiktok", "threads"):
+        item = payload["sources"].get(platform, {})
+        if not isinstance(item, dict):
+            raise ValueError("Cấu hình nguồn không hợp lệ.")
+        result = {}
+        for key in ("fileId", "displaySheet", "scanSheet", "pushSheet", "url"):
+            value = item.get(key, "")
+            if not isinstance(value, str) or len(value) > (4096 if key == "url" else 1024) or any(ord(char) < 32 for char in value):
+                raise ValueError("Cấu hình nguồn không hợp lệ.")
+            if key == "fileId" and value:
+                if value.startswith(("/", "\\")) or re.match(r"^[A-Za-z]:", value) or any(part in {"", ".", ".."} for part in value.replace("\\", "/").split("/")):
+                    raise ValueError("Cấu hình nguồn không hợp lệ.")
+                value = value.replace("\\", "/")
+            elif key in {"displaySheet", "scanSheet", "pushSheet"}:
+                if len(value) > 31 or re.search(r"[\\[\\]:*?/\\\\]", value):
+                    raise ValueError("Cấu hình sheet không hợp lệ.")
+            elif key == "url" and value.strip():
+                parsed = urlsplit(value.strip())
+                match = re.fullmatch(r"/spreadsheets/d/[A-Za-z0-9_-]+(?:/[^?#]*)?", parsed.path)
+                if parsed.scheme != "https" or parsed.hostname != "docs.google.com" or parsed.username or parsed.password or parsed.port not in (None, 443) or not match:
+                    raise ValueError("Link Google Sheet không hợp lệ.")
+                gid = parse_qs(parsed.query).get("gid", parse_qs(parsed.fragment).get("gid", [""]))[0]
+                value = urlunsplit(("https", "docs.google.com", parsed.path, "gid=" + gid if gid.isdigit() else "", ""))
+            result[key] = value
+        sources[platform] = result
+    return {"sources": sources}
+
+
+def source_preferences_path():
+    return os.path.join(EXCEL_DIR, "data", "source_preferences.json")
+
+
+def load_source_preferences():
+    try:
+        with open(source_preferences_path(), encoding="utf-8") as stream:
+            payload = normalize_source_preferences(json.load(stream))
+        return payload
+    except (OSError, ValueError, TypeError):
+        return {"sources": {}}
+
+
+def save_source_preferences(payload):
+    path = source_preferences_path()
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".json", dir=os.path.dirname(path), delete=False) as stream:
+        temporary = stream.name
+        json.dump(payload, stream, ensure_ascii=False, indent=2)
+    try:
+        os.replace(temporary, path)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+
+
+@app.get("/source-preferences")
+async def source_preferences():
+    return JSONResponse(await asyncio.to_thread(load_source_preferences), headers={"Cache-Control": "no-store"})
+
+
+@app.post("/source-preferences")
+async def update_source_preferences(request: Request):
+    global SOURCE_BUSY
+    if source_mutation_blocked():
+        return JSONResponse({"error": "Đang xử lý phiên; lưu cấu hình nguồn sau."}, status_code=409, headers={"Cache-Control": "no-store"})
+    SOURCE_BUSY = True
+    try:
+        data = bytearray()
+        async for chunk in request.stream():
+            data.extend(chunk)
+            if len(data) > 32768:
+                return JSONResponse({"error": "Cấu hình nguồn quá lớn."}, status_code=413)
+        payload = normalize_source_preferences(json.loads(data))
+        await complete_blocking(save_source_preferences, payload)
+        return JSONResponse({"success": True}, headers={"Cache-Control": "no-store"})
+    except (ValueError, TypeError):
+        return JSONResponse({"error": "Cấu hình nguồn không hợp lệ."}, status_code=400)
+    except OSError:
+        return JSONResponse({"error": "Không lưu được cấu hình nguồn."}, status_code=503)
+    finally:
+        SOURCE_BUSY = False
+
+
+@app.get("/threads-session/status")
+async def threads_session_status():
+    try:
+        return await complete_blocking(threads_session_manager().status)
+    except Exception:
+        return JSONResponse({"configured": False, "state": "storage_unavailable", "message": "Không truy cập được kho cookie an toàn."}, status_code=503)
+
+
+async def bounded_session_body(request):
+    data = bytearray()
+    async for chunk in request.stream():
+        data.extend(chunk)
+        if len(data) > MAX_IMPORT_BYTES:
+            raise SessionError("too_large")
+    return bytes(data)
+
+
+@app.post("/threads-session/import")
+async def import_threads_session(request: Request):
+    global SOURCE_BUSY
+    if source_mutation_blocked():
+        return JSONResponse({"error": "Đang quét hoặc xử lý dữ liệu; không đổi cookie lúc này."}, status_code=409)
+    SOURCE_BUSY = True
+    try:
+        payload = await bounded_session_body(request)
+        return await threads_session_manager().import_cookie(payload)
+    except SessionError as error:
+        return JSONResponse({"error": str(error)}, status_code=400)
+    except Exception:
+        return JSONResponse({"error": "Không import được phiên Threads."}, status_code=503)
+    finally:
+        SOURCE_BUSY = False
+
+
+@app.post("/threads-session/verify")
+async def verify_threads_session():
+    global SOURCE_BUSY
+    if source_mutation_blocked():
+        return JSONResponse({"error": "Đang quét hoặc xử lý dữ liệu; chờ để kiểm tra cookie."}, status_code=409)
+    SOURCE_BUSY = True
+    try:
+        return await threads_session_manager().verify()
+    except SessionError as error:
+        return JSONResponse({"error": str(error)}, status_code=400)
+    except Exception:
+        return JSONResponse({"error": "Không kiểm tra được phiên Threads."}, status_code=503)
+    finally:
+        SOURCE_BUSY = False
+
+
+@app.delete("/threads-session")
+async def delete_threads_session():
+    global SOURCE_BUSY
+    if source_mutation_blocked():
+        return JSONResponse({"error": "Đang quét hoặc xử lý dữ liệu; không xóa cookie lúc này."}, status_code=409)
+    SOURCE_BUSY = True
+    try:
+        return await complete_blocking(threads_session_manager().clear)
+    except SessionError as error:
+        return JSONResponse({"error": str(error)}, status_code=400)
+    except Exception:
+        return JSONResponse({"error": "Không xóa được phiên Threads trong kho an toàn."}, status_code=503)
+    finally:
         SOURCE_BUSY = False
 
 
@@ -1393,17 +1696,21 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_json({"type": "log", "message": "Đang xử lý dữ liệu hoặc cập nhật ứng dụng. Vui lòng chờ hoàn tất."})
                     continue
 
+                try:
+                    platform = validate_platform(payload.get("platform", "tiktok"))
+                except SourceRequestError as error:
+                    await reject_start(str(error))
+                    continue
+                if "file_id" in payload and (not isinstance(payload["file_id"], str) or not payload["file_id"]):
+                    await reject_start("Chưa chọn workbook hợp lệ")
+                    continue
                 target_path = current_excel_path()
                 file_id = CURRENT_SELECTED_FILE
                 if not target_path or not os.path.isfile(target_path):
                     await reject_start("Chưa chọn workbook hợp lệ")
                     continue
-                if payload.get("file_id") and payload["file_id"] != file_id:
+                if "file_id" in payload and payload["file_id"] != file_id:
                     await reject_start("File đã đổi. Hãy tải lại danh sách và chọn lại file cần quét.")
-                    continue
-                platform = clean_text(payload.get("platform", "tiktok")).lower()
-                if platform not in {"tiktok", "threads"}:
-                    await reject_start("Nền tảng không hợp lệ")
                     continue
                 worker_count = payload.get("workers", 20)
                 create_result_sheet = bool(payload.get("create_result_sheet", False))
@@ -1420,6 +1727,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 if isinstance(partners_payload, list):
                     partners = [clean_text(name) for name in partners_payload if clean_text(name)]
                 scrape_mode = clean_text(payload.get("scrape_mode", "")).lower()
+                if scrape_mode not in {"request", "browser", "hybrid"}:
+                    scrape_mode = "request"
                 if scrape_mode == "browser":
                     use_request = False
                     browser_fallback = False
@@ -1431,7 +1740,7 @@ async def websocket_endpoint(websocket: WebSocket):
                     browser_fallback = False
                 use_proxy = bool(payload.get("use_proxy", False))
                 proxy_text = str(payload.get("proxy_text") or "")
-                proxy_error = validate_proxy_start(use_proxy, proxy_text, EXCEL_DIR)
+                proxy_error = validate_proxy_start(use_proxy, proxy_text, EXCEL_DIR, platform=platform, mode=scrape_mode)
                 if proxy_error:
                     await reject_start(proxy_error)
                     continue
@@ -1439,6 +1748,26 @@ async def websocket_endpoint(websocket: WebSocket):
                 from proxy_utils import resolve_proxy_configs
                 proxy_count = len(resolve_proxy_configs(EXCEL_DIR, proxy_text=proxy_text)) if use_proxy else 0
                 worker_count = clamp_worker_count(worker_count, proxy_count=proxy_count)
+                threads_cookies = None
+                threads_proxies = None
+                generation = None
+                if platform == "threads" and payload.get("use_threads_session") is True:
+                    generation = payload.get("threads_session_generation")
+                    if not isinstance(generation, str) or not generation:
+                        await reject_start("Tải lại trạng thái cookie Threads trước khi quét.")
+                        continue
+                    SCAN_STARTING = True
+                    try:
+                        threads_cookies = await complete_blocking(threads_session_manager().snapshot, generation)
+                        threads_proxies = resolve_threads_proxies(EXCEL_DIR, proxy_text, scrape_mode) if use_proxy else []
+                    except SessionError as error:
+                        await reject_start(str(error))
+                        continue
+                    except Exception:
+                        await reject_start("Không nạp được phiên Threads đã lưu.")
+                        continue
+                    finally:
+                        SCAN_STARTING = False
                 run_context = manager.begin_run(platform, file_id, sheet_name)
                 SCRAPE_TASK = asyncio.create_task(
                     run_scraper_safely(
@@ -1455,6 +1784,7 @@ async def websocket_endpoint(websocket: WebSocket):
                         proxy_text=proxy_text,
                         platform=platform,
                         run_context=run_context,
+                        **({"threads_cookies": threads_cookies, "threads_proxies": threads_proxies, "threads_generation": generation} if threads_cookies is not None else {}),
                     )
                 )
                 SCRAPE_TASK.add_done_callback(lambda task, run_id=run_context["runId"]: finalize_unstarted_run(task, run_id))

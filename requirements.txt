@@ -11,5 +11,6 @@ google-api-python-client>=2.151.0
 google-auth>=2.35.0
 google-auth-oauthlib>=1.2.1
 PySocks>=1.7.1
+keyring>=25.6,<26; sys_platform != "win32"
 pytest>=8.0.0
 pyinstaller>=6.12,<7

@@ -97,6 +97,22 @@
                             </div>
                         </div>
                     </div>
+                    <div class="toolbar-group threads-session-controls" id="threadsSessionControls" hidden>
+                        <div class="toolbar-field">
+                            <div class="toolbar-label"><svg class="cookie-icon" aria-hidden="true"><use href="#cookieShield"/></svg> Cookie Threads</div>
+                            <div class="threads-cookie-card" id="threadsCookieCard">
+                                <label class="proxy-toggle" for="threadsSessionUse" title="Dùng cookie đã lưu khi quét Threads">
+                                    <input type="checkbox" id="threadsSessionUse" class="proxy-toggle-input" aria-label="Dùng cookie Threads">
+                                    <span class="proxy-switch" aria-hidden="true"><span class="proxy-switch-knob"></span></span>
+                                    <span class="threads-cookie-dot" aria-hidden="true"></span>
+                                </label>
+                                <button class="proxy-setup-btn" id="threadsCookieBtn" type="button" onclick="openThreadsCookieModal()" aria-label="Cấu hình cookie Threads">
+                                    <svg class="cookie-icon" aria-hidden="true"><use href="#cookieSettings"/></svg><span>Cấu hình</span>
+                                </button>
+                            </div>
+                            <span id="threadsCookieStatus" class="threads-cookie-status sr-only" role="status">Chưa tải trạng thái</span>
+                        </div>
+                    </div>
                 </div>
                 <div class="toolbar-group toolbar-sheet">
                     <div class="toolbar-field toolbar-field-grow">
@@ -124,8 +140,8 @@
         </div>
 
         <div class="platform-bar" role="group" aria-label="Nền tảng báo cáo">
-            <button class="platform-option active" id="platformTikTok" type="button" aria-pressed="true" onclick="setPlatform('tiktok')">TikTok</button>
-            <button class="platform-option" id="platformThreads" type="button" aria-pressed="false" onclick="setPlatform('threads')">Threads</button>
+            <button class="platform-option active" id="platformTikTok" type="button" aria-pressed="true" onclick="setPlatform('tiktok')"><img class="platform-brand-icon" src="/static/platform-icons/tiktok.svg" alt="" aria-hidden="true">TikTok</button>
+            <button class="platform-option" id="platformThreads" type="button" aria-pressed="false" onclick="setPlatform('threads')"><img class="platform-brand-icon" src="/static/platform-icons/threads.svg" alt="" aria-hidden="true">Threads</button>
         </div>
 
         <nav class="workspace-tabs" role="tablist" aria-label="Các vùng dữ liệu">
@@ -181,24 +197,31 @@
                     <div class="source-block-head">
                         <div class="source-icon"><span class="material-icons-outlined">link</span></div>
                         <div>
-                            <div class="source-block-title">Nhập link sheet</div>
+                            <div class="source-block-title">Nguồn Google Sheet</div>
                         </div>
                     </div>
-                    <div class="field-stack">
+                    <div class="field-stack platform-source-row" data-source-platform="tiktok">
+                        <div class="platform-source-label"><span class="platform-source-name"><img class="platform-brand-icon" src="/static/platform-icons/tiktok.svg" alt="" aria-hidden="true">TikTok</span> <span id="sourceFileTikTok" class="platform-source-file">Chưa chọn file</span></div>
                         <div class="source-inline">
-                            <input class="text-input" id="googleSheetUrlInput" type="url" placeholder="Dán URL Google Sheet tại đây">
-                            <button class="btn btn-primary btn-compact" id="syncSheetBtn" onclick="syncGoogleSheet()">
+                            <input class="text-input" id="googleSheetUrlInput" type="url" placeholder="Link Google Sheet TikTok" aria-label="Link Google Sheet TikTok">
+                            <button class="btn btn-primary btn-compact" id="syncSheetBtn" onclick="syncGoogleSheet('tiktok')">
                                 <span class="material-icons-outlined">sync</span> Nạp sheet
                             </button>
                         </div>
                         <div class="google-action-row">
-                            <label class="scan-setting">
-                                <span>Chọn Sheet</span>
-                                <select id="pushSheetSelect" class="sheet-select"></select>
-                            </label>
-                            <button class="btn btn-soft btn-compact" id="pushGoogleBtn" onclick="pushCurrentSheetToGoogle(event)" disabled>
-                                <span class="material-icons-outlined">note_add</span> Tạo sheet
-                            </button>
+                            <label class="scan-setting"><span>Sheet</span><select id="pushSheetSelect" class="sheet-select" aria-label="Sheet TikTok"></select></label>
+                            <button class="btn btn-soft btn-compact" id="pushGoogleBtn" onclick="pushCurrentSheetToGoogle(event, 'tiktok')" disabled><span class="material-icons-outlined">note_add</span> Tạo sheet</button>
+                        </div>
+                    </div>
+                    <div class="field-stack platform-source-row" data-source-platform="threads">
+                        <div class="platform-source-label"><span class="platform-source-name"><img class="platform-brand-icon" src="/static/platform-icons/threads.svg" alt="" aria-hidden="true">Threads</span> <span id="sourceFileThreads" class="platform-source-file">Chưa chọn file</span></div>
+                        <div class="source-inline">
+                            <input class="text-input" id="threadsGoogleSheetUrlInput" type="url" placeholder="Link Google Sheet Threads" aria-label="Link Google Sheet Threads">
+                            <button class="btn btn-primary btn-compact" id="threadsSyncSheetBtn" onclick="syncGoogleSheet('threads')"><span class="material-icons-outlined">sync</span> Nạp sheet</button>
+                        </div>
+                        <div class="google-action-row">
+                            <label class="scan-setting"><span>Sheet</span><select id="threadsPushSheetSelect" class="sheet-select" aria-label="Sheet Threads"></select></label>
+                            <button class="btn btn-soft btn-compact" id="threadsPushGoogleBtn" onclick="pushCurrentSheetToGoogle(event, 'threads')" disabled><span class="material-icons-outlined">note_add</span> Tạo sheet</button>
                         </div>
                     </div>
                 </div>
@@ -383,7 +406,7 @@
         <div class="report-modal" role="dialog" aria-modal="true" aria-labelledby="reportModalTitle">
             <div class="modal-header">
                 <div>
-                    <div class="modal-title" id="reportModalTitle">Đối tác & báo cáo</div>
+                    <div class="modal-title report-platform-title" id="reportModalTitle"><img id="reportPlatformIcon" class="platform-brand-icon" src="/static/platform-icons/tiktok.svg" alt="" aria-hidden="true"><span id="reportPlatformLabel">Đối tác &amp; báo cáo TikTok</span></div>
                     <div class="modal-subtitle" id="reportModalSubtitle">Chọn đối tác để cập nhật lại link hoặc xuất báo cáo.</div>
                 </div>
                 <button class="icon-btn" onclick="closeReportModal()" aria-label="Đóng">
@@ -510,6 +533,63 @@
         </div>
     </div>
 
+    <svg width="0" height="0" aria-hidden="true" style="position:absolute;pointer-events:none"><defs>
+        <symbol id="cookieShield" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6Z"/><path d="m8 12 3 3 5-6"/></symbol>
+        <symbol id="cookieSettings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></symbol>
+        <symbol id="cookieCheck" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m7 12 3 3 7-7"/></symbol>
+        <symbol id="cookieDelete" viewBox="0 0 24 24"><path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7"/></symbol>
+        <symbol id="cookieUpload" viewBox="0 0 24 24"><path d="M4 16v5h16v-5M12 17V3m-5 5 5-5 5 5"/></symbol>
+        <symbol id="cookieClose" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    </defs></svg>
+    <div class="modal-backdrop" id="threadsCookieModal" aria-hidden="true">
+        <div class="report-modal threads-cookie-modal" role="dialog" aria-modal="true" aria-labelledby="threadsCookieTitle" tabindex="-1">
+            <div class="modal-header">
+                <div class="threads-cookie-heading"><span class="threads-cookie-heading-icon"><svg class="cookie-icon" aria-hidden="true"><use href="#cookieShield"/></svg></span><div>
+                    <div class="modal-title" id="threadsCookieTitle">Cookie Threads</div>
+                    <div class="modal-subtitle">Dùng tuyến proxy/direct đang chọn khi quét.</div>
+                </div></div>
+                <button class="icon-btn threads-cookie-close" onclick="closeThreadsCookieModal()" aria-label="Đóng"><svg class="cookie-icon" aria-hidden="true"><use href="#cookieClose"/></svg></button>
+            </div>
+            <div class="modal-body">
+                <section class="threads-cookie-saved" aria-labelledby="threadsCookieSavedTitle">
+                    <div class="threads-cookie-section-head"><h3 id="threadsCookieSavedTitle">Phiên đã lưu</h3><span class="threads-cookie-badge" id="threadsCookieSavedBadge">Chưa import</span></div>
+                    <p id="threadsCookieSavedMeta" class="threads-cookie-help">Chưa có cookie để sử dụng.</p>
+                    <p id="threadsCookieSavedMessage" class="threads-cookie-help" hidden></p>
+                    <div class="threads-cookie-session-actions">
+                        <button class="btn btn-soft" id="threadsCookieVerify" onclick="verifyThreadsCookie()"><svg class="cookie-icon" aria-hidden="true"><use href="#cookieCheck"/></svg> Kiểm tra lại</button>
+                        <button class="btn threads-cookie-delete" id="threadsCookieDelete" onclick="deleteThreadsCookie()"><svg class="cookie-icon" aria-hidden="true"><use href="#cookieDelete"/></svg> Xóa phiên</button>
+                    </div>
+                    <div class="threads-cookie-confirm" id="threadsCookieDeleteConfirm" hidden>
+                        <span>Xóa cookie đã lưu khỏi máy này?</span>
+                        <button class="btn btn-outline" id="threadsCookieDeleteCancel" onclick="cancelThreadsCookieDelete()">Giữ lại</button>
+                        <button class="btn threads-cookie-delete" id="threadsCookieDeleteAccept" onclick="confirmThreadsCookieDelete()">Xóa phiên</button>
+                    </div>
+                </section>
+                <section class="threads-cookie-import-section" aria-labelledby="threadsCookieImportTitle">
+                    <h3 id="threadsCookieImportTitle">Import phiên mới</h3>
+                    <p class="threads-cookie-help">Cookie-Editor ở threads.com → <strong>Export → JSON</strong>.</p>
+                    <div class="threads-cookie-tabs" role="tablist" aria-label="Nguồn cookie">
+                        <button id="threadsCookieTabFile" class="threads-cookie-tab" role="tab" aria-selected="true" aria-controls="threadsCookiePanelFile" onclick="setThreadsCookieSource('file')">Chọn file JSON</button>
+                        <button id="threadsCookieTabPaste" class="threads-cookie-tab" role="tab" aria-selected="false" aria-controls="threadsCookiePanelPaste" tabindex="-1" onclick="setThreadsCookieSource('paste')">Dán JSON</button>
+                    </div>
+                    <div id="threadsCookiePanelFile" role="tabpanel" aria-labelledby="threadsCookieTabFile">
+                        <label class="threads-cookie-file" for="threadsCookieFile"><svg class="cookie-icon" aria-hidden="true"><use href="#cookieUpload"/></svg><strong>Chọn file cookie .json</strong><span>JSON export từ Cookie-Editor · tối đa 256 KiB</span></label>
+                        <input type="file" id="threadsCookieFile" class="threads-cookie-file-input sr-only" accept=".json,application/json" aria-label="Chọn file cookie JSON">
+                        <p id="threadsCookieFileMeta" class="threads-cookie-help" role="status"></p>
+                    </div>
+                    <div id="threadsCookiePanelPaste" role="tabpanel" aria-labelledby="threadsCookieTabPaste" hidden>
+                        <label class="threads-cookie-input-label" for="threadsCookieText">Dán nguyên mảng JSON đã export</label>
+                        <textarea id="threadsCookieText" class="proxy-textarea" rows="5" autocomplete="off" spellcheck="false" placeholder='[{"domain":".threads.com", "name":"sessionid", ...}]'></textarea>
+                    </div>
+                </section>
+                <div id="threadsCookieModalStatus" class="threads-cookie-feedback" role="status" aria-live="polite"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline threads-cookie-close" onclick="closeThreadsCookieModal()">Đóng</button>
+                <button class="btn btn-primary" id="threadsCookieImport" onclick="importThreadsCookie()"><svg class="cookie-icon" aria-hidden="true"><use href="#cookieUpload"/></svg> Import &amp; kiểm tra</button>
+            </div>
+        </div>
+    </div>
     <script src="/static/app.js?v={{ asset_version }}"></script>
 </body>
 </html>
