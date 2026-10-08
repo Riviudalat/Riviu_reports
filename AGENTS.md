@@ -2,12 +2,16 @@
 
 ## Project Structure & Module Organization
 
-- `app.py` serves the FastAPI API and WebSocket scan events; `desktop_server.py` integrates the desktop backend.
-- `scraper.py` handles TikTok; `threads_scraper.py` and `threads_session.py` handle Threads metrics and authenticated sessions.
-- `workbook_utils.py`, `google_sheets_sync.py`, and `proxy_utils.py` own workbook operations, Google integration, and proxy transport.
-- `reports.py` builds partner Excel reports, export payloads, and Google push rows; it must not import `app.py`.
-- `templates/index.html` and `static/` contain the HTML, JavaScript, CSS, and icons.
-- `src-tauri/` contains the Rust desktop shell; `desktop/` contains sidecar packaging scripts. Tests live in `tests/`; architecture and release notes live in `docs/`.
+The Python code is the `riviu` package; run it with `python -m riviu` (the root `app.py` is a shim that does the same).
+
+- `riviu/app.py` serves the FastAPI API and WebSocket scan events; `riviu/desktop_server.py` integrates the desktop backend.
+- `riviu/platforms/tiktok.py` handles TikTok; `riviu/platforms/threads.py` and `riviu/platforms/threads_session.py` handle Threads metrics and authenticated sessions.
+- `riviu/workbook_utils.py`, `riviu/google_sheets_sync.py`, and `riviu/proxy_utils.py` own workbook operations, Google integration, and proxy transport.
+- `riviu/reports.py` builds partner Excel reports, export payloads, and Google push rows; it must not import `riviu.app`.
+- `riviu/paths.py` resolves web resources and the user-data directory for source and frozen runs.
+- `riviu/web/templates/index.html`, `riviu/web/static/` and `riviu/web/logo.png` contain the HTML, JavaScript, CSS, icons and logo.
+- `src-tauri/` contains the Rust desktop shell; `desktop/` contains sidecar packaging scripts and `desktop-dist/` the Tauri loading page. Tests live in `tests/`. The current architecture and release notes live in `docs/`, and dated reviews, plans and specs in `docs/archive/`.
+- `Khoidong.bat`, `setup.bat` and `capnhat.bat` are the Windows source-mode launchers (start, install, update).
 
 ## Build, Test, and Development Commands
 
@@ -18,15 +22,15 @@ python -m venv .venv
 .venv\Scripts\python.exe -m pip install -r requirements.txt
 npm install
 .venv\Scripts\python.exe -m playwright install chromium
-.venv\Scripts\python.exe app.py
+.venv\Scripts\python.exe -m riviu
 ```
 
 The web app listens on `http://127.0.0.1:1231`.
 
 - `npm run desktop:dev`: build the Python sidecar and start Tauri development.
 - `npm run desktop:build`: build the sidecar and desktop application; requires Rust and platform build tools.
-- `.venv\Scripts\python.exe -m pytest -q tests`: run repository tests, excluding archived copies under `output/`.
-- `node --check static/app.js`: check JavaScript syntax.
+- `.venv\Scripts\python.exe -m pytest -q tests`: run repository tests, excluding archived copies under `output/` (`pyproject.toml` also limits plain `pytest` to `tests/`).
+- `node --check riviu/web/static/app.js`: check JavaScript syntax.
 - `.venv\Scripts\python.exe -m pip check`: check installed dependency compatibility.
 
 ## Coding Style & Naming Conventions

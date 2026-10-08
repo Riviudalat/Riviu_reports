@@ -37,7 +37,7 @@ jobs:
         run: python -m pytest -q
 
       - name: Check browser JavaScript syntax
-        run: node --check static/app.js
+        run: node --check riviu/web/static/app.js
 
   prepare-release:
     name: Prepare GitHub release

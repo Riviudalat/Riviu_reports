@@ -115,8 +115,11 @@ def test_desktop_bundle_keeps_resources_separate_from_user_data_and_release_ci(m
     config = (root / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8")
     workflow = (root / ".github" / "workflows" / "desktop-release.yml").read_text(encoding="utf-8")
 
-    assert '"templates", "templates"' in sidecar_source
-    assert '"static", "static"' in sidecar_source
+    from desktop import build_sidecar
+
+    # The bundle keeps riviu/web at the path riviu/paths.py resolves under sys._MEIPASS.
+    assert Path(paths.WEB_DIR).relative_to(paths.RESOURCE_ROOT).as_posix() == build_sidecar.WEB_ASSETS_TARGET
+    assert "add_data(ROOT / WEB_ASSETS_TARGET, WEB_ASSETS_TARGET)" in sidecar_source
     assert '"/_desktop/shutdown"' in sidecar_entrypoint
     assert 'PLAYWRIGHT_BROWSERS_PATH' in sidecar_source
     assert 'PLAYWRIGHT_BROWSERS_PATH' in sidecar_entrypoint

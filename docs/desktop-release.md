@@ -23,13 +23,18 @@ directory rather than in the installed application bundle.
 
 ## Server packaging
 
-`desktop/build_sidecar.py` builds `riviu-server` with PyInstaller. Chromium is
-bundled inside it (`PLAYWRIGHT_BROWSERS_PATH=0`).
+`desktop/build_sidecar.py` builds `riviu-server` with PyInstaller. Its entry
+script is `desktop/sidecar_entry.py`, which runs `riviu.desktop_server.main()`
+with the repository root on PyInstaller's search path. The web assets in
+`riviu/web/` (templates, static files, logo) are added at the same relative path
+in the bundle, so `riviu/paths.py` finds them under `sys._MEIPASS` exactly as it
+finds them in the repository. Chromium is bundled inside it
+(`PLAYWRIGHT_BROWSERS_PATH=0`).
 
 ### What the bundle contains
 
-Every browser launch in the app (`scraper.py`, `threads_scraper.py`,
-`threads_session.py`) is headless Chromium without a `channel`. Playwright runs
+Every browser launch in the app (`riviu/platforms/tiktok.py`,
+`riviu/platforms/threads.py`, `riviu/platforms/threads_session.py`) is headless Chromium without a `channel`. Playwright runs
 those launches with `chromium-headless-shell`, never with the full Chromium
 build. The build therefore runs `playwright install --only-shell chromium`, and
 the hooks in `desktop/pyinstaller-hooks/` (using `desktop/bundle_contents.py`)
@@ -44,7 +49,7 @@ leave out the following:
   Chromium's DLLs once the bundled `DEPENDENCIES_VALIDATED` marker is older than
   30 days.
 - **Google discovery documents other than `sheets.v4`.** `googleapiclient`
-  ships about 600 of them, 100 MB in total, and `google_sheets_sync.py` only
+  ships about 600 of them, 100 MB in total, and `riviu/google_sheets_sync.py` only
   builds the Sheets v4 client. A test fails if the code builds an API that is
   not in `GOOGLE_DISCOVERY_DOCS`, and another fails if a launch stops being
   headless Chromium.

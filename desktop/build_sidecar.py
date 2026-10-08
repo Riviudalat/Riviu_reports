@@ -19,6 +19,10 @@ except ModuleNotFoundError:  # imported as desktop.build_sidecar (tests)
 
 ROOT = Path(__file__).resolve().parents[1]
 SIDECAR_NAME = "riviu-server"
+# Templates, static files and the logo keep their package-relative path in the
+# bundle, so riviu/paths.py finds them under sys._MEIPASS the same way it finds
+# them under the repository.
+WEB_ASSETS_TARGET = "riviu/web"
 
 
 def bundle_paths(built: Path) -> list[str]:
@@ -120,17 +124,15 @@ def main() -> None:
         str(spec_dir),
         "--additional-hooks-dir",
         str(ROOT / "desktop" / "pyinstaller-hooks"),
+        "--paths",
+        str(ROOT),
         "--add-data",
-        add_data(ROOT / "templates", "templates"),
-        "--add-data",
-        add_data(ROOT / "static", "static"),
-        "--add-data",
-        add_data(ROOT / "logo.png", "."),
+        add_data(ROOT / WEB_ASSETS_TARGET, WEB_ASSETS_TARGET),
         "--collect-all",
         "uvicorn",
         "--collect-all",
         "jinja2",
-        str(ROOT / "desktop_server.py"),
+        str(ROOT / "desktop" / "sidecar_entry.py"),
     ]
     # PyInstaller's default keyring hook collects *all* backends. Override that
     # hook locally for this build; the runtime explicitly instantiates only the
