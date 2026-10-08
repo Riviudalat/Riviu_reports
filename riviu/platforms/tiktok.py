@@ -18,7 +18,7 @@ from urllib.parse import quote, urljoin, urlparse
 import openpyxl
 from playwright.async_api import async_playwright
 
-from workbook_utils import (
+from riviu.workbook_utils import (
     COLUMN_ALIASES,
     clean_text,
     set_cell_literal,
@@ -50,7 +50,7 @@ from workbook_utils import (
     worksheet_row_partners,
     write_json_atomic,
 )
-from proxy_utils import (
+from riviu.proxy_utils import (
     assign_worker_proxy,
     get_session_proxies,
     playwright_proxy_settings,

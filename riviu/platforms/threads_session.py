@@ -695,7 +695,7 @@ async def verify_cookies(cookies, proxy_config=None) -> dict:
             launch_options = {"headless": True}
             context_options = {"service_workers": "block"}
             if proxy_config is not None:
-                from proxy_utils import playwright_proxy_settings
+                from riviu.proxy_utils import playwright_proxy_settings
                 if not isinstance(proxy_config, dict) or not proxy_config.get("enabled", True):
                     return "unknown"
                 proxy = playwright_proxy_settings(proxy_config)

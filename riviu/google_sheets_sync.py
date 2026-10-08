@@ -6,7 +6,7 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow, WSGITimeoutError
 from googleapiclient.discovery import build
 
-from workbook_utils import (
+from riviu.workbook_utils import (
     format_google_sheet_datetime,
     get_platform,
     google_to_excel_sheet_titles,

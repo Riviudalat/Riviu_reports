@@ -11,7 +11,6 @@ import secrets
 import shutil
 import tempfile
 import threading
-import sys
 from collections import deque
 from pathlib import Path
 import urllib.error
@@ -19,11 +18,12 @@ from urllib.parse import quote, urlsplit, parse_qs, urlunsplit
 
 from openpyxl import load_workbook
 
-from reports import build_export_payload, build_google_push_rows
-from scraper import clamp_worker_count, run_scraper, read_scrape_history
-from threads_scraper import resolve_threads_proxies, run_threads_scraper
-from threads_session import ThreadsSession, SessionError, MAX_IMPORT_BYTES, chromium_proxy_unsupported
-from google_sheets_sync import (
+from riviu import paths
+from riviu.reports import build_export_payload, build_google_push_rows
+from riviu.platforms.tiktok import clamp_worker_count, run_scraper, read_scrape_history
+from riviu.platforms.threads import resolve_threads_proxies, run_threads_scraper
+from riviu.platforms.threads_session import ThreadsSession, SessionError, MAX_IMPORT_BYTES, chromium_proxy_unsupported
+from riviu.google_sheets_sync import (
     GoogleLoginRequired,
     authorize_google,
     download_google_sheet_authenticated,
@@ -32,14 +32,14 @@ from google_sheets_sync import (
     save_oauth_client,
     try_load_credentials,
 )
-from proxy_utils import (
+from riviu.proxy_utils import (
     load_proxy_list_text,
     parse_proxy_text,
     resolve_proxy_configs,
     save_proxy_list_text,
     test_proxy_text,
 )
-from workbook_utils import (
+from riviu.workbook_utils import (
     LEGACY_GOOGLE_SHEET_FILE_ID,
     PLATFORMS,
     build_workbook_rows,
@@ -67,13 +67,9 @@ from workbook_utils import (
 )
 
 
-def application_resource_dir() -> str:
-    """Return bundled resources when frozen, otherwise the repository directory."""
-    return os.path.abspath(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))))
-
-
-APP_RESOURCE_DIR = application_resource_dir()
-EXCEL_DIR = os.path.abspath(os.environ.get("RIVIU_DATA_DIR", APP_RESOURCE_DIR))
+# Web resources (templates, static, logo) and user data; see riviu/paths.py.
+APP_RESOURCE_DIR = paths.WEB_DIR
+EXCEL_DIR = paths.data_dir()
 os.makedirs(EXCEL_DIR, exist_ok=True)
 
 app = FastAPI()
@@ -242,7 +238,7 @@ DESKTOP_UPDATE_PENDING = False
 CURRENT_SELECTED_FILE = ""
 CURRENT_SELECTED_SHEET = ""
 CURRENT_SCAN_SHEET = ""
-LOGO_PATH = os.path.join(APP_RESOURCE_DIR, "logo.png")
+LOGO_PATH = paths.LOGO_PATH
 
 
 def scan_running():
@@ -779,8 +775,8 @@ async def save_proxy_list(data: dict):
 
 @app.get("/api/version")
 async def api_version():
-    from proxy_utils import PROXY_TEST_BUILD
-    from scraper import MAX_WORKERS
+    from riviu.proxy_utils import PROXY_TEST_BUILD
+    from riviu.platforms.tiktok import MAX_WORKERS
 
     return {
         "proxyTestBuild": PROXY_TEST_BUILD,
@@ -1336,9 +1332,3 @@ async def websocket_endpoint(websocket: WebSocket):
         pass
     finally:
         manager.disconnect(websocket)
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="127.0.0.1", port=1231)

@@ -7,7 +7,7 @@ import openpyxl
 from PIL import Image
 import pytest
 
-import reports
+from riviu import reports
 from test_ui_review_fixes import run_js
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,7 +19,7 @@ def test_partner_report_embeds_platform_icon_and_keeps_table(platform):
     rows = [{"NGÀY AIR": "01/10/2026", "TÊN KÊNH": "demo", "LINK AIR": url, "LƯỢT XEM": 314,
              "TIM": 2, "BÌNH LUẬN": 6, "REPOST": 0, "LƯỢT LƯU": 0, "CHIA SẺ": "", "partners": ["Fixture"]}]
     payload = reports.build_partner_report("Fixture", rows, platform=platform, apply_min_views=False)
-    expected_image = (ROOT / "static/platform-icons" / f"{platform}.png").read_bytes()
+    expected_image = (ROOT / "riviu/web/static/platform-icons" / f"{platform}.png").read_bytes()
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         media = [archive.read(name) for name in archive.namelist() if name.startswith("xl/media/")]
         assert expected_image in media and len(media) == 2
@@ -42,9 +42,9 @@ def test_partner_report_embeds_platform_icon_and_keeps_table(platform):
 
 @pytest.mark.parametrize("platform", ["tiktok", "threads"])
 def test_local_icon_assets_are_transparent_and_no_remote_refs(platform):
-    svg = (ROOT / "static/platform-icons" / f"{platform}.svg").read_text(encoding="utf-8")
+    svg = (ROOT / "riviu/web/static/platform-icons" / f"{platform}.svg").read_text(encoding="utf-8")
     assert 'viewBox="0 0 24 24"' in svg and "<script" not in svg and "href=" not in svg
-    with Image.open(ROOT / "static/platform-icons" / f"{platform}.png") as image:
+    with Image.open(ROOT / "riviu/web/static/platform-icons" / f"{platform}.png") as image:
         assert image.size == (256, 256) and image.mode == "RGBA"
         assert image.getextrema()[3][0] == 0
 

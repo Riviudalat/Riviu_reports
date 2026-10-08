@@ -1,12 +1,11 @@
 """Partner report workbooks, export payloads and Google push rows.
 
 Pure workbook/report building: no FastAPI, scan state, locks or WebSocket code.
-`app.py` owns the routes that call into this module; this module must not import `app`.
+`riviu/app.py` owns the routes that call into this module; this module must not import `riviu.app`.
 """
 import io
 import os
 import re
-import sys
 import zipfile
 from copy import copy
 from datetime import datetime
@@ -21,7 +20,8 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import coordinate_from_string
 from openpyxl.utils.units import pixels_to_EMU
 
-from workbook_utils import (
+from riviu import paths
+from riviu.workbook_utils import (
     LAST_UPDATE_COLUMN,
     SINGLE_LINK_FILL_COLOR,
     VIDEO_LINK_FILL_COLOR,
@@ -43,9 +43,7 @@ from workbook_utils import (
 )
 
 
-# Same resolution as app.application_resource_dir(): bundled resources when frozen, else the repository.
-RESOURCE_DIR = os.path.abspath(getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__))))
-LOGO_PATH = os.path.join(RESOURCE_DIR, "logo.png")
+LOGO_PATH = paths.LOGO_PATH
 
 
 def safe_report_name(name):
@@ -205,7 +203,7 @@ def write_report_banner(ws, spec, partner, link_count, columns):
     last_column = get_column_letter(len(columns))
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(columns) - 1)
     ws.column_dimensions[last_column].width = REPORT_COLUMN_WIDTHS.get(columns[-1], 12)
-    platform_icon = os.path.join(RESOURCE_DIR, "static", "platform-icons", f"{spec.key}.png")
+    platform_icon = os.path.join(paths.PLATFORM_ICONS_DIR, f"{spec.key}.png")
     add_centered_image_to_cell(ws, f"{last_column}2", platform_icon, max_height_px=22)
     ws["A2"] = f"Tổng link: {link_count} • Ngày cập nhật: {format_display_datetime()}"
     ws["A2"].font = Font(color=REPORT_ACCENT_TEXT, italic=True, bold=True)

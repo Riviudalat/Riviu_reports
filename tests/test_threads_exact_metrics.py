@@ -3,8 +3,8 @@ import asyncio
 import json
 
 import pytest
-import threads_scraper as threads
-import threads_session as sessions
+from riviu.platforms import threads
+from riviu.platforms import threads_session as sessions
 from test_threads_transport import URL, metrics, NoBrowser, workbook
 from test_threads_header_views import header
 from test_threads_cookie_integration import COOKIE, auth_html

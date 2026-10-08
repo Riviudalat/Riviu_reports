@@ -16,9 +16,9 @@ import openpyxl
 import pytest
 from playwright.async_api import async_playwright
 
-import proxy_utils
-import scraper
-import threads_scraper
+from riviu import proxy_utils
+from riviu.platforms import tiktok as scraper
+from riviu.platforms import threads as threads_scraper
 
 
 THREADS_URL = "https://www.threads.com/@miri_viu/post/DdRIHGWCURV"
@@ -666,7 +666,7 @@ def test_threads_failed_final_save_still_closes_browser_and_workbook(tmp_path, m
 
 def test_hybrid_does_not_send_confirmed_unavailable_pages_to_the_browser(monkeypatch):
     import asyncio
-    import scraper
+    from riviu.platforms import tiktok as scraper
 
     statuses = {"https://www.tiktok.com/@a/video/1": scraper.STATUS_TIKTOK_UNAVAILABLE,
                 "https://www.tiktok.com/@a/video/2": scraper.STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED,

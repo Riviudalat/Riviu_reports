@@ -11,20 +11,20 @@ import pytest
 
 from openpyxl import load_workbook
 
-from reports import build_google_push_rows, build_partner_report, spreadsheet_date_text
-from workbook_utils import SINGLE_LINK_FILL_COLOR, VIDEO_LINK_FILL_COLOR, is_failed_channel_name, metric_number
+from riviu.reports import build_google_push_rows, build_partner_report, spreadsheet_date_text
+from riviu.workbook_utils import SINGLE_LINK_FILL_COLOR, VIDEO_LINK_FILL_COLOR, is_failed_channel_name, metric_number
 
 
 def test_preview_javascript_preserves_numeric_zero_values():
-    source = (Path(__file__).parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    source = (Path(__file__).parents[1] / "riviu" / "web" / "static" / "app.js").read_text(encoding="utf-8")
 
     assert "let val = row[column] ?? '';" in source
 
 
 def test_duplicate_links_panel_is_wired_to_websocket_and_new_scan_reset():
     root = Path(__file__).parents[1]
-    source = (root / "static" / "app.js").read_text(encoding="utf-8")
-    template = (root / "templates" / "index.html").read_text(encoding="utf-8")
+    source = (root / "riviu" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+    template = (root / "riviu" / "web" / "templates" / "index.html").read_text(encoding="utf-8")
 
     assert "message.type === 'duplicates'" in source
     assert "function renderDuplicateLinks" in source
@@ -36,7 +36,7 @@ def test_duplicate_links_panel_is_wired_to_websocket_and_new_scan_reset():
 
 def test_compact_workspace_keeps_global_workflows_and_unique_controls():
     root = Path(__file__).parents[1]
-    template = (root / "templates" / "index.html").read_text(encoding="utf-8")
+    template = (root / "riviu" / "web" / "templates" / "index.html").read_text(encoding="utf-8")
 
     assert 'class="compact-app"' in template
     assert 'id="sourceDrawer"' in template
@@ -59,7 +59,7 @@ def test_compact_workspace_keeps_global_workflows_and_unique_controls():
 
 
 def test_compact_workspace_javascript_switches_tabs_and_source_drawer():
-    source = (Path(__file__).parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    source = (Path(__file__).parents[1] / "riviu" / "web" / "static" / "app.js").read_text(encoding="utf-8")
 
     assert "function setWorkspaceTab" in source
     assert "function openSourceDrawer" in source
@@ -69,7 +69,7 @@ def test_compact_workspace_javascript_switches_tabs_and_source_drawer():
 
 
 def test_preview_counter_does_not_break_websocket_dispatch():
-    source = (Path(__file__).parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    source = (Path(__file__).parents[1] / "riviu" / "web" / "static" / "app.js").read_text(encoding="utf-8")
     preview_source = source[source.index("async function loadPreview"):source.index("async function renderSummaryDashboard")]
     websocket_source = source[source.index("function connectWS"):source.index("function startScraping")]
 
@@ -82,7 +82,7 @@ def test_preview_counter_does_not_break_websocket_dispatch():
 
 
 def test_desktop_updater_only_activates_inside_tauri():
-    source = (Path(__file__).parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    source = (Path(__file__).parents[1] / "riviu" / "web" / "static" / "app.js").read_text(encoding="utf-8")
 
     assert "function desktopUpdaterInvoke" in source
     assert "window.__TAURI__?.core?.invoke" in source
@@ -91,16 +91,30 @@ def test_desktop_updater_only_activates_inside_tauri():
     assert "window.confirm(`Riviu Reports ${version}" not in source
 
 
-def test_desktop_bundle_keeps_resources_separate_from_user_data_and_release_ci():
+def test_desktop_bundle_keeps_resources_separate_from_user_data_and_release_ci(monkeypatch, tmp_path):
+    import sys
+    from riviu import paths
+
     root = Path(__file__).parents[1]
-    app_source = (root / "app.py").read_text(encoding="utf-8")
+    # Existing source installs keep data/ and the OAuth/proxy/history files at the repository root.
+    monkeypatch.delenv("RIVIU_DATA_DIR", raising=False)
+    assert Path(paths.data_dir()) == root
+    assert Path(paths.TEMPLATES_DIR, "index.html").is_file()
+    assert Path(paths.STATIC_DIR, "app.js").is_file()
+    assert Path(paths.LOGO_PATH).is_file()
+    assert Path(paths.PLATFORM_ICONS_DIR, "tiktok.png").is_file()
+    monkeypatch.setenv("RIVIU_DATA_DIR", str(tmp_path))
+    assert paths.data_dir() == str(tmp_path)
+    # Frozen: resources (and the fallback data dir) come from the PyInstaller bundle root.
+    monkeypatch.delenv("RIVIU_DATA_DIR")
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "bundle"), raising=False)
+    assert paths.resource_root() == str(tmp_path / "bundle")
+
     sidecar_source = (root / "desktop" / "build_sidecar.py").read_text(encoding="utf-8")
-    sidecar_entrypoint = (root / "desktop_server.py").read_text(encoding="utf-8")
+    sidecar_entrypoint = (root / "riviu" / "desktop_server.py").read_text(encoding="utf-8")
     config = (root / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8")
     workflow = (root / ".github" / "workflows" / "desktop-release.yml").read_text(encoding="utf-8")
 
-    assert 'getattr(sys, "_MEIPASS"' in app_source
-    assert 'os.environ.get("RIVIU_DATA_DIR", APP_RESOURCE_DIR)' in app_source
     assert '"templates", "templates"' in sidecar_source
     assert '"static", "static"' in sidecar_source
     assert '"/_desktop/shutdown"' in sidecar_entrypoint
@@ -169,7 +183,7 @@ def test_production_browser_launches_are_headless_chromium_only():
     the installed app with a missing-executable error."""
     root = Path(__file__).parents[1]
     launches = 0
-    for path in sorted(root.glob("*.py")):
+    for path in sorted((root / "riviu").rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.Attribute):
@@ -208,7 +222,7 @@ def test_bundled_google_discovery_documents_cover_every_api_the_app_builds():
 
     root = Path(__file__).parents[1]
     built = set()
-    for path in sorted(root.glob("*.py")):
+    for path in sorted((root / "riviu").rglob("*.py")):
         tree = ast.parse(path.read_text(encoding="utf-8"))
         builders = {
             alias.asname or alias.name for node in ast.walk(tree)
@@ -236,7 +250,7 @@ def test_template_has_no_duplicate_ids():
             if values.get("id"):
                 self.ids.append(values["id"])
 
-    template = (Path(__file__).parents[1] / "templates" / "index.html").read_text(encoding="utf-8")
+    template = (Path(__file__).parents[1] / "riviu" / "web" / "templates" / "index.html").read_text(encoding="utf-8")
     parser = IdCollector()
     parser.feed(template)
 
@@ -245,7 +259,7 @@ def test_template_has_no_duplicate_ids():
 
 
 def test_broadcast_duplicates_uses_expected_websocket_envelope():
-    from app import ConnectionManager
+    from riviu.app import ConnectionManager
 
     class FakeConnection:
         def __init__(self):
@@ -269,7 +283,7 @@ def test_broadcast_duplicates_uses_expected_websocket_envelope():
 
 
 def test_validate_proxy_start_blocks_empty(tmp_path):
-    from app import validate_proxy_start
+    from riviu.app import validate_proxy_start
 
     msg = validate_proxy_start(True, "", str(tmp_path))
     assert msg is not None
@@ -277,7 +291,7 @@ def test_validate_proxy_start_blocks_empty(tmp_path):
 
 
 def test_validate_proxy_start_allows_disabled(tmp_path):
-    from app import validate_proxy_start
+    from riviu.app import validate_proxy_start
 
     assert validate_proxy_start(False, "", str(tmp_path)) is None
 
@@ -371,7 +385,7 @@ def test_google_push_uses_each_rows_last_update_and_platform_columns():
 
 def test_threads_partner_export_matches_tiktok_report_contract(tmp_path):
     from openpyxl import Workbook
-    from reports import build_export_payload
+    from riviu.reports import build_export_payload
 
     path = tmp_path / "threads.xlsx"
     book = Workbook()
@@ -403,8 +417,8 @@ def test_threads_partner_export_matches_tiktok_report_contract(tmp_path):
 
 
 def test_backend_platform_tables_cover_every_registered_platform():
-    import app
-    from workbook_utils import PLATFORMS
+    from riviu import app
+    from riviu.workbook_utils import PLATFORMS
 
     assert set(app.SCAN_RUNNERS) == set(app.PROXY_VALIDATORS) == set(PLATFORMS)
 
@@ -677,7 +691,7 @@ def test_build_partner_report_works_when_logo_image_unavailable():
             "CHIA SẺ": 4,
         }
     ]
-    with patch("reports.ExcelImage", side_effect=ImportError("You must install Pillow to fetch image objects")):
+    with patch("riviu.reports.ExcelImage", side_effect=ImportError("You must install Pillow to fetch image objects")):
         report_bytes = build_partner_report("Partner", rows, apply_min_views=False)
     assert isinstance(report_bytes, bytes)
     assert len(report_bytes) > 0
@@ -685,7 +699,7 @@ def test_build_partner_report_works_when_logo_image_unavailable():
 
 def test_build_export_payload_filename_includes_sheet_and_timestamp(tmp_path):
     import openpyxl
-    from reports import build_export_payload
+    from riviu.reports import build_export_payload
 
     file_path = tmp_path / "report.xlsx"
     wb = openpyxl.Workbook()
@@ -696,7 +710,7 @@ def test_build_export_payload_filename_includes_sheet_and_timestamp(tmp_path):
     wb.save(file_path)
     wb.close()
 
-    with patch("reports.format_filename_datetime", return_value="09-07-2026-13-47"):
+    with patch("riviu.reports.format_filename_datetime", return_value="09-07-2026-13-47"):
         payload = build_export_payload(
             str(file_path),
             ["1/2 Circle Coffee"],
@@ -710,7 +724,7 @@ def test_build_export_payload_filename_includes_sheet_and_timestamp(tmp_path):
 
 def test_export_matches_partner_names_like_the_partner_list(tmp_path):
     import openpyxl
-    from reports import build_export_payload
+    from riviu.reports import build_export_payload
 
     workbook = openpyxl.Workbook()
     sheet = workbook.active
@@ -728,7 +742,7 @@ def test_multi_partner_export_parses_the_sheet_once(tmp_path, monkeypatch):
 
     import openpyxl
     import pandas as pd
-    from reports import build_export_payload
+    from riviu.reports import build_export_payload
 
     workbook = openpyxl.Workbook()
     sheet = workbook.active

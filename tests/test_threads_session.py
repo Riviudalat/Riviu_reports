@@ -10,7 +10,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-import threads_session as session
+from riviu.platforms import threads_session as session
 
 SECRET = "synthetic-session-test-only"
 

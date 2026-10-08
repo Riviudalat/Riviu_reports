@@ -7,9 +7,9 @@ from types import SimpleNamespace
 import openpyxl
 import pytest
 
-import google_sheets_sync
-import scraper
-import workbook_utils as data
+from riviu import google_sheets_sync
+from riviu.platforms import tiktok as scraper
+from riviu import workbook_utils as data
 
 
 TIKTOK = "https://www.tiktok.com/@demo/video/123"

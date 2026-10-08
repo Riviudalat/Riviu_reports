@@ -6,9 +6,9 @@ from unittest.mock import Mock
 import openpyxl
 import pytest
 
-import google_sheets_sync
-from scraper import build_result_sheet
-from workbook_utils import (
+from riviu import google_sheets_sync
+from riviu.platforms.tiktok import build_result_sheet
+from riviu.workbook_utils import (
     build_workbook_rows,
     clean_text,
     find_data_sheet_names,

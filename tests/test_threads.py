@@ -3,16 +3,16 @@ import asyncio
 import json
 import os
 
-import threads_scraper
+from riviu.platforms import threads as threads_scraper
 
 import openpyxl
 import pytest
 from playwright.async_api import async_playwright
 
-from reports import build_export_payload, build_google_push_rows, build_partner_report
-from google_sheets_sync import create_result_sheet_title
+from riviu.reports import build_export_payload, build_google_push_rows, build_partner_report
+from riviu.google_sheets_sync import create_result_sheet_title
 
-from threads_scraper import (
+from riviu.platforms.threads import (
     parse_action_count,
     parse_threads_http,
     fetch_threads_browser,
@@ -22,7 +22,7 @@ from threads_scraper import (
     same_threads_post,
     write_threads_result,
 )
-from workbook_utils import (
+from riviu.workbook_utils import (
     build_workbook_rows,
     is_internal_workbook_filename,
     is_threads_link,
@@ -313,7 +313,7 @@ def test_threads_runner_saves_before_done_and_ignores_tiktok(tmp_path, monkeypat
     rebuild_summary_sheet(book, data_sheet_name="Data")
     book.save(path)
 
-    monkeypatch.setattr("threads_scraper.fetch_threads_http", lambda _url: {
+    monkeypatch.setattr("riviu.platforms.threads.fetch_threads_http", lambda _url: {
         "channel": "miri_viu", "metrics": {"views": 372, "likes": 4, "comments": 1, "reposts": None, "shares": 2}, "error": "",
     })
 

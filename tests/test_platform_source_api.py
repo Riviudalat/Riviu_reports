@@ -10,8 +10,8 @@ from openpyxl import Workbook, load_workbook
 from starlette.datastructures import UploadFile
 from starlette.websockets import WebSocketDisconnect
 
-import app as backend
-from workbook_utils import (
+from riviu import app as backend
+from riviu.workbook_utils import (
     PLATFORMS,
     google_sheet_source_for_file,
     register_google_sheet_source,

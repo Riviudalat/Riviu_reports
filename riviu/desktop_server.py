@@ -6,9 +6,9 @@ import secrets
 import uvicorn
 from fastapi import HTTPException, Request
 
-import app as app_state
-import scraper
-from app import app
+from riviu import app as app_state
+from riviu.platforms import tiktok as scraper
+from riviu.app import app
 
 
 def register_desktop_routes(server, shutdown_token: str) -> None:

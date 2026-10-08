@@ -9,10 +9,10 @@ import openpyxl
 import pytest
 from fastapi.testclient import TestClient
 
-import app as backend
-import proxy_utils
-import reports
-import threads_scraper as threads
+from riviu import app as backend
+from riviu import proxy_utils
+from riviu import reports
+from riviu.platforms import threads
 from test_backend_review_fixes import isolated_backend
 
 
@@ -65,7 +65,7 @@ def test_threads_exact_unknown_clears_stale_views_and_channel_is_literal():
 
 
 def test_summary_unicode_sources_do_not_collide():
-    from workbook_utils import summary_sheet_title_for_data_sheet,data_sheet_name_for_summary_title
+    from riviu.workbook_utils import summary_sheet_title_for_data_sheet,data_sheet_name_for_summary_title
     first=summary_sheet_title_for_data_sheet('Straße');second=summary_sheet_title_for_data_sheet('STRASSE')
     assert first.lower()!=second.lower()
     assert data_sheet_name_for_summary_title(['Straße','STRASSE'],first)=='Straße'

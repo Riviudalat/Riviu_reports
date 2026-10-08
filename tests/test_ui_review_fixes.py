@@ -57,7 +57,7 @@ const context = vm.createContext({console,document,WebSocket,Map,Set,Date,Number
     matchMedia(){return {matches:true};},addEventListener(){},setInterval(){},__TAURI__:null},
   setTimeout(){},clearTimeout(){},localStorage:{getItem(){return null;},setItem(){}},
   fetch:async()=>({ok:true,json:async()=>({})}),assert,el,sent,sockets,buttons});
-vm.runInContext(fs.readFileSync('static/app.js','utf8'),context);
+vm.runInContext(fs.readFileSync('riviu/web/static/app.js','utf8'),context);
 for (const config of Object.values(vm.runInContext('PLATFORMS',context))) {
   for (const [role, id] of Object.entries(config.dom)) {
     if (role !== 'button') assert.ok(renderedIds.has(id), `${config.key} source row did not render #${id}`);
@@ -131,7 +131,7 @@ def test_proxy_settings_survive_platform_switch_and_use_saved_text():
 
 
 def test_threads_proxy_toolbar_is_not_hidden_by_platform_css():
-    css = (ROOT / 'static' / 'styles.css').read_text(encoding='utf-8')
+    css = (ROOT / 'riviu' / 'web' / 'static' / 'styles.css').read_text(encoding='utf-8')
     assert not re.search(r'\[data-platform\s*=\s*[\"\']threads[\"\']\]\s+\.toolbar-proxy\s*\{[^}]*display\s*:\s*none', css)
 
 
@@ -589,8 +589,8 @@ def test_desktop_update_gate_rejects_busy_and_unauthenticated_requests(monkeypat
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
     from types import SimpleNamespace
-    import app as app_state
-    import desktop_server
+    from riviu import app as app_state
+    from riviu import desktop_server
 
     isolated_app = FastAPI()
     monkeypatch.setattr(desktop_server, 'app', isolated_app)
@@ -622,7 +622,7 @@ def test_desktop_update_gate_rejects_busy_and_unauthenticated_requests(monkeypat
 def test_real_dom_threads_snapshot_keeps_blank_metrics_and_locked_controls():
     from playwright.sync_api import sync_playwright
 
-    markup = (ROOT / 'templates' / 'index.html').read_text(encoding='utf-8')
+    markup = (ROOT / 'riviu' / 'web' / 'templates' / 'index.html').read_text(encoding='utf-8')
     markup = re.sub(r'<script\b[^>]*>.*?</script>', '', markup, flags=re.DOTALL)
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
@@ -630,11 +630,11 @@ def test_real_dom_threads_snapshot_keeps_blank_metrics_and_locked_controls():
             page = browser.new_page()
             page.route('**/*', lambda route: route.abort())
             page.set_content(markup)
-            page.add_style_tag(content=(ROOT / 'static' / 'styles.css').read_text(encoding='utf-8'))
+            page.add_style_tag(content=(ROOT / 'riviu' / 'web' / 'static' / 'styles.css').read_text(encoding='utf-8'))
             page.evaluate("""() => {
                 window.WebSocket = class {static OPEN=1; constructor(){window.testSocket=this;this.readyState=1;}};
             }""")
-            page.add_script_tag(content=(ROOT / 'static' / 'app.js').read_text(encoding='utf-8'))
+            page.add_script_tag(content=(ROOT / 'riviu' / 'web' / 'static' / 'app.js').read_text(encoding='utf-8'))
             page.evaluate("""() => {
                 connectWS();
                 window.testSocket.onmessage({data:JSON.stringify({type:'session',data:{

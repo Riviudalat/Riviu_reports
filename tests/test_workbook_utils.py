@@ -1,6 +1,6 @@
 import pandas as pd
 
-from workbook_utils import (
+from riviu.workbook_utils import (
     dataframe_partner_columns,
     fetch_google_spreadsheet_title,
     find_link_column_name,
@@ -147,7 +147,7 @@ def test_is_exportable_report_row_respects_min_views():
 
 def test_threads_rows_use_url_username_for_blank_channel_and_count_like_tiktok(tmp_path):
     import openpyxl
-    from workbook_utils import list_workbook_partners_with_link_counts
+    from riviu.workbook_utils import list_workbook_partners_with_link_counts
 
     path = tmp_path / "threads.xlsx"
     book = openpyxl.Workbook()
@@ -175,7 +175,7 @@ def test_threads_rows_use_url_username_for_blank_channel_and_count_like_tiktok(t
 
 def test_google_sheet_file_id_uses_spreadsheet_title(monkeypatch):
     monkeypatch.setattr(
-        "workbook_utils.fetch_google_spreadsheet_title",
+        "riviu.workbook_utils.fetch_google_spreadsheet_title",
         lambda _url: "Report Seeding Tiktok 2026",
     )
     file_id = google_sheet_file_id_from_title("Report Seeding Tiktok 2026", "05-06-2026-10-42")
@@ -321,7 +321,7 @@ def test_summary_groups_partner_case_variants_and_orders_updates_by_date():
 
 def test_summary_sheet_and_dashboard_keep_unknown_partner_metrics_blank(tmp_path):
     import openpyxl
-    from workbook_utils import read_summary_dashboard
+    from riviu.workbook_utils import read_summary_dashboard
 
     path = tmp_path / "summary.xlsx"
     wb = openpyxl.Workbook()
@@ -357,7 +357,7 @@ def test_summary_sheet_and_dashboard_keep_unknown_partner_metrics_blank(tmp_path
 def test_mixed_sheet_keeps_one_summary_per_platform(tmp_path):
     """Each platform counts only its own links into its own tab; neither rebuild touches the other."""
     import openpyxl
-    from workbook_utils import SUMMARY_COLUMNS, read_summary_dashboard
+    from riviu.workbook_utils import SUMMARY_COLUMNS, read_summary_dashboard
 
     path = tmp_path / "mixed.xlsx"
     wb = openpyxl.Workbook()
@@ -433,7 +433,7 @@ def test_read_sheet_preview_hides_pandas_placeholder_headers(tmp_path):
 
 def test_shared_column_lookup_matches_unaccented_headers_instead_of_appending():
     import openpyxl
-    from workbook_utils import worksheet_ensure_column
+    from riviu.workbook_utils import worksheet_ensure_column
 
     sheet = openpyxl.Workbook().active
     sheet.append(["Link", "Luot xem", "Ngày cập nhật"])
@@ -444,7 +444,7 @@ def test_shared_column_lookup_matches_unaccented_headers_instead_of_appending():
 
 def test_atomic_save_temp_files_are_never_listed_as_workbooks(tmp_path):
     import openpyxl
-    from workbook_utils import save_workbook_atomic, workbook_file_entries
+    from riviu.workbook_utils import save_workbook_atomic, workbook_file_entries
 
     target = tmp_path / "Report.xlsx"
     save_workbook_atomic(openpyxl.Workbook(), target)
@@ -926,7 +926,7 @@ def test_workbook_file_entries_skips_internal_files(tmp_path):
 
 def test_data_sheet_defaults_skip_hidden_months(tmp_path):
     import openpyxl
-    from workbook_utils import find_data_sheet_names, is_threads_link
+    from riviu.workbook_utils import find_data_sheet_names, is_threads_link
 
     workbook = openpyxl.Workbook()
     workbook.active.title = "Tháng 6"
@@ -956,7 +956,7 @@ def count_sheet_parses(monkeypatch):
 
 def test_unchanged_workbook_reads_are_cached_until_an_atomic_save(tmp_path, monkeypatch):
     import openpyxl
-    from workbook_utils import list_workbook_partners_with_link_counts, save_workbook_atomic
+    from riviu.workbook_utils import list_workbook_partners_with_link_counts, save_workbook_atomic
 
     path = tmp_path / "cached.xlsx"
     book = openpyxl.Workbook()

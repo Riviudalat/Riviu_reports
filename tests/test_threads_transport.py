@@ -10,9 +10,9 @@ import openpyxl
 import pytest
 from playwright.async_api import async_playwright
 
-import proxy_utils
-import threads_scraper as threads
-from workbook_utils import worksheet_find_column_index
+from riviu import proxy_utils
+from riviu.platforms import threads
+from riviu.workbook_utils import worksheet_find_column_index
 
 URL = "https://www.threads.com/@demo/post/Fixture"
 

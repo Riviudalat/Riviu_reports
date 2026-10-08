@@ -6,9 +6,9 @@ import urllib.request
 
 import pytest
 
-import proxy_utils
-import threads_session
-from proxy_utils import (
+from riviu import proxy_utils
+from riviu.platforms import threads_session
+from riviu.proxy_utils import (
     assign_worker_proxy,
     build_http_proxy_url,
     normalize_proxy_config,
@@ -124,7 +124,7 @@ def test_resolve_proxy_configs_ignores_legacy_json_file(tmp_path):
 
 
 def test_proxy_display_name_uses_region():
-    from proxy_utils import proxy_display_name
+    from riviu.proxy_utils import proxy_display_name
 
     config = normalize_proxy_config({
         "host": "us.cliproxy.io",
@@ -136,7 +136,7 @@ def test_proxy_display_name_uses_region():
 
 
 def test_tiktok_html_looks_valid():
-    from proxy_utils import tiktok_html_looks_valid
+    from riviu.proxy_utils import tiktok_html_looks_valid
 
     assert tiktok_html_looks_valid("<html>" + ("x" * 600) + "playCount</html>") is True
     assert tiktok_html_looks_valid("<html>" + ("x" * 600) + "pumbaa-rule</html>") is False
@@ -224,10 +224,10 @@ def test_set_session_proxy_used_by_urlopen_request():
     })
     set_session_proxies([config])
     try:
-        with patch("proxy_utils.urllib.request.build_opener") as build_opener:
+        with patch("riviu.proxy_utils.urllib.request.build_opener") as build_opener:
             build_opener.return_value.open.side_effect = IOError("stop")
             try:
-                from proxy_utils import urlopen_request
+                from riviu.proxy_utils import urlopen_request
 
                 req = urllib.request.Request("https://example.com")
                 urlopen_request(req, timeout=1)

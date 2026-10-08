@@ -438,7 +438,7 @@ def release_thread_proxy():
 
 class SessionRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, message, headers, newurl):
-        from threads_session import allowed_session_url, SessionError
+        from riviu.platforms.threads_session import allowed_session_url, SessionError
         if not allowed_session_url(newurl):
             raise SessionError("redirect")
         return super().redirect_request(request, fp, code, message, headers, newurl)
@@ -465,7 +465,7 @@ def urlopen_with_config(request, config, timeout=30, cookiejar=None, redirect_va
             raise ValueError("URL không thuộc nền tảng được phép.")
         handlers = (ValidatedRedirectHandler(redirect_validator),)
     elif cookiejar is not None:
-        from threads_session import allowed_session_url, SessionError
+        from riviu.platforms.threads_session import allowed_session_url, SessionError
         if not allowed_session_url(request.full_url):
             raise SessionError("unknown")
         handlers = (urllib.request.HTTPCookieProcessor(cookiejar), SessionRedirectHandler())

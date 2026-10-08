@@ -8,10 +8,10 @@ import openpyxl
 import pytest
 from fastapi.testclient import TestClient
 
-import app as backend
-import proxy_utils
-import threads_scraper as threads
-import threads_session as sessions
+from riviu import app as backend
+from riviu import proxy_utils
+from riviu.platforms import threads
+from riviu.platforms import threads_session as sessions
 from test_backend_review_fixes import isolated_backend, run_fixture_websocket_start
 from test_threads_transport import Events, NoBrowser, URL, html_fixture, metrics, workbook
 from test_ui_review_fixes import run_js

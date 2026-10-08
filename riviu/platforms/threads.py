@@ -13,13 +13,13 @@ from decimal import Decimal
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urljoin, urlparse
 
-import proxy_utils
+from riviu import proxy_utils
 import openpyxl
-import threads_session
+from riviu.platforms import threads_session
 from playwright.async_api import async_playwright
 
-from scraper import close_browser_bounded, finish_pending_task, playwright_session
-from workbook_utils import (
+from riviu.platforms.tiktok import close_browser_bounded, finish_pending_task, playwright_session
+from riviu.workbook_utils import (
     LAST_UPDATE_COLUMN,
     THREADS_SCAN_STATUS_HEADER,
     clean_text,

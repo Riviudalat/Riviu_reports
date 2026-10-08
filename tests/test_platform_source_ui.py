@@ -21,10 +21,10 @@ def test_source_rows_are_rendered_from_the_platform_registry():
     # A registry-only third entry must get its own wired source row; index.html is untouched.
     from playwright.sync_api import sync_playwright
 
-    markup = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+    markup = (ROOT / "riviu" / "web" / "templates" / "index.html").read_text(encoding="utf-8")
     markup = re.sub(r"<script\b[^>]*>.*?</script>", "", markup, flags=re.DOTALL)
     assert "data-source-platform" not in markup
-    script = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    script = (ROOT / "riviu" / "web" / "static" / "app.js").read_text(encoding="utf-8")
     assert script.count("const PLATFORMS = Object.freeze({") == 1
     script = FAKE_PLATFORM + script.replace("const PLATFORMS = Object.freeze({", "const PLATFORMS = withFakePlatform({")
     with sync_playwright() as playwright:

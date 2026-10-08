@@ -25,7 +25,7 @@ def browser():
 @pytest.fixture
 def page(browser):
     context = browser.new_context()
-    markup = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+    markup = (ROOT / "riviu" / "web" / "templates" / "index.html").read_text(encoding="utf-8")
     markup = re.sub(r"<script\b[^>]*>.*?</script>", "", markup, flags=re.DOTALL)
 
     def route_offline(route):
@@ -37,7 +37,7 @@ def page(browser):
     context.route("**/*", route_offline)
     current = context.new_page()
     current.goto("http://riviu.fixture.invalid:1234/")
-    current.add_style_tag(content=(ROOT / "static" / "styles.css").read_text(encoding="utf-8"))
+    current.add_style_tag(content=(ROOT / "riviu" / "web" / "static" / "styles.css").read_text(encoding="utf-8"))
     current.evaluate("""() => {
         window.WebSocket = class {static OPEN=1; constructor(){this.readyState=1;} send(){}};
         window.fetch = async () => {throw Error('Unexpected fixture request');};
@@ -46,7 +46,7 @@ def page(browser):
             threads:{fileId:'data/B.xlsx',displaySheet:'B',scanSheet:'B',pushSheet:'B',url:''}
         };
     }""")
-    current.add_script_tag(content=(ROOT / "static" / "app.js").read_text(encoding="utf-8"))
+    current.add_script_tag(content=(ROOT / "riviu" / "web" / "static" / "app.js").read_text(encoding="utf-8"))
     yield current
     context.close()
 
