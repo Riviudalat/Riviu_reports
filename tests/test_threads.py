@@ -27,6 +27,7 @@ from workbook_utils import (
     is_internal_workbook_filename,
     is_threads_link,
     list_workbook_partners_with_link_counts,
+    rebuild_summary_sheet,
     worksheet_find_column_index,
 )
 
@@ -309,6 +310,7 @@ def test_threads_runner_saves_before_done_and_ignores_tiktok(tmp_path, monkeypat
     sheet.append(["Link", "Tên Kênh", "LƯỢT XEM", "TIM", "Đối tác"])
     sheet.append([URL, "", "", "", "Cafe A"])
     sheet.append(["https://www.tiktok.com/@demo/video/123", "TikTok", 12, 5, "Cafe A"])
+    rebuild_summary_sheet(book, data_sheet_name="Data")
     book.save(path)
 
     monkeypatch.setattr("threads_scraper.fetch_threads_http", lambda _url: {
@@ -330,6 +332,13 @@ def test_threads_runner_saves_before_done_and_ignores_tiktok(tmp_path, monkeypat
                 saved = openpyxl.load_workbook(path)
                 assert saved.active["C2"].value == 372
                 assert saved.active["C3"].value == 12
+                # The scan rebuilds its own Threads summary and leaves the TikTok one as it was.
+                assert saved.sheetnames == ["Data", "Tổng kết data", "Tổng kết Threads data"]
+                tiktok, threads = saved["Tổng kết data"], saved["Tổng kết Threads data"]
+                assert [cell.value for cell in tiktok[2]][1:4] == ["Cafe A", 1, 12]
+                assert [cell.value for cell in threads[1]][6] == "TỔNG REPOST"
+                assert [cell.value for cell in threads[2]][1:8] == ["Cafe A", 1, 372, 4, 1, None, 2]
+                assert threads.cell(row=2, column=9).value
                 saved.close()
 
     asyncio.run(run_threads_scraper(path, Manager(), sheet_name="Data", mode="request"))

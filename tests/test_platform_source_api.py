@@ -12,7 +12,7 @@ from starlette.websockets import WebSocketDisconnect
 
 import app as backend
 from workbook_utils import (
-    SUMMARY_COLUMNS,
+    PLATFORMS,
     google_sheet_source_for_file,
     register_google_sheet_source,
     summary_sheet_title_for_data_sheet,
@@ -29,8 +29,9 @@ def make_source(path, marker):
     second = book.create_sheet(f"{marker} Other")
     second.append(["Link", "Tên Kênh", "Đối tác", "LƯỢT XEM"])
     second.append([f"https://www.tiktok.com/@{marker}/video/456", marker, f"{marker} Other Partner", 3000])
-    summary = book.create_sheet(summary_sheet_title_for_data_sheet(sheet.title))
-    summary.append(SUMMARY_COLUMNS)
+    # The explicit-source tests query platform=threads, so the fixture holds the Threads summary.
+    summary = book.create_sheet(summary_sheet_title_for_data_sheet(sheet.title, "threads"))
+    summary.append(PLATFORMS["threads"].summary_columns)
     summary.append([1, f"{marker} Summary", 2, 3000, 30, 0, 0, 0, "fixture"])
     book.save(path)
     book.close()
@@ -215,7 +216,7 @@ def test_sync_activate_false_publishes_registered_source_without_activation(clie
     response = client.post("/sync-google-sheet", json=data).json()
     assert response["success"] and response["platform"] == "threads"
     assert response["currentSheet"] == response["scanSheet"] == "New Data"
-    assert response["sheets"] == ["New Data", "New Other", "Tổng kết new data"]
+    assert response["sheets"] == ["New Data", "New Other", "Tổng kết Threads new data"]
     assert (source_backend / response["file_id"]).is_file()
     assert google_sheet_source_for_file(str(source_backend), response["file_id"])["spreadsheetId"] == "SYNC"
     assert selection() == before and "sheet=New Data" in logs[0]

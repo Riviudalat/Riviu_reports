@@ -255,7 +255,12 @@ def test_safe_workbook_filename():
 def test_summary_sheet_title_for_data_sheet():
     assert summary_sheet_title_for_data_sheet("Tháng 6") == "Tổng kết tháng 6"
     assert summary_sheet_title_for_data_sheet("Tháng 5") == "Tổng kết tháng 5"
+    assert summary_sheet_title_for_data_sheet("Tháng 6", "threads") == "Tổng kết Threads tháng 6"
+    long_name = "Danh sách seeding tháng 6 năm 2026"
+    assert len(summary_sheet_title_for_data_sheet(long_name, "threads")) <= 31
+    assert summary_sheet_title_for_data_sheet(long_name, "threads") != summary_sheet_title_for_data_sheet(long_name)
     assert is_summary_sheet_name("Tổng kết tháng 6") is True
+    assert is_summary_sheet_name("Tổng kết Threads tháng 6") is True
     assert is_summary_sheet_name("Tháng 6") is False
 
 
@@ -347,6 +352,63 @@ def test_summary_sheet_and_dashboard_keep_unknown_partner_metrics_blank(tmp_path
     assert rows["Unknown"]["TỔNG LƯỢT XEM"] == "" and rows["Unknown"]["TỔNG LINK"] == 1
     assert dashboard["totals"]["views"] == 10 and dashboard["totals"]["likes"] == 0
     assert dashboard["totals"]["comments"] == "" and dashboard["totals"]["links"] == 3
+
+
+def test_mixed_sheet_keeps_one_summary_per_platform(tmp_path):
+    """Each platform counts only its own links into its own tab; neither rebuild touches the other."""
+    import openpyxl
+    from workbook_utils import SUMMARY_COLUMNS, read_summary_dashboard
+
+    path = tmp_path / "mixed.xlsx"
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "Data"
+    sheet.append(["LINK AIR", "Đối tác", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "REPOST", "CHIA SẺ"])
+    sheet.append(["https://www.tiktok.com/@a/video/1", "Shop A", 100, 5, 1, 2, None, 3])
+    sheet.append(["https://www.threads.com/@a/post/AbC1", "Shop A", 40, 4, 0, None, 1, None])
+    sheet.append(["https://www.threads.com/@b/post/AbC2", "Shop A", None, 6, None, None, 2, None])
+    sheet.append(["https://www.threads.com/@c/post/AbC3", "Shop B", None, None, None, None, None, None])
+    wb.create_sheet("Other")
+
+    assert rebuild_summary_sheet(wb, data_sheet_name="Data", platform="threads") == 2
+    assert rebuild_summary_sheet(wb, data_sheet_name="Data") == 1
+    assert rebuild_summary_sheet(wb, data_sheet_name="Data", platform="threads") == 2
+    assert wb.sheetnames == ["Data", "Tổng kết data", "Tổng kết Threads data", "Other"]
+
+    def table(title):
+        worksheet = wb[title]
+        headers = [cell.value for cell in worksheet[1]]
+        rows = {
+            worksheet.cell(row=row, column=2).value: dict(zip(headers, (cell.value for cell in worksheet[row])))
+            for row in range(2, worksheet.max_row + 1)
+        }
+        return headers, rows
+
+    tiktok_headers, tiktok = table("Tổng kết data")
+    assert tiktok_headers == SUMMARY_COLUMNS and list(tiktok) == ["Shop A"]
+    assert (tiktok["Shop A"]["TỔNG LINK"], tiktok["Shop A"]["TỔNG LƯỢT LƯU"]) == (1, 2)
+    threads_headers, threads = table("Tổng kết Threads data")
+    assert threads_headers == [
+        "Stt", "ĐỐI TÁC", "TỔNG LINK", "TỔNG LƯỢT XEM", "TỔNG TIM",
+        "TỔNG BÌNH LUẬN", "TỔNG REPOST", "TỔNG CHIA SẺ", "Cập nhật lần cuối",
+    ]
+    shop_a = threads["Shop A"]
+    assert [shop_a[header] for header in threads_headers[2:8]] == [2, 40, 10, 0, 3, None]
+    assert threads["Shop B"]["TỔNG LINK"] == 1 and threads["Shop B"]["TỔNG LƯỢT XEM"] is None
+    wb.save(path)
+    wb.close()
+
+    threads_dashboard = read_summary_dashboard(str(path), "Data", platform="threads")
+    assert (threads_dashboard["sheet"], threads_dashboard["dataSheet"]) == ("Tổng kết Threads data", "Data")
+    assert threads_dashboard["totals"] == {
+        "partners": 2, "links": 3, "views": 40, "likes": 10, "comments": 0, "reposts": 3, "shares": "",
+    }
+    assert read_summary_dashboard(str(path), "Data")["totals"] == {
+        "partners": 1, "links": 1, "views": 100, "likes": 5, "comments": 1, "saves": 2, "shares": 3,
+    }
+    # A summary tab opened from the TikTok view is read with the platform that owns it.
+    opened = read_summary_dashboard(str(path), "Tổng kết Threads data", platform="tiktok")
+    assert (opened["dataSheet"], opened["totals"]) == ("Data", threads_dashboard["totals"])
 
 
 def test_read_sheet_preview_hides_pandas_placeholder_headers(tmp_path):
