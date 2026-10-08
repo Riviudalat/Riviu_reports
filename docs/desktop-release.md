@@ -62,9 +62,10 @@ the updater payloads, and uploads `latest.json` with the platform artifacts:
 - macOS Apple Silicon DMG
 - Linux x64 AppImage, DEB, and RPM packages
 
-The installed app checks the release `latest.json` at startup and then every
-five minutes. When a newer release is available, it downloads, installs, and
-restarts automatically.
+The installed app checks the release `latest.json` as soon as the UI receives
+its first WebSocket session snapshot, and then every five minutes. A check is
+skipped while a scan runs. When a newer release is available, it downloads,
+installs, and restarts automatically.
 
 ## Sidecar lifecycle
 
