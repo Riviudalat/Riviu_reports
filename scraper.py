@@ -13,7 +13,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from functools import partial
-from urllib.parse import urljoin, urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import openpyxl
 from playwright.async_api import async_playwright
@@ -239,6 +239,13 @@ STATUS_TIKTOK_NO_STATS = "Ẩn số liệu: TikTok không trả lượt xem"
 # Chuỗi cũ (trước khi tách ẩn/lỗi) — vẫn nhận diện khi đọc log/Excel cũ.
 STATUS_TIKTOK_NO_STATS_LEGACY = "Lỗi: TikTok không trả số liệu"
 STATUS_MEDIA_REDIRECT_MISMATCH = "Error: Redirect không khớp video"
+# TikTok's post page answers "item not found" (statusCode 10204, rendered "page
+# unavailable") intermittently for live posts. That signal alone is only a
+# suspicion and keeps the old numbers; STATUS_TIKTOK_UNAVAILABLE (which clears
+# them) requires the independent oEmbed check in confirm_tiktok_post_gone.
+STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED = "Error: TikTok báo không tìm thấy bài (chưa xác nhận, giữ số cũ)"
+STATUS_TIKTOK_UNAVAILABLE = "Error: Trang TikTok không khả dụng"
+TIKTOK_OEMBED_ENDPOINT = "https://www.tiktok.com/oembed?url="
 
 MAX_WORKERS = 50
 DEFAULT_WORKERS = 5
@@ -1679,14 +1686,73 @@ def is_hidden_stats_status(status):
     )
 
 
-def should_clear_stale_metrics(status):
-    text = clean_text(status)
-    lowered = text.casefold()
+def is_suspected_gone_status(status):
+    """Page-level signs that a post is gone (item not found, HTTP 404/410).
+
+    Live posts show them intermittently, so they never clear numbers by
+    themselves; confirm_tiktok_post_gone decides.
+    """
+    lowered = clean_text(status).casefold()
     return (
-        is_hidden_stats_status(status)
-        or lowered == "error: trang tiktok không khả dụng"
+        lowered == STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED.casefold()
         or bool(re.fullmatch(r"error:\s*http\s+(?:404|410)(?:\s+.*)?", lowered))
     )
+
+
+def should_clear_stale_metrics(status):
+    """Hidden stats, or a deletion confirmed by two independent signals."""
+    return is_hidden_stats_status(status) or clean_text(status) == STATUS_TIKTOK_UNAVAILABLE
+
+
+def tiktok_oembed_target(url, resolved_url=""):
+    media_id = extract_media_id(url) or extract_media_id(resolved_url)
+    if not media_id:
+        return ""
+    # oEmbed resolves the post by id (a renamed handle still answers 200) but
+    # rejects every /photo/ URL with 400, so always ask in the /video/ form.
+    username = extract_profile_username(url) or extract_profile_username(resolved_url) or "_"
+    return f"https://www.tiktok.com/@{username.lstrip('@')}/video/{media_id}"
+
+
+def confirm_tiktok_post_gone(url, resolved_url="", timeout=15):
+    """Independent check that a post is gone, via TikTok's oEmbed endpoint.
+
+    Live sample (Oct 2026): the post page returned 10204 on about a third of
+    fetches of live posts, while oEmbed answered 200 for every live post (photo
+    posts included) and 400 for every deleted or nonexistent id.
+    Returns True (gone), False (live) or None (no answer).
+    """
+    target = tiktok_oembed_target(url, resolved_url)
+    if not target:
+        return None
+    request = urllib.request.Request(
+        TIKTOK_OEMBED_ENDPOINT + quote(target, safe=""),
+        headers={
+            "User-Agent": random.choice(USER_AGENTS),
+            "Accept": "application/json",
+            "Accept-Language": "vi-VN,vi;q=0.9,en;q=0.8",
+        },
+    )
+    wait_if_request_blocked()
+    try:
+        with _request_semaphore:
+            with urlopen_request(request, timeout=timeout, redirect_validator=is_scrapable_tiktok_url) as response:
+                payload = json_loads_safe(response.read().decode("utf-8", errors="replace"))
+    except urllib.error.HTTPError as error:
+        try:
+            body = json_loads_safe(error.read().decode("utf-8", errors="replace"))
+        except Exception:
+            body = None
+        finally:
+            error.close()
+        if error.code in (404, 410):
+            return True
+        # TikTok answers unknown ids with 400 and a JSON error body; a bare 400
+        # (for example from a proxy) proves nothing.
+        return True if error.code == 400 and isinstance(body, dict) else None
+    except Exception:
+        return None
+    return False if isinstance(payload, dict) and payload.get("type") else None
 
 
 def terminal_status_priority(status):
@@ -1695,7 +1761,7 @@ def terminal_status_priority(status):
     text = clean_text(status).casefold()
     if re.fullmatch(r"error:\s*http\s+410(?:\s+.*)?", text):
         return 30
-    if text == "error: trang tiktok không khả dụng":
+    if text == STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED.casefold():
         return 20
     if re.fullmatch(r"error:\s*http\s+404(?:\s+.*)?", text):
         return 10
@@ -1808,7 +1874,7 @@ def parse_fetched_request_page(source_url, final_url, content):
     if found:
         return metrics, channel_name, "Success"
     if is_tiktok_error_page(content):
-        return empty, "", "Error: Trang TikTok không khả dụng"
+        return empty, "", STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED
     return empty, channel_name, no_metrics_status(content, media_id=media_id)
 
 
@@ -1858,7 +1924,7 @@ class _RequestScrapeOutcome:
         self.best_terminal = None
 
     def note_terminal(self, data, channel, status):
-        if should_clear_stale_metrics(status):
+        if should_clear_stale_metrics(status) or is_suspected_gone_status(status):
             self.best_terminal = stronger_terminal_result(
                 self.best_terminal, (data, channel, status, self.resolved_url)
             )
@@ -1956,6 +2022,7 @@ def scrape_link_with_retries_request(
     last_resolved_url = ""
 
     attempts_used = 0
+    gone = None
     for attempt in range(retries + 1):
         if attempt > 0:
             if is_request_rate_limited_status(last_status):
@@ -1985,6 +2052,13 @@ def scrape_link_with_retries_request(
         last_data, last_channel, last_status = data, channel_name, status
         if status == "Success":
             return data, channel_name, status, attempts_used, last_resolved_url
+        if is_suspected_gone_status(status):
+            if gone is None:
+                gone = confirm_tiktok_post_gone(url, last_resolved_url, timeout=min(timeout, 15))
+            if gone:
+                return data, channel_name, STATUS_TIKTOK_UNAVAILABLE, attempts_used, last_resolved_url
+            # Live (or unknown): the page answer was transient; spend the retry budget.
+            continue
         if should_clear_stale_metrics(status):
             return data, channel_name, status, attempts_used, last_resolved_url
         if is_request_rate_limited_status(status):
@@ -2092,8 +2166,11 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
     try:
         await navigate_tiktok_page(page, url, timeout_ms=timeout_ms)
         try:
+            # Script tags are never "visible": wait for them to be attached, or the
+            # default visible state burns the whole timeout on every link.
             await page.wait_for_selector(
                 'script#__UNIVERSAL_DATA_FOR_REHYDRATION__, script#SIGI_STATE, script#api-data',
+                state="attached",
                 timeout=12000,
             )
         except Exception:
@@ -2133,8 +2210,11 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
                     found = True
                     break
                 previous_metrics = candidate
-            elif is_tiktok_error_page(content):
-                return data, channel_name, "Error: Trang TikTok không khả dụng", page_url
+            elif is_tiktok_item_not_found(content):
+                # The server-rendered state will not change by polling. Live posts
+                # get it intermittently too, so it is only a suspicion that
+                # scrape_with_retries retries and confirms.
+                return data, "", STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED, page_url
             parsed_channel = parse_channel_name_from_page(content, profile_username, media_id=media_id)
             if parsed_channel:
                 channel_name = parsed_channel
@@ -2168,6 +2248,9 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
             data = previous_metrics
             found = True
 
+        if not found and is_tiktok_error_page(content):
+            # Error-looking content that outlived the polling window: still unconfirmed.
+            return data, "", STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED, page_url
         if not found:
             return data, channel_name, no_metrics_status(content, media_id=media_id), page_url
 
@@ -2181,6 +2264,7 @@ async def scrape_with_retries(page, url, retries, channel_cache=None):
     last_status = "Error: Chưa chạy"
     last_channel = ""
     last_resolved_url = ""
+    gone = None
 
     for attempt in range(retries + 1):
         if attempt > 0:
@@ -2191,6 +2275,12 @@ async def scrape_with_retries(page, url, retries, channel_cache=None):
         last_data, last_channel, last_status = data, channel_name, status
         if status == "Success":
             return data, channel_name, status, attempt + 1, last_resolved_url
+        if is_suspected_gone_status(status):
+            if gone is None:
+                gone = await asyncio.to_thread(confirm_tiktok_post_gone, url, last_resolved_url)
+            if gone:
+                return data, channel_name, STATUS_TIKTOK_UNAVAILABLE, attempt + 1, last_resolved_url
+            continue
         if should_clear_stale_metrics(status):
             return data, channel_name, status, attempt + 1, last_resolved_url
 

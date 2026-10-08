@@ -852,14 +852,21 @@ DELETED_POST_UNIVERSAL = """
 
 
 @pytest.mark.parametrize("template", [DELETED_POST_API_DATA, DELETED_POST_UNIVERSAL], ids=["api-data", "universal"])
-def test_request_page_with_item_not_found_code_is_unavailable_and_clears_metrics(template):
-    from scraper import parse_fetched_request_page, should_clear_stale_metrics
+def test_request_page_with_item_not_found_code_is_only_a_suspicion(template):
+    from scraper import (
+        STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED,
+        is_suspected_gone_status,
+        parse_fetched_request_page,
+        should_clear_stale_metrics,
+    )
 
     url = "https://www.tiktok.com/@a/video/7673695796168084756"
     metrics, channel, status = parse_fetched_request_page(url, url, template % "10204")
 
-    assert status == "Error: Trang TikTok không khả dụng"
-    assert should_clear_stale_metrics(status) is True
+    # Live posts also get 10204 intermittently: one page never clears numbers.
+    assert status == STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED
+    assert is_suspected_gone_status(status) is True
+    assert should_clear_stale_metrics(status) is False
     assert channel == ""
     assert all(value is None for value in metrics.values())
 
@@ -867,50 +874,110 @@ def test_request_page_with_item_not_found_code_is_unavailable_and_clears_metrics
 @pytest.mark.parametrize("template", [DELETED_POST_API_DATA, DELETED_POST_UNIVERSAL], ids=["api-data", "universal"])
 @pytest.mark.parametrize("code", ["10216", "10222"])
 def test_private_or_restricted_item_codes_are_not_treated_as_deleted(template, code):
-    from scraper import parse_fetched_request_page, should_clear_stale_metrics
+    from scraper import is_suspected_gone_status, parse_fetched_request_page, should_clear_stale_metrics
 
     url = "https://www.tiktok.com/@a/video/7673695796168084756"
     _metrics, _channel, status = parse_fetched_request_page(url, url, template % code)
 
-    assert status != "Error: Trang TikTok không khả dụng"
+    assert is_suspected_gone_status(status) is False
     assert should_clear_stale_metrics(status) is False
 
 
-def test_browser_scan_marks_rendered_deleted_post_unavailable(monkeypatch):
+DELETED_POST_RENDERED = DELETED_POST_API_DATA.replace(
+    '<div>Mở TikTok</div>',
+    '<p class="css-1osbocj-PMsgTitle e10waoic3">Trang này không khả dụng</p>',
+) % "10204"
+
+LIVE_POST_RENDERED = """
+<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">
+{"__DEFAULT_SCOPE__":{"webapp.video-detail":{"statusCode":0,"itemInfo":{"itemStruct":{
+  "id":"7673695796168084756",
+  "stats":{"playCount":1214,"diggCount":30,"commentCount":4,"collectCount":2,"shareCount":1}
+}}}}}
+</script>
+"""
+
+
+class _RenderedPage:
+    """Playwright page stub: each navigation renders the next scripted HTML."""
+
+    url = "https://www.tiktok.com/@a/video/7673695796168084756"
+
+    def __init__(self, renders):
+        self.renders = list(renders)
+        self.current = ""
+
+    def navigate(self):
+        self.current = self.renders.pop(0) if len(self.renders) > 1 else self.renders[0]
+
+    async def wait_for_selector(self, *_args, **_kwargs):
+        return None
+
+    async def content(self):
+        return self.current
+
+    async def wait_for_timeout(self, _ms):
+        return None
+
+    async def query_selector(self, *_args, **_kwargs):
+        return None
+
+    async def evaluate(self, *_args, **_kwargs):
+        return None
+
+
+def _patch_browser_navigation(monkeypatch, scraper):
+    async def fake_navigate(page, _url, **_kwargs):
+        page.navigate()
+
+    async def no_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(scraper, "navigate_tiktok_page", fake_navigate)
+    monkeypatch.setattr(scraper.asyncio, "sleep", no_sleep)
+
+
+def test_browser_scan_rendered_deleted_post_is_unconfirmed_until_oembed_agrees(monkeypatch):
     import asyncio
 
     import scraper
 
     url = "https://www.tiktok.com/@a/video/7673695796168084756"
-    # Chromium render of a deleted post: localized message plus the api-data status.
-    content = DELETED_POST_API_DATA.replace(
-        '<div>Mở TikTok</div>',
-        '<p class="css-1osbocj-PMsgTitle e10waoic3">Trang này không khả dụng</p>',
-    ) % "10204"
+    _patch_browser_navigation(monkeypatch, scraper)
 
-    class FakePage:
-        url = "https://www.tiktok.com/@a/video/7673695796168084756"
-
-        async def wait_for_selector(self, *_args, **_kwargs):
-            return None
-
-        async def content(self):
-            return content
-
-        async def wait_for_timeout(self, _ms):
-            return None
-
-    async def fake_navigate(_page, _url, **_kwargs):
-        return None
-
-    monkeypatch.setattr(scraper, "navigate_tiktok_page", fake_navigate)
-
-    data, channel, status, page_url = asyncio.run(scraper.scrape_single_link(FakePage(), url))
-
-    assert status == "Error: Trang TikTok không khả dụng"
-    assert scraper.should_clear_stale_metrics(status) is True
+    data, channel, status, page_url = asyncio.run(scraper.scrape_single_link(_RenderedPage([DELETED_POST_RENDERED]), url))
+    assert scraper.should_clear_stale_metrics(status) is False
+    assert status == scraper.STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED
     assert all(value is None for value in data.values())
     assert page_url == url
+
+    asked = []
+    monkeypatch.setattr(scraper, "confirm_tiktok_post_gone", lambda link, *_a, **_k: asked.append(link) or True)
+    page = _RenderedPage([DELETED_POST_RENDERED])
+    _data, _channel, status, attempts, _resolved = asyncio.run(scraper.scrape_with_retries(page, url, retries=2))
+    # Page and oEmbed agree: confirmed gone, no further retries.
+    assert (status, attempts, asked) == (scraper.STATUS_TIKTOK_UNAVAILABLE, 1, [url])
+    assert scraper.should_clear_stale_metrics(status) is True
+
+
+def test_browser_transient_not_found_page_is_retried_not_final(monkeypatch):
+    import asyncio
+
+    import scraper
+
+    url = "https://www.tiktok.com/@a/video/7673695796168084756"
+    _patch_browser_navigation(monkeypatch, scraper)
+    monkeypatch.setattr(scraper, "confirm_tiktok_post_gone", lambda *_a, **_k: False, raising=False)
+
+    page = _RenderedPage([DELETED_POST_RENDERED, LIVE_POST_RENDERED])
+    data, _channel, status, attempts, _resolved = asyncio.run(scraper.scrape_with_retries(page, url, retries=2))
+    assert (status, attempts, data["Views"]) == ("Success", 2, "1214")
+
+    # Still "not found" after every retry while oEmbed says live: keep old numbers.
+    page = _RenderedPage([DELETED_POST_RENDERED])
+    _data, _channel, status, attempts, _resolved = asyncio.run(scraper.scrape_with_retries(page, url, retries=2))
+    assert attempts == 3
+    assert scraper.should_clear_stale_metrics(status) is False
 
 
 def test_parse_fetched_request_page_rejects_redirect_to_different_media_id():
@@ -1256,9 +1323,12 @@ def test_should_clear_stale_metrics_only_matches_terminal_statuses():
     from scraper import STATUS_TIKTOK_NO_STATS, should_clear_stale_metrics
 
     assert should_clear_stale_metrics(STATUS_TIKTOK_NO_STATS) is True
+    # Only a deletion confirmed by two independent signals clears numbers.
     assert should_clear_stale_metrics("Error: Trang TikTok không khả dụng") is True
-    assert should_clear_stale_metrics("Error: HTTP 404") is True
-    assert should_clear_stale_metrics("Error: HTTP 410 Gone") is True
+    from scraper import STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED
+    assert should_clear_stale_metrics(STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED) is False
+    assert should_clear_stale_metrics("Error: HTTP 404") is False
+    assert should_clear_stale_metrics("Error: HTTP 410 Gone") is False
     assert should_clear_stale_metrics("Error: Dịch vụ tạm thời không khả dụng") is False
 
 
@@ -1330,7 +1400,7 @@ def test_request_shell_retry_preserves_terminal_http_error(monkeypatch):
 
     assert calls["count"] == 2
     assert status == "Error: HTTP 404"
-    assert scraper.should_clear_stale_metrics(status) is True
+    assert scraper.is_suspected_gone_status(status) is True
 
 
 def test_request_prefers_exact_hidden_status_over_earlier_http_404(monkeypatch):
@@ -1445,28 +1515,6 @@ def test_collect_rows_binds_resolved_media_only_to_the_same_source_url():
     workbook.close()
 
 
-def test_scrape_with_retries_stops_after_terminal_browser_result(monkeypatch):
-    import asyncio
-    import scraper
-
-    calls = {"n": 0}
-
-    async def fake_scrape_single_link(*_args, **_kwargs):
-        calls["n"] += 1
-        empty = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
-        return empty, "", "Error: Trang TikTok không khả dụng", ""
-
-    monkeypatch.setattr(scraper, "scrape_single_link", fake_scrape_single_link)
-
-    result = asyncio.run(
-        scraper.scrape_with_retries(object(), "https://www.tiktok.com/@demo/video/1", retries=2)
-    )
-
-    assert calls["n"] == 1
-    assert result[2] == "Error: Trang TikTok không khả dụng"
-    assert result[3] == 1
-
-
 def test_select_fallback_result_preserves_terminal_request_evidence():
     from scraper import select_fallback_result
 
@@ -1474,7 +1522,7 @@ def test_select_fallback_result_preserves_terminal_request_evidence():
     request_result = {
         "data": empty,
         "channel_name": "",
-        "status": "Error: HTTP 404",
+        "status": "Error: Trang TikTok không khả dụng",
         "attempts": 1,
         "resolved_url": "",
     }
@@ -1513,27 +1561,141 @@ def test_scrape_link_breaks_early_on_no_stats(monkeypatch):
     assert status == scraper.STATUS_TIKTOK_NO_STATS
 
 
-def test_request_retries_stop_after_terminal_status(monkeypatch):
+REQUEST_LIVE_PAGE = """
+<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">
+{"__DEFAULT_SCOPE__":{"webapp.video-detail":{"statusCode":0,"itemInfo":{"itemStruct":{
+  "id":"7673695796168084756",
+  "stats":{"playCount":1214,"diggCount":30,"commentCount":4,"collectCount":2,"shareCount":1}
+}}}}}
+</script>
+"""
+
+
+def _request_scan(monkeypatch, pages, oembed_says_gone):
+    """Run the Request retry loop over scripted page answers (one per fetch)."""
+    import urllib.error
+
     import scraper
 
-    calls = {"n": 0}
+    url = "https://www.tiktok.com/@demo/video/7673695796168084756"
+    answers = list(pages)
+    asked = []
 
-    def fake_impl(url, timeout=30):
-        calls["n"] += 1
-        empty = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
-        return empty, "", "Error: HTTP 404", True, ""
+    def fake_fetch(candidate, **_kwargs):
+        answer = answers.pop(0) if len(answers) > 1 else answers[0]
+        if isinstance(answer, int):
+            raise urllib.error.HTTPError(candidate, answer, "Not Found", None, None)
+        return candidate, answer
 
-    monkeypatch.setattr(scraper, "_scrape_link_request_impl", fake_impl)
+    monkeypatch.setattr(scraper, "fetch_tiktok_html", fake_fetch)
     monkeypatch.setattr(scraper.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "confirm_tiktok_post_gone",
+                        lambda link, *_a, **_k: asked.append(link) or oembed_says_gone, raising=False)
+    data, _channel, status, attempts, _resolved = scraper.scrape_link_with_retries_request(
+        url, retries=2, channel_overrides={url.casefold(): "Kênh"},
+    )
+    return data, status, attempts, asked
 
-    _data, _channel, status, attempts, _resolved = scraper.scrape_link_with_retries_request(
-        "https://www.tiktok.com/@demo/video/1",
-        retries=2,
+
+def _write_over_old_numbers(status, data=None):
+    import openpyxl
+
+    import scraper
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Link", "Tên Kênh", "LƯỢT XEM", "TIM"])
+    ws.append(["https://www.tiktok.com/@demo/video/7673695796168084756", "Kênh", 1210, 30])
+    contexts = {"Data": {"worksheet": ws, "columns": {"channel": 2, "views": 3, "likes": 4}}}
+    item = {"sheet_name": "Data", "row": 2, "url": "https://www.tiktok.com/@demo/video/7673695796168084756"}
+    scraper.write_result(contexts, item, data or scraper.empty_metrics(), "Kênh", status)
+    return [ws.cell(row=2, column=3).value, ws.cell(row=2, column=4).value]
+
+
+def test_request_single_item_not_found_then_success_updates_numbers(monkeypatch):
+    item_not_found = DELETED_POST_UNIVERSAL % "10204"
+
+    data, status, attempts, _asked = _request_scan(
+        monkeypatch, [item_not_found, REQUEST_LIVE_PAGE], oembed_says_gone=False
     )
 
-    assert status == "Error: HTTP 404"
-    assert attempts == 1
-    assert calls["n"] == 1
+    assert (status, attempts) == ("Success", 2)
+    assert _write_over_old_numbers(status, data) == [1214, 30]
+
+
+@pytest.mark.parametrize("gone_page", ["item-not-found", 404])
+def test_request_unconfirmed_not_found_keeps_old_numbers(monkeypatch, gone_page):
+    page = DELETED_POST_UNIVERSAL % "10204" if gone_page == "item-not-found" else gone_page
+
+    # Every page fetch says "gone", but oEmbed still answers for the post.
+    _data, status, attempts, asked = _request_scan(monkeypatch, [page], oembed_says_gone=False)
+
+    assert _write_over_old_numbers(status) == [1210, 30]
+    assert attempts == 3
+    assert len(asked) == 1
+
+
+@pytest.mark.parametrize("gone_page", ["item-not-found", 404])
+def test_request_confirmed_deletion_clears_old_numbers(monkeypatch, gone_page):
+    import scraper
+
+    page = DELETED_POST_UNIVERSAL % "10204" if gone_page == "item-not-found" else gone_page
+
+    _data, status, attempts, asked = _request_scan(monkeypatch, [page], oembed_says_gone=True)
+
+    assert (status, attempts) == (scraper.STATUS_TIKTOK_UNAVAILABLE, 1)
+    assert asked == ["https://www.tiktok.com/@demo/video/7673695796168084756"]
+    assert _write_over_old_numbers(status) == [None, None]
+
+
+class _OembedResponse:
+    def __init__(self, body):
+        self.body = body
+
+    def read(self):
+        return self.body.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+@pytest.mark.parametrize("answer, verdict", [
+    ((200, '{"version":"1.0","type":"video","title":"x","author_unique_id":"demo"}'), False),
+    ((400, '{"message":"Something went wrong","code":400}'), True),
+    ((404, ""), True),
+    ((400, "<html>proxy error</html>"), None),
+    ((429, '{"message":"rate limited"}'), None),
+    ((503, ""), None),
+    (TimeoutError("timed out"), None),
+])
+def test_oembed_confirmation_verdicts(monkeypatch, answer, verdict):
+    import io
+    import urllib.error
+
+    import scraper
+
+    requested = []
+
+    def fake_urlopen(request, **_kwargs):
+        requested.append(request.full_url)
+        if isinstance(answer, Exception):
+            raise answer
+        code, body = answer
+        if code != 200:
+            raise urllib.error.HTTPError(request.full_url, code, "x", {}, io.BytesIO(body.encode("utf-8")))
+        return _OembedResponse(body)
+
+    monkeypatch.setattr(scraper, "urlopen_request", fake_urlopen)
+
+    assert scraper.confirm_tiktok_post_gone("https://www.tiktok.com/@demo/photo/7670401030210833685?_r=1") is verdict
+    # oEmbed rejects every /photo/ URL, so the photo id is asked in the /video/ form.
+    assert requested == [
+        "https://www.tiktok.com/oembed?url=https%3A%2F%2Fwww.tiktok.com%2F%40demo%2Fvideo%2F7670401030210833685"
+    ]
 
 
 def test_note_network_failure_pauses_after_streak(monkeypatch):
@@ -1650,7 +1812,7 @@ def test_write_result_clears_metrics_for_definitive_no_data_statuses():
     item = {"sheet_name": "Tháng 7", "row": 2, "url": "https://www.tiktok.com/@a/video/1"}
     empty = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
 
-    for status in (STATUS_TIKTOK_NO_STATS, "Error: Trang TikTok không khả dụng", "Error: HTTP 404"):
+    for status in (STATUS_TIKTOK_NO_STATS, "Error: Trang TikTok không khả dụng"):
         for column, value in zip(range(3, 8), (100, 10, 2, 3, 4)):
             ws.cell(row=2, column=column).value = value
 

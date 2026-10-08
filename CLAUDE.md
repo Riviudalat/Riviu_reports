@@ -53,7 +53,7 @@ Scrapers report progress through the `ConnectionManager` (`manager`) via `broadc
 ## Domain invariants (easy to break)
 
 - Missing or unavailable metrics stay **blank/None** on both platforms, in the workbook, previews, partner reports and Google pushes. Write `0` only for a confirmed zero. When scraping fails, keep the existing cell values, with two deliberate exceptions where the old numbers are cleared to blank:
-  - TikTok hidden stats, HTTP 404/410 and unavailable pages (`scraper.should_clear_stale_metrics`). The status column explains these.
+  - TikTok hidden stats, and TikTok posts **confirmed** gone (`scraper.should_clear_stale_metrics`). The status column explains these. TikTok intermittently answers "item not found" (statusCode 10204, a rendered "unavailable" page, or HTTP 404/410) for live posts, so such a page is only a suspicion: it is retried like any failure (and sent to the browser fallback in Hybrid), and it clears numbers only when TikTok's oEmbed endpoint also rejects the post id (`scraper.confirm_tiktok_post_gone`). Unconfirmed, it keeps the old values.
   - Threads unconfirmed views, per `docs/threads-scanning.md`.
 
   Totals (partner reports, Google pushes, previews, the "Tổng kết" sheet and dashboard) sum the known values and stay blank only when nothing in that column is known.

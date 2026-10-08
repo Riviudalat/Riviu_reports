@@ -539,8 +539,10 @@ def test_hybrid_does_not_send_confirmed_unavailable_pages_to_the_browser(monkeyp
     import asyncio
     import scraper
 
-    statuses = {"https://www.tiktok.com/@a/video/1": "Error: Trang TikTok không khả dụng",
-                "https://www.tiktok.com/@a/video/2": "Error: Không đọc được số liệu"}
+    statuses = {"https://www.tiktok.com/@a/video/1": scraper.STATUS_TIKTOK_UNAVAILABLE,
+                "https://www.tiktok.com/@a/video/2": scraper.STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED,
+                "https://www.tiktok.com/@a/video/3": "Error: HTTP 404",
+                "https://www.tiktok.com/@a/video/4": "Error: Không đọc được số liệu"}
     monkeypatch.setattr(scraper, "_run_request_scrape",
                         lambda _index, url, **_kwargs: (scraper.empty_metrics(), "", statuses[url], 1, ""))
 
@@ -553,6 +555,9 @@ def test_hybrid_does_not_send_confirmed_unavailable_pages_to_the_browser(monkeyp
         return [item["url"] for item in browser_queue._queue], [item["url"] for item in result_queue._queue]
 
     to_browser, finished = asyncio.run(scenario())
-    # A deleted/unavailable page is final in Request mode; only unreadable pages get the slow browser retry.
+    # Only a deletion confirmed by oEmbed is final in Request mode. A "not found"
+    # page that oEmbed did not confirm may be a transient answer for a live post,
+    # so it gets the browser retry like an unreadable page.
     assert finished == ["https://www.tiktok.com/@a/video/1"]
-    assert to_browser == ["https://www.tiktok.com/@a/video/2"]
+    assert to_browser == ["https://www.tiktok.com/@a/video/2", "https://www.tiktok.com/@a/video/3",
+                          "https://www.tiktok.com/@a/video/4"]
