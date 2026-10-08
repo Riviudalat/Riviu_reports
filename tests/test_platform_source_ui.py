@@ -1,9 +1,66 @@
 """Independent platform source rows and explicit workbook request contracts."""
 import json
+import re
 
 import pytest
 
-from test_ui_review_fixes import run_js
+from test_ui_review_fixes import ROOT, run_js
+
+
+FAKE_PLATFORM = """
+function withFakePlatform(entries) {
+    return Object.freeze({...entries, fakegram: Object.freeze({...entries.threads, key: 'fakegram', label: 'Fakegram',
+        icon: '/static/platform-icons/fakegram.svg',
+        dom: Object.freeze({button: 'platformFakegram', sourceLabel: 'sourceFileFakegram', url: 'fakegramUrlInput',
+            sync: 'fakegramSyncBtn', sheet: 'fakegramSheetSelect', push: 'fakegramPushBtn'})})});
+}
+"""
+
+
+def test_source_rows_are_rendered_from_the_platform_registry():
+    # A registry-only third entry must get its own wired source row; index.html is untouched.
+    from playwright.sync_api import sync_playwright
+
+    markup = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+    markup = re.sub(r"<script\b[^>]*>.*?</script>", "", markup, flags=re.DOTALL)
+    assert "data-source-platform" not in markup
+    script = (ROOT / "static" / "app.js").read_text(encoding="utf-8")
+    assert script.count("const PLATFORMS = Object.freeze({") == 1
+    script = FAKE_PLATFORM + script.replace("const PLATFORMS = Object.freeze({", "const PLATFORMS = withFakePlatform({")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.route("**/*", lambda route: route.abort())
+            page.set_content(markup)
+            page.evaluate("() => { window.WebSocket = class {static OPEN=1; constructor(){this.readyState=1;} send(){}}; }")
+            page.add_script_tag(content=script)
+            rows = page.evaluate("""() => [...document.querySelectorAll('#platformSourceRows > .platform-source-row')].map(row => {
+                const dom = PLATFORMS[row.dataset.sourcePlatform].dom;
+                const controls = sourceControls(row.dataset.sourcePlatform);
+                const owned = Object.entries(dom).filter(([role]) => role !== 'button')
+                    .every(([, id]) => document.querySelectorAll('#' + id).length === 1 && row.querySelector('#' + id));
+                return {platform: row.dataset.sourcePlatform, owned,
+                    controlsInRow: Object.values(controls).every(node => node && row.contains(node)),
+                    name: row.querySelector('.platform-source-name').textContent,
+                    icon: row.querySelector('.platform-brand-icon').getAttribute('src'),
+                    placeholder: controls.url.placeholder, sheetLabel: controls.sheet.getAttribute('aria-label'),
+                    sync: controls.sync.getAttribute('onclick'), push: controls.push.getAttribute('onclick'),
+                    pushDisabled: controls.push.disabled, file: controls.label.textContent};
+            })""")
+            assert [row["platform"] for row in rows] == ["tiktok", "threads", "fakegram"]
+            assert all(row["owned"] and row["controlsInRow"] for row in rows)
+            assert rows[2] == {"platform": "fakegram", "owned": True, "controlsInRow": True, "name": "Fakegram",
+                               "icon": "/static/platform-icons/fakegram.svg", "placeholder": "Link Google Sheet Fakegram",
+                               "sheetLabel": "Sheet Fakegram", "sync": "syncGoogleSheet('fakegram')",
+                               "push": "pushCurrentSheetToGoogle(event, 'fakegram')", "pushDisabled": True,
+                               "file": "Chưa chọn file"}
+            # The startup listeners found the generated row: typing edits only that platform's source.
+            page.fill("#fakegramUrlInput", "https://docs.google.com/spreadsheets/d/F/edit")
+            sources = page.evaluate("() => [platformSources.fakegram.url, platformSources.threads.url, platformSources.tiktok.url]")
+            assert sources == ["https://docs.google.com/spreadsheets/d/F/edit", "", ""]
+        finally:
+            browser.close()
 
 
 def test_platform_switch_restores_independent_sources_after_ack():

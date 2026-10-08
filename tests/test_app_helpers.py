@@ -46,7 +46,6 @@ def test_compact_workspace_keeps_global_workflows_and_unique_controls():
         "scrapeModeSelect",
         "proxyUseCheckbox",
         "scanSheetSelect",
-        "googleSheetUrlInput",
         "excelFileSelect",
         "reportModal",
         "historyModal",

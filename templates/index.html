@@ -191,38 +191,14 @@
             </div>
 
             <div class="controls-grid">
-                <div class="source-block">
+                <div class="source-block" id="platformSourceRows">
                     <div class="source-block-head">
                         <div class="source-icon"><span class="material-icons-outlined">link</span></div>
                         <div>
                             <div class="source-block-title">Nguồn Google Sheet</div>
                         </div>
                     </div>
-                    <!-- One row per PLATFORMS entry; ids must match its `dom` map in static/app.js -->
-                    <div class="field-stack platform-source-row" data-source-platform="tiktok">
-                        <div class="platform-source-label"><span class="platform-source-name"><img class="platform-brand-icon" src="/static/platform-icons/tiktok.svg" alt="" aria-hidden="true">TikTok</span> <span id="sourceFileTikTok" class="platform-source-file">Chưa chọn file</span></div>
-                        <div class="source-inline">
-                            <input class="text-input" id="googleSheetUrlInput" type="url" placeholder="Link Google Sheet TikTok" aria-label="Link Google Sheet TikTok">
-                            <button class="btn btn-primary btn-compact" id="syncSheetBtn" onclick="syncGoogleSheet('tiktok')">
-                                <span class="material-icons-outlined">sync</span> Nạp sheet
-                            </button>
-                        </div>
-                        <div class="google-action-row">
-                            <label class="scan-setting"><span>Sheet</span><select id="pushSheetSelect" class="sheet-select" aria-label="Sheet TikTok"></select></label>
-                            <button class="btn btn-soft btn-compact" id="pushGoogleBtn" onclick="pushCurrentSheetToGoogle(event, 'tiktok')" disabled><span class="material-icons-outlined">note_add</span> Tạo sheet</button>
-                        </div>
-                    </div>
-                    <div class="field-stack platform-source-row" data-source-platform="threads">
-                        <div class="platform-source-label"><span class="platform-source-name"><img class="platform-brand-icon" src="/static/platform-icons/threads.svg" alt="" aria-hidden="true">Threads</span> <span id="sourceFileThreads" class="platform-source-file">Chưa chọn file</span></div>
-                        <div class="source-inline">
-                            <input class="text-input" id="threadsGoogleSheetUrlInput" type="url" placeholder="Link Google Sheet Threads" aria-label="Link Google Sheet Threads">
-                            <button class="btn btn-primary btn-compact" id="threadsSyncSheetBtn" onclick="syncGoogleSheet('threads')"><span class="material-icons-outlined">sync</span> Nạp sheet</button>
-                        </div>
-                        <div class="google-action-row">
-                            <label class="scan-setting"><span>Sheet</span><select id="threadsPushSheetSelect" class="sheet-select" aria-label="Sheet Threads"></select></label>
-                            <button class="btn btn-soft btn-compact" id="threadsPushGoogleBtn" onclick="pushCurrentSheetToGoogle(event, 'threads')" disabled><span class="material-icons-outlined">note_add</span> Tạo sheet</button>
-                        </div>
-                    </div>
+                    <!-- One .platform-source-row per PLATFORMS entry is appended here by renderPlatformSourceRows() in static/app.js -->
                 </div>
 
                 <div class="source-block">

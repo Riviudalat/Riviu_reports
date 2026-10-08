@@ -26,9 +26,22 @@ function element(id = '') {
       contains(x){return classes.has(x);}, toggle(x,on){on ? classes.add(x) : classes.delete(x);}},
     addEventListener(){}, setAttribute(){}, appendChild(x){this.children.push(x);},
     prepend(x){this.children.unshift(x);}, querySelector(){return null;}, querySelectorAll(){return [];},
+    insertAdjacentHTML(_position, html){this.innerHTML += html; registerRenderedMarkup(html);},
     scrollTo(){}, focus(){}, closest(){return null;}};
 }
 function el(id) {if(!elements.has(id)) elements.set(id,element(id)); return elements.get(id);}
+// Markup that app.js renders itself (the PLATFORMS source rows) becomes the elements the
+// tests drive, so they exercise the generated rows rather than lazily invented stubs.
+const renderedIds = new Set();
+function registerRenderedMarkup(html) {
+  for (const [, tag, attrs] of html.matchAll(/<([a-z]+)\b([^>]*)>/g)) {
+    const id = attrs.match(/\sid="([^"]+)"/)?.[1];
+    if (!id) continue;
+    assert.ok(!elements.has(id), `rendered id ${id} already exists`);
+    const node = el(id); renderedIds.add(id);
+    node.tagName = tag.toUpperCase(); node.disabled = /\sdisabled(?=[\s>]|$)/.test(attrs);
+  }
+}
 const buttons = [el('platformTikTok'),el('platformThreads')];
 const document = {getElementById:el, body:element('body'), createElement:element,
   querySelector(){return null;}, querySelectorAll(selector){return selector==='.platform-option'?buttons:[];},
@@ -45,6 +58,11 @@ const context = vm.createContext({console,document,WebSocket,Map,Set,Date,Number
   setTimeout(){},clearTimeout(){},localStorage:{getItem(){return null;},setItem(){}},
   fetch:async()=>({ok:true,json:async()=>({})}),assert,el,sent,sockets,buttons});
 vm.runInContext(fs.readFileSync('static/app.js','utf8'),context);
+for (const config of Object.values(vm.runInContext('PLATFORMS',context))) {
+  for (const [role, id] of Object.entries(config.dom)) {
+    if (role !== 'button') assert.ok(renderedIds.has(id), `${config.key} source row did not render #${id}`);
+  }
+}
 // Suppress unrelated presentation / asynchronous API edges, not scan routing/rendering.
 vm.runInContext(`const originalLoadPreview=loadPreview; const originalUpdateFileList=updateFileList;
   const originalSetGooglePushState=setGooglePushState;
