@@ -1,23 +1,11 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Main window capabilities for Riviu Reports.",
+  "description": "Bundled loading page only. The sidecar is spawned from Rust and the loopback UI gets its two updater commands from the runtime 'loopback-updater' capability in lib.rs.",
   "windows": [
     "main"
   ],
   "permissions": [
-    "core:default",
-    "allow-check-for-update",
-    "allow-install-update",
-    {
-      "identifier": "shell:allow-spawn",
-      "allow": [
-        {
-          "name": "binaries/riviu-server",
-          "sidecar": true,
-          "args": true
-        }
-      ]
-    }
+    "core:default"
   ]
 }

@@ -12,8 +12,10 @@ from app import app
 
 def register_desktop_routes(server, shutdown_token: str) -> None:
     def require_desktop_token(request: Request) -> None:
-        supplied = request.headers.get("x-riviu-shutdown", "")
-        if not shutdown_token or not secrets.compare_digest(supplied, shutdown_token):
+        # Compare bytes: str compare_digest raises TypeError (HTTP 500) on
+        # non-ASCII header values instead of rejecting them with 403.
+        supplied = request.headers.get("x-riviu-shutdown", "").encode("utf-8")
+        if not shutdown_token or not secrets.compare_digest(supplied, shutdown_token.encode("utf-8")):
             raise HTTPException(status_code=403)
 
     @app.post("/_desktop/prepare-update", include_in_schema=False)

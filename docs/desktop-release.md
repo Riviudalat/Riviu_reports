@@ -36,6 +36,26 @@ The installed app checks the release `latest.json` at startup and then every
 five minutes. When a newer release is available, it downloads, installs, and
 restarts automatically.
 
+## Sidecar lifecycle
+
+- At launch the Tauri shell generates a random 256-bit shutdown token (OS
+  CSPRNG) and passes it to the sidecar as `RIVIU_SHUTDOWN_TOKEN`. The
+  `/_desktop/prepare-update`, `/_desktop/cancel-update` and `/_desktop/shutdown`
+  routes skip the session cookie, so they accept only this token (compared in
+  constant time); an empty token rejects every request.
+- The sidecar is spawned from Rust. The bundled loading page has only
+  `core:default`, and the loopback UI receives just the `check_for_update` and
+  `install_update` commands through the runtime `loopback-updater` capability;
+  no web page gets shell permissions.
+- When the app exits, the shell asks the sidecar to shut down and waits up to
+  5 seconds for it to exit, so the PyInstaller one-file bootloader can remove
+  its `_MEI*` temp folder, before it force-kills the process.
+- An update first calls `prepare-update`, which is refused while a scan or
+  source operation is running. On Windows the updater starts the NSIS installer
+  and ends the process without a normal exit event, so the sidecar is stopped in
+  the updater's pre-exit hook. That keeps `riviu-server.exe` and Chromium from
+  holding the executable open while the installer replaces it.
+
 The repository secrets `TAURI_SIGNING_PRIVATE_KEY` and
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` are required for the updater and have been
 configured in the repository. Keep the private key outside the repository.

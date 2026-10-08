@@ -1,20 +1,37 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use tauri::ipc::CapabilityBuilder;
 use tauri::{AppHandle, Manager, RunEvent};
-use tauri_plugin_shell::process::CommandChild;
+use tauri_plugin_shell::process::{CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_updater::UpdaterExt;
 use url::Url;
+
+/// How long a graceful `/_desktop/shutdown` may take before the sidecar is
+/// force-killed. The PyInstaller one-file bootloader needs this time to wait for
+/// Python (and its Chromium children) and delete its `_MEI*` extraction folder.
+const SERVER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
 
 struct ServerState {
     port: u16,
     shutdown_token: String,
     child: Mutex<Option<CommandChild>>,
+    /// Set once the sidecar process has terminated (its event channel closed).
+    exited: Arc<AtomicBool>,
+}
+
+/// 256-bit token from the OS CSPRNG. The `/_desktop/*` routes skip the session
+/// cookie and rely only on this value, so it must not be guessable by other
+/// local processes (unlike a PID or start time).
+fn generate_shutdown_token() -> String {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).expect("OS random number generator is unavailable");
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn reserve_loopback_port() -> std::io::Result<u16> {
@@ -24,10 +41,13 @@ fn reserve_loopback_port() -> std::io::Result<u16> {
     Ok(port)
 }
 
-fn wait_for_server(port: u16) -> Result<(), String> {
+fn wait_for_server(port: u16, exited: &AtomicBool) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(45);
     let address = format!("127.0.0.1:{port}");
     while Instant::now() < deadline {
+        if exited.load(Ordering::SeqCst) {
+            return Err("Riviu Reports server exited during startup.".to_string());
+        }
         if TcpStream::connect_timeout(
             &address
                 .parse::<SocketAddr>()
@@ -57,8 +77,20 @@ fn start_server(app: &AppHandle, state: &ServerState) -> Result<(), String> {
         .env("RIVIU_PORT", state.port.to_string())
         .env("RIVIU_SHUTDOWN_TOKEN", &state.shutdown_token)
         .env("RIVIU_DATA_DIR", data_dir.to_string_lossy().to_string());
-    let (_receiver, child) = command.spawn().map_err(|error| error.to_string())?;
-    if let Err(error) = wait_for_server(state.port) {
+    let (mut receiver, child) = command.spawn().map_err(|error| error.to_string())?;
+    // Drain the sidecar's events so stop_server can tell when the process (and
+    // its inherited stdout/stderr handles) are really gone.
+    let exited = state.exited.clone();
+    exited.store(false, Ordering::SeqCst);
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = receiver.recv().await {
+            if matches!(event, CommandEvent::Terminated(_)) {
+                break;
+            }
+        }
+        exited.store(true, Ordering::SeqCst);
+    });
+    if let Err(error) = wait_for_server(state.port, &state.exited) {
         let _ = child.kill();
         return Err(error);
     }
@@ -79,8 +111,19 @@ async fn check_for_update(app: AppHandle) -> Result<Option<String>, String> {
 
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<(), String> {
+    // On Windows the updater launches the NSIS installer and then calls
+    // `std::process::exit(0)`, so RunEvent::Exit never fires. Stop the sidecar
+    // in the pre-exit hook; otherwise riviu-server.exe (and Chromium) would be
+    // orphaned and keep the executable locked while the installer replaces it.
+    // This replaces the plugin's default hook, so keep its cleanup call too.
+    let exit_handle = app.clone();
     let Some(update) = app
-        .updater()
+        .updater_builder()
+        .on_before_exit(move || {
+            stop_server(&exit_handle);
+            exit_handle.cleanup_before_exit();
+        })
+        .build()
         .map_err(|error| error.to_string())?
         .check()
         .await
@@ -146,28 +189,35 @@ fn request_server_action(port: u16, shutdown_token: &str, path: &str) -> Result<
     }
 }
 
+/// Ask the sidecar to shut down, wait (bounded) for it to exit on its own, and
+/// only force-kill it if it is still running. Idempotent: the child is taken
+/// out of the state, so later calls (ExitRequested then Exit) return at once.
 fn stop_server(app: &AppHandle) {
-    if let Some(state) = app.try_state::<ServerState>() {
-        let _ = request_server_action(state.port, &state.shutdown_token, "/_desktop/shutdown");
-        if let Ok(mut child) = state.child.lock() {
-            if let Some(child) = child.take() {
-                thread::sleep(Duration::from_millis(300));
-                let _ = child.kill();
-            }
+    let Some(state) = app.try_state::<ServerState>() else {
+        return;
+    };
+    let child = state
+        .child
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    let Some(child) = child else {
+        return;
+    };
+    if request_server_action(state.port, &state.shutdown_token, "/_desktop/shutdown").is_ok() {
+        let deadline = Instant::now() + SERVER_EXIT_TIMEOUT;
+        while !state.exited.load(Ordering::SeqCst) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(100));
         }
+    }
+    if !state.exited.load(Ordering::SeqCst) {
+        let _ = child.kill();
     }
 }
 
 pub fn run() {
     let port = reserve_loopback_port().expect("failed to reserve a local port");
-    let shutdown_token = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock before Unix epoch")
-            .as_nanos()
-    );
+    let shutdown_token = generate_shutdown_token();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -175,6 +225,7 @@ pub fn run() {
             port,
             shutdown_token,
             child: Mutex::new(None),
+            exited: Arc::new(AtomicBool::new(false)),
         })
         .setup(|app| {
             let handle = app.handle();
