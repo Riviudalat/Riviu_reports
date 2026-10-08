@@ -110,6 +110,7 @@ let activeWorkspaceTab = 'sheet';
 let pendingLiveResults = 0;
 let desktopUpdateCheckInFlight = false;
 let desktopUpdateInstalling = false;
+let desktopStartupUpdatePending = false;
 let websocketSessionReady = false;
 const WS_RECONNECT_BASE_MS = 1000;
 const WS_RECONNECT_MAX_MS = 30000;
@@ -1844,6 +1845,10 @@ function handleSessionSnapshot(session) {
         setWorkspaceTab('live');
     }
     syncScanControls();
+    if (desktopStartupUpdatePending) {
+        desktopStartupUpdatePending = false;
+        void checkDesktopUpdate();
+    }
 }
 
 function connectWS() {
@@ -2399,9 +2404,11 @@ async function checkDesktopUpdate() {
     }
 }
 
+// The socket is still connecting here, so checkDesktopUpdate() would return early;
+// the first check runs from the first session snapshot instead.
 function scheduleDesktopUpdates() {
     if (!desktopUpdaterInvoke()) return;
-    void checkDesktopUpdate();
+    desktopStartupUpdatePending = true;
     window.setInterval(() => void checkDesktopUpdate(), 5 * 60 * 1000);
 }
 

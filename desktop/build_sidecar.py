@@ -15,6 +15,18 @@ ROOT = Path(__file__).resolve().parents[1]
 SIDECAR_NAME = "riviu-server"
 
 
+def uses_onedir(platform_name: str) -> bool:
+    """Windows ships a one-folder build as Tauri resources (see docs/desktop-release.md).
+
+    A one-file build unpacks Python and the bundled Chromium into a fresh temp
+    folder on every launch, which Windows Defender then rescans. macOS and Linux
+    keep the one-file externalBin sidecar, because Tauri's resource copy does not
+    keep the directory symlinks that the nested Chromium.app framework and
+    PyInstaller's symlinked libraries rely on.
+    """
+    return platform_name == "win32"
+
+
 def default_target() -> str:
     machine = platform.machine().lower()
     if sys.platform == "win32":
@@ -41,6 +53,7 @@ def main() -> None:
     spec_dir = build_root / "spec"
     output_dir = ROOT / "src-tauri" / "binaries"
     output_dir.mkdir(parents=True, exist_ok=True)
+    onedir = uses_onedir(sys.platform)
 
     shutil.rmtree(build_root, ignore_errors=True)
     for directory in (dist_dir, work_dir, spec_dir):
@@ -62,7 +75,7 @@ def main() -> None:
         "PyInstaller",
         "--noconfirm",
         "--clean",
-        "--onefile",
+        "--onedir" if onedir else "--onefile",
         "--name",
         SIDECAR_NAME,
         "--distpath",
@@ -113,6 +126,17 @@ def main() -> None:
         # Windows uses ctypes DPAPI and does not install or bundle keyring.
         command[-1:-1] = ["--exclude-module", "keyring"]
     subprocess.run(command, cwd=ROOT, check=True, env=playwright_env)
+
+    if onedir:
+        # tauri.windows.conf.json maps this folder to <install dir>/riviu-server.
+        built_dir = dist_dir / SIDECAR_NAME
+        if not (built_dir / f"{SIDECAR_NAME}{extension}").exists():
+            raise FileNotFoundError(f"PyInstaller did not create {built_dir}")
+        bundled_dir = output_dir / SIDECAR_NAME
+        shutil.rmtree(bundled_dir, ignore_errors=True)
+        shutil.copytree(built_dir, bundled_dir)
+        print(bundled_dir)
+        return
 
     built_binary = dist_dir / f"{SIDECAR_NAME}{extension}"
     if not built_binary.exists():

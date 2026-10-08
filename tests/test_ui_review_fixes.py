@@ -472,6 +472,24 @@ def test_desktop_update_does_not_install_during_scan_or_on_reconnect_before_snap
     """)
 
 
+def test_desktop_startup_update_check_runs_once_the_first_session_snapshot_arrives():
+    # Startup order in app.js: connectWS() then scheduleDesktopUpdates(), before the socket opens.
+    run_js("""
+      (async()=>{
+        const calls=[];
+        window.__TAURI__={core:{invoke:async(name)=>{calls.push(name);return null;}}};
+        connectWS(); scheduleDesktopUpdates();
+        await Promise.resolve(); assert.deepEqual(calls,[]);
+        const idle={type:'session',data:{running:false}};
+        sockets[0].onmessage({data:JSON.stringify(idle)});
+        assert.deepEqual(calls,['check_for_update']);
+        await Promise.resolve(); await Promise.resolve();
+        sockets[0].onmessage({data:JSON.stringify(idle)});
+        assert.deepEqual(calls,['check_for_update']);
+      })()
+    """)
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows batch expansion regression")
 def test_update_batch_finds_venv_python_in_a_fresh_shell(tmp_path):
     source = (ROOT / "capnhat.bat").read_text(encoding="utf-8")
