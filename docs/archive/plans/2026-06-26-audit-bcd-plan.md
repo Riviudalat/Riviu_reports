@@ -8,7 +8,7 @@
 
 **Tech Stack:** Python 3.11+, FastAPI, urllib/Playwright scraper, vanilla JS, PySocks (new)
 
-**Spec:** `docs/specs/2026-06-26-audit-bcd-design.md`
+**Spec:** `docs/archive/specs/2026-06-26-audit-bcd-design.md`
 
 ---
 
@@ -231,7 +231,7 @@ def static_asset_version(base_dir: str) -> str:
 
 ## Execution handoff
 
-Plan saved to `docs/plans/2026-06-26-audit-bcd-plan.md`.
+Plan saved to `docs/archive/plans/2026-06-26-audit-bcd-plan.md`.
 
 **Options:**
 1. **Subagent-Driven** — one subagent per task, review between tasks

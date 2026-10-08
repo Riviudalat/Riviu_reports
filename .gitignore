@@ -27,7 +27,10 @@ probe_scrape_result.json
 
 # Script test local (có thể chứa credential proxy)
 scripts/
+
+# Local agent/plugin scratch (tracked specs live in docs/archive/)
 docs/superpowers/
+.claude/worktrees/
 
 # Desktop build dependencies and generated bundles
 node_modules/
