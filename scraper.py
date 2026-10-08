@@ -616,6 +616,22 @@ def clear_existing_total_rows(workbook, sheet_name=None):
     return cleared
 
 
+def last_occupied_row(sheet):
+    """Last row below the header with any value, or 1.
+
+    max_row/max_column scan every cell on each access, so read them once and
+    walk up from the bottom: one pass at most, usually a single row.
+    """
+    max_column = sheet.max_column
+    for row_index in range(sheet.max_row, 1, -1):
+        row_values = next(sheet.iter_rows(
+            min_row=row_index, max_row=row_index, max_col=max_column, values_only=True,
+        ))
+        if any(value is not None for value in row_values):
+            return row_index
+    return 1
+
+
 def append_sheet_total_rows(workbook, sheet_name=None):
     for sheet_name in selected_data_sheet_names(workbook, sheet_name):
         sheet = workbook[sheet_name]
@@ -631,11 +647,7 @@ def append_sheet_total_rows(workbook, sheet_name=None):
         if not link_rows:
             continue
         columns = ensure_columns(sheet)
-        occupied_rows = [
-            row_index for row_index in range(2, sheet.max_row + 1)
-            if any(cell.value is not None for cell in sheet[row_index])
-        ]
-        total_row = max(occupied_rows, default=1) + 1
+        total_row = last_occupied_row(sheet) + 1
         sheet.cell(row=total_row, column=url_column).value = "TỔNG"
         # Sum only TikTok rows; contiguous ranges keep large-sheet formulas short.
         ranges = []

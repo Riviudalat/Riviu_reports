@@ -556,3 +556,39 @@ def test_hybrid_does_not_send_confirmed_unavailable_pages_to_the_browser(monkeyp
     # A deleted/unavailable page is final in Request mode; only unreadable pages get the slow browser retry.
     assert finished == ["https://www.tiktok.com/@a/video/1"]
     assert to_browser == ["https://www.tiktok.com/@a/video/2"]
+
+
+def test_total_row_placement_does_constant_whole_sheet_scans(monkeypatch):
+    # max_row/max_column walk every cell; one walk per row made TỔNG placement
+    # quadratic (minutes on a 3,674 x 68 workbook, all of it on the event loop).
+    from openpyxl.worksheet.worksheet import Worksheet
+
+    scans = []
+    for name in ("max_row", "max_column"):
+        getter = getattr(Worksheet, name).fget
+
+        def counted(sheet, _getter=getter):
+            scans.append(1)
+            return _getter(sheet)
+
+        monkeypatch.setattr(Worksheet, name, property(counted))
+
+    def scans_for(rows):
+        book = openpyxl.Workbook()
+        sheet = book.active
+        sheet.title = "Data"
+        sheet.append(["Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ", *[f"X{i}" for i in range(30)]])
+        for index in range(rows):
+            sheet.append([f"https://www.tiktok.com/@demo/video/{index + 1}", "Demo", 10, 1, 0, 0, 0])
+        sheet.append(["Ghi chú", "footer"])
+        # Styled but empty rows below the data must not push TỔNG further down.
+        sheet.cell(row=rows + 5, column=3).fill = openpyxl.styles.PatternFill("solid", fgColor="FFFF00")
+        scans.clear()
+        scraper.append_sheet_total_rows(book, sheet_name="Data")
+        assert sheet.cell(row=rows + 3, column=1).value == "TỔNG"
+        assert sheet.cell(row=rows + 3, column=3).value == f"=SUM(C2:C{rows + 1})"
+        return len(scans)
+
+    small, large = scans_for(50), scans_for(400)
+    assert small == large
+    assert large < 100  # the old per-row walk made 400+ here
