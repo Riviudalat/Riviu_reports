@@ -1,9 +1,11 @@
 import asyncio
+import contextlib
 import html
 import json
 import os
 import random
 import re
+import sys
 import threading
 import time
 import unicodedata
@@ -242,6 +244,12 @@ MAX_WORKERS = 50
 DEFAULT_WORKERS = 5
 DEFAULT_RETRIES = 2
 DEFAULT_SAVE_EVERY = 25
+# A finished scan waits at most this long for Chromium to exit gracefully; past
+# it, stopping Playwright force-kills the browser and reaping continues in the
+# background (see playwright_session).
+BROWSER_CLOSE_TIMEOUT = 3.0
+PLAYWRIGHT_STOP_TIMEOUT = 2.0
+_BROWSER_REAPERS = set()
 DEFAULT_REQUEST_TIMEOUT = 30
 MAX_BROWSER_FALLBACK_WORKERS = 15
 RESULT_SHEET_HEADERS = [
@@ -3004,20 +3012,60 @@ async def _consume_scan_results(scan, result_queue, workers):
         result_queue.task_done()
 
 
-async def _close_browser(browser):
+def browser_cleanup_pending():
+    """True while a Chromium from a finished scan is still being force-killed."""
+    return any(not task.done() for task in _BROWSER_REAPERS)
+
+
+def _track_reaper(task):
+    _BROWSER_REAPERS.add(task)
+
+    def finished(done):
+        _BROWSER_REAPERS.discard(done)
+        if not done.cancelled():
+            # Retrieved here: a teardown error after the scan is not a scan failure.
+            done.exception()
+
+    task.add_done_callback(finished)
+    return task
+
+
+async def close_browser_bounded(browser):
+    """Ask Chromium to exit, but never let a slow exit hold a finished scan open.
+
+    Chromium's exit (even after a forced kill) can take tens of seconds on a busy
+    Windows machine. After BROWSER_CLOSE_TIMEOUT the caller's playwright_session()
+    stops the driver, which force-kills every browser still closing.
+    """
     if browser is None:
         return
+
+    async def close():
+        # Contexts close in parallel; browser.close() then ends the process.
+        await asyncio.gather(*(ctx.close() for ctx in list(getattr(browser, "contexts", []))), return_exceptions=True)
+        await browser.close()
+
+    await asyncio.wait({_track_reaper(asyncio.ensure_future(close()))}, timeout=BROWSER_CLOSE_TIMEOUT)
+
+
+@contextlib.asynccontextmanager
+async def playwright_session(factory):
+    """``async with factory()`` whose driver stop is bounded by PLAYWRIGHT_STOP_TIMEOUT.
+
+    Stopping closes the driver's stdin at once; the driver then force-kills its
+    browsers (taskkill /T /F on Windows) and exits on its own, even if this
+    process does not wait. A stop still running after the bound keeps reaping in
+    the background and is reported by browser_cleanup_pending().
+    """
+    manager = factory()
+    playwright = await manager.__aenter__()
     try:
-        for ctx in list(browser.contexts):
-            try:
-                await ctx.close()
-            except Exception:
-                pass
+        yield playwright
     finally:
-        try:
-            await browser.close()
-        except Exception:
-            pass
+        stop = _track_reaper(asyncio.ensure_future(manager.__aexit__(*sys.exc_info())))
+        done, _pending = await asyncio.wait({stop}, timeout=PLAYWRIGHT_STOP_TIMEOUT)
+        if done:
+            stop.result()
 
 
 async def _shutdown_scan(scan, workers, finalize_task, browser, executor):
@@ -3037,7 +3085,7 @@ async def _shutdown_scan(scan, workers, finalize_task, browser, executor):
                 raise RuntimeError("Lưu file Excel khi dừng quét thất bại; kết quả mới chưa được lưu.")
     finally:
         # File errors must not skip browser/thread/proxy cleanup.
-        await _close_browser(browser)
+        await close_browser_bounded(browser)
         executor.shutdown(wait=False, cancel_futures=True)
         set_session_proxies([])
         # Allow the Playwright Node transport to drain.
@@ -3198,7 +3246,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     for _ in range(request_worker_count if use_request else browser_worker_count):
         await work_queue.put(None)
 
-    async with async_playwright() as playwright:
+    async with playwright_session(async_playwright) as playwright:
         # One pool per run, sized to its workers: request scrapes and profile
         # lookups never queue behind other runs or behind workbook saves.
         executor = ThreadPoolExecutor(max_workers=max(scan.active_worker_count, 1), thread_name_prefix="riviu-tiktok")

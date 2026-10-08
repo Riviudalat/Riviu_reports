@@ -7,6 +7,7 @@ import uvicorn
 from fastapi import HTTPException, Request
 
 import app as app_state
+import scraper
 from app import app
 
 
@@ -22,7 +23,9 @@ def register_desktop_routes(server, shutdown_token: str) -> None:
     async def prepare_update(request: Request):
         require_desktop_token(request)
         # No await between checking the single-process state and acquiring the gate.
-        if app_state.scan_running() or app_state.SOURCE_BUSY or app_state.DESKTOP_UPDATE_PENDING:
+        # A finished scan's force-killed Chromium may still be exiting and lock bundled files.
+        if (app_state.scan_running() or app_state.SOURCE_BUSY or app_state.DESKTOP_UPDATE_PENDING
+                or scraper.browser_cleanup_pending()):
             raise HTTPException(status_code=409, detail="Scan or file operation is in progress")
         app_state.DESKTOP_UPDATE_PENDING = True
         return {"ready": True}
