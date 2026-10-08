@@ -617,27 +617,53 @@ def test_non_windows_rejects_non_native_or_unavailable_backend(tmp_path, monkeyp
         session.SecureStore(tmp_path).load()
 
 
-@pytest.mark.parametrize("platform,expected", [("win32", None), ("darwin", "keyring.backends.macOS"),
-                                               ("linux", "keyring.backends.SecretService")])
-def test_sidecar_native_backend_collection_without_build(tmp_path, monkeypatch, platform, expected):
+SIDECAR_DRY_RUN = (
+    "Chrome Headless Shell 147.0.7727.15 (playwright chromium-headless-shell v1217)\n"
+    "  Install location:    /pkg/playwright/driver/package/.local-browsers/chromium_headless_shell-1217\n"
+    "FFmpeg (playwright ffmpeg v1011)\n"
+    "  Install location:    /pkg/playwright/driver/package/.local-browsers/ffmpeg-1011\n"
+)
+SIDECAR_BROWSER_FILE = "playwright/driver/package/.local-browsers/{}/chrome-headless-shell.exe"
+
+
+def fake_sidecar_build(tmp_path, monkeypatch, platform, bundled_browsers=("chromium_headless_shell-1217",)):
+    """Run build_sidecar.main() with synthetic Playwright and PyInstaller runs."""
+    import subprocess
     from desktop import build_sidecar
     calls = []
     monkeypatch.setattr(build_sidecar, "ROOT", tmp_path)
     monkeypatch.setattr(build_sidecar.sys, "platform", platform)
     monkeypatch.setattr(build_sidecar.sys, "argv", ["build_sidecar.py", "--target", "synthetic-target"])
     extension = ".exe" if platform == "win32" else ""
+    browser_files = [SIDECAR_BROWSER_FILE.format(name) for name in bundled_browsers]
     def subprocess_run(command, **kwargs):
-        calls.append(command)
+        calls.append((command, kwargs["env"]))
+        if "--dry-run" in command:
+            return subprocess.CompletedProcess(command, 0, stdout=SIDECAR_DRY_RUN, stderr="")
         if "PyInstaller" in command:
             destination = Path(command[command.index("--distpath") + 1])
             if "--onedir" in command:
                 destination = destination / build_sidecar.SIDECAR_NAME
                 (destination / "_internal").mkdir(parents=True)
                 (destination / "_internal" / "python312.dll").write_bytes(b"synthetic-runtime")
+                for name in browser_files:
+                    (destination / "_internal" / name).parent.mkdir(parents=True, exist_ok=True)
+                    (destination / "_internal" / name).write_bytes(b"synthetic-browser")
             (destination / (build_sidecar.SIDECAR_NAME + extension)).write_bytes(b"synthetic-binary")
+        return subprocess.CompletedProcess(command, 0)
     monkeypatch.setattr(build_sidecar.subprocess, "run", subprocess_run)
+    if platform != "win32":
+        # A synthetic one-file binary has no PyInstaller archive to list.
+        monkeypatch.setattr(build_sidecar, "bundle_paths", lambda built: browser_files)
     build_sidecar.main()
-    command = calls[-1]
+    return calls
+
+
+@pytest.mark.parametrize("platform,expected", [("win32", None), ("darwin", "keyring.backends.macOS"),
+                                               ("linux", "keyring.backends.SecretService")])
+def test_sidecar_native_backend_collection_without_build(tmp_path, monkeypatch, platform, expected):
+    calls = fake_sidecar_build(tmp_path, monkeypatch, platform)
+    command, env = calls[-1]
     binaries = tmp_path / "src-tauri" / "binaries"
     if platform == "win32":
         # Windows ships the one-folder build as Tauri resources (tauri.windows.conf.json).
@@ -654,7 +680,22 @@ def test_sidecar_native_backend_collection_without_build(tmp_path, monkeypatch, 
         assert "keyrings.alt" in command and "keyring.backends.chainer" in command
     else:
         assert "keyring" in command and not (tmp_path / "build" / "desktop-sidecar" / "native-hooks").exists()
-    assert len(calls) == 2
+    # Only the headless shell is installed and handed to the Playwright hook; the
+    # video-only FFmpeg download is left out.
+    install = [arguments for arguments, _ in calls if "playwright" in arguments and "--dry-run" not in arguments]
+    assert install == [[sys.executable, "-m", "playwright", "install", "--only-shell", "chromium"]]
+    assert env["PLAYWRIGHT_BROWSERS_PATH"] == "0"
+    assert env["RIVIU_BUNDLED_BROWSERS"] == "chromium_headless_shell-1217"
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_sidecar_build_fails_when_a_stale_full_chromium_is_bundled(tmp_path, monkeypatch, platform):
+    stale = ("chromium_headless_shell-1217", "chromium-1217")
+    with pytest.raises(RuntimeError, match="chromium-1217"):
+        fake_sidecar_build(tmp_path, monkeypatch, platform, bundled_browsers=stale)
+    binaries = tmp_path / "src-tauri" / "binaries"
+    assert not (binaries / "riviu-server").exists() and not (binaries / "riviu-server-synthetic-target").exists()
 
 
 def test_non_windows_native_unavailable_fails_closed(tmp_path, monkeypatch):

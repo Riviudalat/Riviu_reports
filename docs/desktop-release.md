@@ -2,9 +2,9 @@
 
 Riviu Reports ships as a Tauri desktop application for Windows, macOS, and Linux. The
 Tauri shell launches the bundled FastAPI server only on `127.0.0.1`, then loads
-the existing report UI in the desktop window. Chromium is bundled with the
-sidecar, so a fresh desktop installation can run scans without a separate
-Playwright browser install.
+the existing report UI in the desktop window. Playwright's Chromium headless
+shell is bundled with the sidecar, so a fresh desktop installation can run scans
+without a separate Playwright browser install.
 
 ## Local development
 
@@ -24,8 +24,46 @@ directory rather than in the installed application bundle.
 ## Server packaging
 
 `desktop/build_sidecar.py` builds `riviu-server` with PyInstaller. Chromium is
-bundled inside it (`PLAYWRIGHT_BROWSERS_PATH=0`). The layout depends on the
-platform:
+bundled inside it (`PLAYWRIGHT_BROWSERS_PATH=0`).
+
+### What the bundle contains
+
+Every browser launch in the app (`scraper.py`, `threads_scraper.py`,
+`threads_session.py`) is headless Chromium without a `channel`. Playwright runs
+those launches with `chromium-headless-shell`, never with the full Chromium
+build. The build therefore runs `playwright install --only-shell chromium`, and
+the hooks in `desktop/pyinstaller-hooks/` (using `desktop/bundle_contents.py`)
+leave out the following:
+
+- **Every browser folder that the headless-shell install does not list.** This
+  includes a full `chromium-<rev>` that an earlier `playwright install chromium`
+  left in the package-local browsers folder. Nothing is deleted from that
+  folder. The build fails if the finished bundle holds any other browser folder.
+- **FFmpeg.** Playwright only uses it to record videos, and the app never
+  records them. `winldd` stays, because Playwright runs it to re-check
+  Chromium's DLLs once the bundled `DEPENDENCIES_VALIDATED` marker is older than
+  30 days.
+- **Google discovery documents other than `sheets.v4`.** `googleapiclient`
+  ships about 600 of them, 100 MB in total, and `google_sheets_sync.py` only
+  builds the Sheets v4 client. A test fails if the code builds an API that is
+  not in `GOOGLE_DISCOVERY_DOCS`, and another fails if a launch stops being
+  headless Chromium.
+
+Effect on the Windows build, measured on the same test machine:
+
+| | Before | After |
+| --- | --- | --- |
+| NSIS installer | 271 MB | 150 MB |
+| Installed files | 2,620 | 1,708 |
+| Installed size | 1,003 MB | 494 MB |
+| Silent fresh install (two runs) | 76 s, 85 s | 54 s, 28 s |
+| Server's first response, first launch | 3.5 s, 6.6 s | 2.3 s, 2.5 s |
+| Server's first response, later launches | 2.5-4.1 s | 1.6-1.8 s |
+
+The installed app answered 2.2-2.6 s after its process started. The machine
+was busy with other work during these runs, so treat the times as rough.
+
+The layout depends on the platform:
 
 - **Windows: one-folder build shipped as bundle resources.** The build is copied
   to `src-tauri/binaries/riviu-server/`. `tauri.windows.conf.json` maps that
@@ -36,8 +74,8 @@ platform:
   server took 24-31 s to answer its first request as one file, and 1.6-2.7 s as
   one folder (7.7 s on the very first launch, while Defender scans the newly
   installed files). In the installed app it answered about 2.2 s after the app
-  process started. The trade-off is that the installer now writes about 2,600
-  files. A silent install took 40-65 s on the test machine.
+  process started. The trade-off is that the installer writes one file per
+  bundled file (about 1,700; see the table above).
 - **macOS and Linux: one-file `externalBin` sidecar**
   (`binaries/riviu-server-<target triple>`, set in `tauri.macos.conf.json` and
   `tauri.linux.conf.json`). The one-folder layout depends on symlinks (the nested
@@ -90,13 +128,55 @@ installs, and restarts automatically.
   the updater's pre-exit hook. That keeps `riviu-server.exe` and Chromium from
   holding the executable open while the installer replaces it.
 - Tauri's NSIS installer copies an update over the old files without
-  uninstalling first. In update mode, `src-tauri/windows/installer-hooks.nsh`
-  first deletes `<install dir>\riviu-server`, so files that the new build no
-  longer ships (an old Chromium revision, stale extension modules) do not pile
-  up. A manual install skips this step, because the app may still be running.
-  The uninstaller deletes only the files it installed, so the same hook file
-  also removes `riviu-server` after uninstalling. Otherwise runtime files such
-  as Chromium's `debug.log` would keep the install folder behind.
+  uninstalling first. `src-tauri/windows/installer-hooks.nsh` runs before any
+  file is copied. It does the following, in order:
+  1. Runs Tauri's own running-app check first. In passive or silent mode this
+     closes the app, and in an interactive install the user can still cancel.
+  2. Stops every process whose executable is inside the install folder, together
+     with its process tree: the old one-file `riviu-server.exe`, and anything
+     under `riviu-server\` (server, Playwright driver, Chromium). Processes are
+     selected by executable path, never by image name alone.
+  3. Deletes `<install dir>\riviu-server` and the stale root-level
+     `riviu-server.exe`, so files that the new build no longer ships (an old
+     Chromium revision, stale extension modules) do not pile up.
+
+  The uninstaller deletes only the files it installed, so the hook file also
+  stops leftover servers before uninstalling, and removes `riviu-server` and
+  `riviu-server.exe` afterwards. Otherwise runtime files such as Chromium's
+  `debug.log` would keep the install folder behind. The uninstaller keeps the
+  app-data folder unless its "delete app data" box is ticked. It also always
+  keeps the install-location key `HKCU\Software\riviu\Riviu Reports`; both are
+  Tauri defaults.
+
+## Updating from a one-file release (0.1.17 and earlier)
+
+Releases up to 0.1.17 ship `riviu-server.exe` as a one-file sidecar in the
+install folder. Their `lib.rs` does not stop the sidecar before the updater
+exits, so when such an app updates, its server (a PyInstaller bootloader plus a
+Python child, unpacked into `%TEMP%\_MEI*`) is still running when the new
+installer starts. Without the hook, the update itself succeeded, but three
+things went wrong:
+
+- The old server kept running next to the new one, holding its port and the
+  shared app-data folder.
+- Its roughly 1 GB `_MEI*` folder stayed in `%TEMP%`.
+- The 415 MB root `riviu-server.exe` stayed in the install folder, and the
+  uninstaller later left it and the folder behind.
+
+The hook kills the Python child first. The bootloader then removes its `_MEI*`
+folder and exits on its own, and the hook deletes the stale executable.
+
+Tested on Windows 11 by installing the published 0.1.17 into the default
+per-user folder, starting it, and then running a new installer the way
+`tauri-plugin-updater` does (`/P /R /UPDATE /ARGS`). Two cases were covered: the
+old app exits right away, as `std::process::exit` does, leaving its server
+orphaned; and the old app is still running. Both updates finished in
+55-70 s without a file-lock prompt. The old server processes and their `_MEI*`
+folder were gone, the root `riviu-server.exe` was deleted, and the restarted app
+served from `riviu-server\riviu-server.exe`. Files in
+`%APPDATA%\com.riviu.reports` were unchanged. An update and an uninstall that
+ran while the new app and a browser scan were active also stopped the server,
+the Playwright driver and Chromium before touching any files.
 
 The repository secrets `TAURI_SIGNING_PRIVATE_KEY` and
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` are required for the updater and have been
