@@ -1,5 +1,6 @@
 import io
 import asyncio
+import json
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -105,7 +106,18 @@ def test_desktop_bundle_keeps_resources_separate_from_user_data_and_release_ci()
     assert 'PLAYWRIGHT_BROWSERS_PATH' in sidecar_entrypoint
     assert '"--additional-hooks-dir"' in sidecar_source
     assert (root / "desktop" / "pyinstaller-hooks" / "hook-playwright.async_api.py").is_file()
-    assert '"externalBin"' in config
+    # Windows bundles the one-folder server as resources that lib.rs spawns from
+    # the resource dir; macOS and Linux keep the one-file externalBin sidecar.
+    platform_bundles = {
+        name: json.loads((root / "src-tauri" / f"tauri.{name}.conf.json").read_text(encoding="utf-8"))["bundle"]
+        for name in ("windows", "macos", "linux")
+    }
+    lib_source = (root / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert platform_bundles["windows"]["resources"] == {"binaries/riviu-server/": "riviu-server/"}
+    assert "externalBin" not in platform_bundles["windows"] and '"externalBin"' not in config
+    assert 'const SERVER_RESOURCE_DIR: &str = "riviu-server";' in lib_source
+    for name in ("macos", "linux"):
+        assert platform_bundles[name]["externalBin"] == ["binaries/riviu-server"]
     assert '"createUpdaterArtifacts": true' in config
     assert "windows-2022" in workflow
     assert "macos-15-intel" in workflow

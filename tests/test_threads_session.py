@@ -625,15 +625,28 @@ def test_sidecar_native_backend_collection_without_build(tmp_path, monkeypatch, 
     monkeypatch.setattr(build_sidecar, "ROOT", tmp_path)
     monkeypatch.setattr(build_sidecar.sys, "platform", platform)
     monkeypatch.setattr(build_sidecar.sys, "argv", ["build_sidecar.py", "--target", "synthetic-target"])
+    extension = ".exe" if platform == "win32" else ""
     def subprocess_run(command, **kwargs):
         calls.append(command)
         if "PyInstaller" in command:
             destination = Path(command[command.index("--distpath") + 1])
-            extension = ".exe" if platform == "win32" else ""
+            if "--onedir" in command:
+                destination = destination / build_sidecar.SIDECAR_NAME
+                (destination / "_internal").mkdir(parents=True)
+                (destination / "_internal" / "python312.dll").write_bytes(b"synthetic-runtime")
             (destination / (build_sidecar.SIDECAR_NAME + extension)).write_bytes(b"synthetic-binary")
     monkeypatch.setattr(build_sidecar.subprocess, "run", subprocess_run)
     build_sidecar.main()
     command = calls[-1]
+    binaries = tmp_path / "src-tauri" / "binaries"
+    if platform == "win32":
+        # Windows ships the one-folder build as Tauri resources (tauri.windows.conf.json).
+        assert "--onedir" in command and "--onefile" not in command
+        assert (binaries / "riviu-server" / "riviu-server.exe").read_bytes() == b"synthetic-binary"
+        assert (binaries / "riviu-server" / "_internal" / "python312.dll").is_file()
+    else:
+        assert "--onefile" in command and "--onedir" not in command
+        assert (binaries / "riviu-server-synthetic-target").read_bytes() == b"synthetic-binary"
     if expected:
         hook = tmp_path / "build" / "desktop-sidecar" / "native-hooks" / "hook-keyring.py"
         text = hook.read_text(encoding="utf-8")

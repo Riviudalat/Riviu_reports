@@ -7,15 +7,21 @@ use std::time::{Duration, Instant};
 
 use tauri::ipc::CapabilityBuilder;
 use tauri::{AppHandle, Manager, RunEvent};
-use tauri_plugin_shell::process::{CommandChild, CommandEvent};
+use tauri_plugin_shell::process::{Command, CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_updater::UpdaterExt;
 use url::Url;
 
 /// How long a graceful `/_desktop/shutdown` may take before the sidecar is
-/// force-killed. The PyInstaller one-file bootloader needs this time to wait for
-/// Python (and its Chromium children) and delete its `_MEI*` extraction folder.
+/// force-killed. Python needs this time to close its Chromium children; on
+/// macOS/Linux the PyInstaller one-file bootloader also deletes its `_MEI*`
+/// extraction folder.
 const SERVER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Folder under the resource dir that holds the Windows one-folder server build
+/// (mapped in tauri.windows.conf.json).
+#[cfg(windows)]
+const SERVER_RESOURCE_DIR: &str = "riviu-server";
 
 struct ServerState {
     port: u16,
@@ -63,6 +69,56 @@ fn wait_for_server(port: u16, exited: &AtomicBool) -> Result<(), String> {
     Err("Riviu Reports server did not start within 45 seconds.".to_string())
 }
 
+/// On Windows the server is a PyInstaller one-folder build shipped as bundle
+/// resources, so a launch does not first unpack Python and Chromium into a new
+/// temp folder. macOS and Linux keep the one-file `externalBin` sidecar.
+#[cfg(windows)]
+fn server_command(app: &AppHandle) -> Result<Command, String> {
+    let program = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?
+        .join(SERVER_RESOURCE_DIR)
+        .join("riviu-server.exe");
+    if !program.is_file() {
+        return Err(format!(
+            "Riviu Reports server is missing: {}",
+            program.display()
+        ));
+    }
+    Ok(app.shell().command(program))
+}
+
+#[cfg(not(windows))]
+fn server_command(app: &AppHandle) -> Result<Command, String> {
+    app.shell()
+        .sidecar("riviu-server")
+        .map_err(|error| error.to_string())
+}
+
+/// Force-kill the server. The Windows one-folder build has no one-file
+/// bootloader whose job object takes the children down, so kill the whole tree
+/// there; otherwise Playwright's driver and Chromium could outlive it.
+fn kill_server(child: CommandChild) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let killed_tree = std::process::Command::new("taskkill")
+            .args(["/PID", &child.pid().to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if killed_tree {
+            return;
+        }
+    }
+    let _ = child.kill();
+}
+
 fn start_server(app: &AppHandle, state: &ServerState) -> Result<(), String> {
     let data_dir = app
         .path()
@@ -70,10 +126,7 @@ fn start_server(app: &AppHandle, state: &ServerState) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
 
-    let command = app
-        .shell()
-        .sidecar("riviu-server")
-        .map_err(|error| error.to_string())?
+    let command = server_command(app)?
         .env("RIVIU_PORT", state.port.to_string())
         .env("RIVIU_SHUTDOWN_TOKEN", &state.shutdown_token)
         .env("RIVIU_DATA_DIR", data_dir.to_string_lossy().to_string());
@@ -91,7 +144,7 @@ fn start_server(app: &AppHandle, state: &ServerState) -> Result<(), String> {
         exited.store(true, Ordering::SeqCst);
     });
     if let Err(error) = wait_for_server(state.port, &state.exited) {
-        let _ = child.kill();
+        kill_server(child);
         return Err(error);
     }
     *state.child.lock().map_err(|error| error.to_string())? = Some(child);
@@ -211,7 +264,7 @@ fn stop_server(app: &AppHandle) {
         }
     }
     if !state.exited.load(Ordering::SeqCst) {
-        let _ = child.kill();
+        kill_server(child);
     }
 }
 
