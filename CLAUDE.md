@@ -19,7 +19,7 @@ npm run desktop:build                                              # sidecar + i
 git diff --check
 ```
 
-Opt-in tests are skipped unless you set env vars: `THREADS_LIVE_URL`, `THREADS_SHARE_URL` (live Threads scans), and `RIVIU_TEST_URL` (UI against a running server). Frontend regression tests in `tests/test_ui_review_fixes.py` and related files run `static/app.js` inside a Node `vm` harness with stubbed DOM, `fetch`, and `WebSocket`. They skip if `node` is not on PATH. The DPAPI tests run only on Windows.
+Opt-in tests are skipped unless you set env vars: `THREADS_LIVE_URL`, `THREADS_SHARE_URL` (live Threads scans), and `RIVIU_TEST_URL` (UI against a running server). Frontend regression tests in `tests/test_ui_review_fixes.py` and related files run `static/app.js` inside a Node `vm` harness with stubbed DOM, `fetch`, and `WebSocket`. The harness turns the source-row markup that app.js renders into the stub elements, and it fails if any `PLATFORMS[*].dom` id was not rendered. They skip if `node` is not on PATH. The DPAPI tests run only on Windows.
 
 The CI release workflow (`.github/workflows/desktop-release.yml`) runs pytest and `node --check`, then builds and publishes installers on **every push to `main`** (version `0.1.<run number>`). Installed apps auto-update from that release, so a push to `main` ships to users.
 
@@ -37,7 +37,7 @@ The CI release workflow (`.github/workflows/desktop-release.yml`) runs pytest an
 
 A failed Google push after a saved scan is logged as a warning, not a failed scan.
 
-**Adding a platform.** Platform differences live in tables, not `if threads` branches: `workbook_utils.PLATFORMS` (`PlatformSpec`: report columns, link normalizer/matcher, channel display, video-link highlighting, whether partners without links of that platform are listed, file and Google-tab naming), `app.SCAN_RUNNERS` and `app.PROXY_VALIDATORS` (a test asserts these cover the same keys), and the `PLATFORMS` object at the top of `static/app.js`.
+**Adding a platform.** Platform differences live in tables, not `if threads` branches: `workbook_utils.PLATFORMS` (`PlatformSpec`: report columns, link normalizer/matcher, channel display, video-link highlighting, whether partners without links of that platform are listed, file and Google-tab naming), `app.SCAN_RUNNERS` and `app.PROXY_VALIDATORS` (a test asserts these cover the same keys), and the `PLATFORMS` object at the top of `static/app.js` (plus the icon in `static/platform-icons/`). `templates/index.html` needs no edits: the platform bar and the source-drawer rows (file label, Google link, sync, sheet select, push) are rendered from `PLATFORMS` by `renderPlatformBar()` / `renderPlatformSourceRows()` into `#platformBar` and `#platformSourceRows`. Each entry's `dom` map names the element ids those rows get, and `sourceControls(platform)` looks them up by these ids. TikTok keeps its legacy ids (`googleSheetUrlInput`, `pushGoogleBtn`, ...), so the ids must stay unique across entries.
 
 Scrapers report progress through the `ConnectionManager` (`manager`) via `broadcast_log/status/data/duplicates`. Every message carries the run context (`runId`, `platform`, `fileId`, `sheetName`), and the frontend uses it to drop stale events. Results are written into the workbook in place using atomic saves (temp file + replace). After a scan, results can optionally be pushed to a new tab in the source Google Sheet.
 

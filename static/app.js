@@ -9,9 +9,9 @@ let duplicateRowCount = 0;
 let googleOAuthAuthorized = false;
 
 // Everything that differs between platforms lives here. Adding a platform means adding
-// one entry (plus its icon in static/platform-icons/, a source row in index.html with the
-// ids from `dom`, and backend support); the platform bar, link matching, metric labels,
-// status texts and source-control wiring are derived from it.
+// one entry (plus its icon in static/platform-icons/ and backend support); the platform
+// bar, the source rows in the source drawer (element ids from `dom`), link matching,
+// metric labels, status texts and source-control wiring are derived from it.
 const PLATFORMS = Object.freeze({
     tiktok: Object.freeze({
         key: 'tiktok',
@@ -164,6 +164,29 @@ function renderPlatformBar() {
         const selected = key === activePlatform;
         return `<button class="platform-option${selected ? ' active' : ''}" id="${escapeHtml(config.dom.button)}" type="button" aria-pressed="${selected}" onclick="setPlatform('${escapeHtml(key)}')"><img class="platform-brand-icon" src="${escapeHtml(config.icon)}" alt="" aria-hidden="true">${escapeHtml(config.label)}</button>`;
     }).join('');
+}
+
+// One Google Sheet source row per platform, appended after the block heading in
+// #platformSourceRows. sourceControls() finds the inputs again through `dom`.
+function renderPlatformSourceRows() {
+    const block = document.getElementById('platformSourceRows');
+    if (!block) return;
+    block.querySelectorAll('.platform-source-row').forEach(row => row.remove());
+    block.insertAdjacentHTML('beforeend', PLATFORM_KEYS.map(key => {
+        const config = PLATFORMS[key];
+        const id = Object.fromEntries(Object.entries(config.dom).map(([name, value]) => [name, escapeHtml(value)]));
+        const platform = escapeHtml(key), label = escapeHtml(config.label);
+        return `<div class="field-stack platform-source-row" data-source-platform="${platform}"> `
+            + `<div class="platform-source-label"><span class="platform-source-name"><img class="platform-brand-icon" src="${escapeHtml(config.icon)}" alt="" aria-hidden="true">${label}</span> <span id="${id.sourceLabel}" class="platform-source-file">Chưa chọn file</span></div> `
+            + `<div class="source-inline"> `
+            + `<input class="text-input" id="${id.url}" type="url" placeholder="Link Google Sheet ${label}" aria-label="Link Google Sheet ${label}"> `
+            + `<button class="btn btn-primary btn-compact" id="${id.sync}" onclick="syncGoogleSheet('${platform}')"><span class="material-icons-outlined">sync</span> Nạp sheet</button> `
+            + `</div> `
+            + `<div class="google-action-row"> `
+            + `<label class="scan-setting"><span>Sheet</span><select id="${id.sheet}" class="sheet-select" aria-label="Sheet ${label}"></select></label> `
+            + `<button class="btn btn-soft btn-compact" id="${id.push}" onclick="pushCurrentSheetToGoogle(event, '${platform}')" disabled><span class="material-icons-outlined">note_add</span> Tạo sheet</button> `
+            + `</div> </div>`;
+    }).join(' '));
 }
 
 function applyPlatformUI(platform) {
@@ -2999,8 +3022,10 @@ document.addEventListener('keydown', (event) => {
     }
 });
 
-// The platform bar is generated from PLATFORMS; source rows live in index.html.
+// The platform bar and the source rows are generated from PLATFORMS; render them before
+// the source-row listeners below look the rows up through sourceControls().
 renderPlatformBar();
+renderPlatformSourceRows();
 
 scanSheetSelect.addEventListener('change', () => {
     currentScanSheetName = scanSheetSelect.value;
