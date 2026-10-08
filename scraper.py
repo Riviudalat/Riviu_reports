@@ -251,11 +251,12 @@ MAX_WORKERS = 50
 DEFAULT_WORKERS = 5
 DEFAULT_RETRIES = 2
 DEFAULT_SAVE_EVERY = 25
-# A finished scan waits at most this long for Chromium to exit gracefully; past
-# it, stopping Playwright force-kills the browser and reaping continues in the
+# A finished scan waits at most this long for Chromium to exit gracefully, then
+# force-kills it (close_browser_bounded). It then waits at most
+# PLAYWRIGHT_STOP_TIMEOUT for the driver; slower reaping continues in the
 # background (see playwright_session).
-BROWSER_CLOSE_TIMEOUT = 3.0
-PLAYWRIGHT_STOP_TIMEOUT = 2.0
+BROWSER_CLOSE_TIMEOUT = 0.5
+PLAYWRIGHT_STOP_TIMEOUT = 0.5
 _BROWSER_REAPERS = set()
 DEFAULT_REQUEST_TIMEOUT = 30
 MAX_BROWSER_FALLBACK_WORKERS = 15
@@ -3216,22 +3217,89 @@ def _track_reaper(task):
     return task
 
 
+def _kill_browser_processes(browser):
+    """Force-kill every Chromium process under this browser's Playwright driver (Windows).
+
+    Only for the end of a scan, right before the driver stops: stopping it kills
+    the same processes, but only after spawning taskkill, which took 10+ s on a
+    busy host. Returns True when TerminateProcess was issued.
+    """
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        driver = browser._impl_obj._connection._transport._proc.pid  # Playwright 1.59 internals
+        if not isinstance(driver, int):
+            return False
+
+        class Entry(ctypes.Structure):
+            _fields_ = [("dwSize", wintypes.DWORD), ("cntUsage", wintypes.DWORD), ("th32ProcessID", wintypes.DWORD),
+                        ("th32DefaultHeapID", ctypes.c_size_t), ("th32ModuleID", wintypes.DWORD),
+                        ("cntThreads", wintypes.DWORD), ("th32ParentProcessID", wintypes.DWORD),
+                        ("pcPriClassBase", ctypes.c_long), ("dwFlags", wintypes.DWORD), ("szExeFile", ctypes.c_wchar * 260)]
+
+        kernel32 = ctypes.WinDLL("kernel32")
+        kernel32.CreateToolhelp32Snapshot.argtypes = [wintypes.DWORD, wintypes.DWORD]
+        kernel32.CreateToolhelp32Snapshot.restype = wintypes.HANDLE
+        kernel32.Process32FirstW.argtypes = kernel32.Process32NextW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Entry)]
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        snapshot = kernel32.CreateToolhelp32Snapshot(0x2, 0)  # TH32CS_SNAPPROCESS
+        if not snapshot or snapshot == wintypes.HANDLE(-1).value:
+            return False
+        children = {}
+        try:
+            entry = Entry(dwSize=ctypes.sizeof(Entry))
+            found = kernel32.Process32FirstW(snapshot, ctypes.byref(entry))
+            while found:
+                children.setdefault(entry.th32ParentProcessID, []).append(entry.th32ProcessID)
+                found = kernel32.Process32NextW(snapshot, ctypes.byref(entry))
+        finally:
+            kernel32.CloseHandle(snapshot)
+        pending, tree = [driver], []
+        while pending:
+            for pid in children.get(pending.pop(), []):
+                if pid not in tree and pid != driver:
+                    tree.append(pid)
+                    pending.append(pid)
+        for pid in tree:
+            handle = kernel32.OpenProcess(0x0001, False, pid)  # PROCESS_TERMINATE
+            if handle:
+                kernel32.TerminateProcess(handle, 1)
+                kernel32.CloseHandle(handle)
+        return bool(tree)
+    except Exception:
+        # The driver stop still kills the browser; this is only a head start.
+        return False
+
+
 async def close_browser_bounded(browser):
     """Ask Chromium to exit, but never let a slow exit hold a finished scan open.
 
-    Chromium's exit (even after a forced kill) can take tens of seconds on a busy
-    Windows machine. After BROWSER_CLOSE_TIMEOUT the caller's playwright_session()
-    stops the driver, which force-kills every browser still closing.
+    Contexts close in parallel (routes dropped first), then the browser gets
+    BROWSER_CLOSE_TIMEOUT to exit before its processes are force-killed. A killed
+    Chromium can still take seconds to leave the process list on a loaded
+    Windows host; the close keeps reaping in the background meanwhile.
     """
     if browser is None:
         return
 
     async def close():
-        # Contexts close in parallel; browser.close() then ends the process.
-        await asyncio.gather(*(ctx.close() for ctx in list(getattr(browser, "contexts", []))), return_exceptions=True)
+        contexts = list(getattr(browser, "contexts", []))
+        # A pending route handler must not hold a context open.
+        await asyncio.gather(*(ctx.unroute_all(behavior="ignoreErrors") for ctx in contexts
+                               if hasattr(ctx, "unroute_all")), return_exceptions=True)
+        await asyncio.gather(*(ctx.close() for ctx in contexts), return_exceptions=True)
         await browser.close()
 
-    await asyncio.wait({_track_reaper(asyncio.ensure_future(close()))}, timeout=BROWSER_CLOSE_TIMEOUT)
+    closing = _track_reaper(asyncio.ensure_future(close()))
+    done, _pending = await asyncio.wait({closing}, timeout=BROWSER_CLOSE_TIMEOUT)
+    if not done:
+        _kill_browser_processes(browser)
 
 
 @contextlib.asynccontextmanager

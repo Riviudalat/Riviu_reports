@@ -5,9 +5,12 @@ from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import socket
+import subprocess
+import sys
 import threading
 import time
 import urllib.request
+from types import SimpleNamespace
 
 import openpyxl
 import pytest
@@ -477,17 +480,32 @@ class _SlowExitPlaywright:
             pass
 
 
-@pytest.mark.parametrize("platform", ["tiktok", "threads"])
-def test_finished_scan_does_not_wait_for_slow_chromium_exit(tmp_path, monkeypatch, platform):
-    monkeypatch.setattr(scraper, "BROWSER_CLOSE_TIMEOUT", 0.2)
-    monkeypatch.setattr(scraper, "PLAYWRIGHT_STOP_TIMEOUT", 0.2)
+class _LastResultClock:
+    """Manager stub that only notes when the last result reached the UI."""
+
+    last_result = None
+
+    async def broadcast_data(self, _data):
+        self.last_result = time.monotonic()
+
+    def __getattr__(self, _name):
+        async def ignore(*_args, **_kwargs):
+            pass
+        return ignore
+
+
+@pytest.mark.parametrize("platform, bound", [("tiktok", 2.5), ("threads", 1.5)])
+def test_finished_scan_does_not_wait_for_slow_chromium_exit(tmp_path, monkeypatch, platform, bound):
+    # Default bounds. The live Threads profile reported done 5.5 s after the last
+    # result: 3 s browser close + 2 s driver stop.
     fake = _SlowExitPlaywright()
+    clock = _LastResultClock()
     if platform == "tiktok":
         path = _scan_fixture(tmp_path, monkeypatch)
         # Hybrid starts Chromium only for a fallback, so make this link need one.
         _needs_browser_fallback(monkeypatch)
         monkeypatch.setattr(scraper, "async_playwright", fake)
-        scan = lambda: scraper.run_scraper(path, worker_count=1, retries=0, sheet_name="Data",
+        scan = lambda: scraper.run_scraper(path, clock, worker_count=1, retries=0, sheet_name="Data",
                                            use_request=True, browser_fallback=True)
     else:
         path = _threads_scan_fixture(tmp_path, monkeypatch)
@@ -497,13 +515,11 @@ def test_finished_scan_does_not_wait_for_slow_chromium_exit(tmp_path, monkeypatc
             return {"channel": "demo", "metrics": {"views": 999, "likes": 1, "comments": 0, "reposts": 0, "shares": 0}, "error": ""}
 
         monkeypatch.setattr(threads_scraper, "fetch_threads_browser", browser_result)
-        scan = lambda: threads_scraper.run_threads_scraper(path, sheet_name="Data", mode="hybrid")
+        scan = lambda: threads_scraper.run_threads_scraper(path, clock, sheet_name="Data", mode="hybrid")
 
     async def check():
-        started = time.monotonic()
         await scan()
-        # Old code awaited both slow exits in full (~2 x SLOW_EXIT) before returning.
-        assert time.monotonic() - started < 2.5
+        assert time.monotonic() - clock.last_result < bound
         # The kill was requested before the scan reported completion.
         assert fake.events == ["close", "stop"]
         assert scraper.browser_cleanup_pending()
@@ -520,6 +536,91 @@ def test_finished_scan_does_not_wait_for_slow_chromium_exit(tmp_path, monkeypatc
         assert saved.active["C2"].value == 999
     finally:
         saved.close()
+
+
+def _win_process(pid, access):
+    import ctypes
+    kernel32 = ctypes.WinDLL("kernel32")
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    return kernel32, kernel32.OpenProcess(access, False, pid)
+
+
+def _wait_process_exit(pid, seconds):
+    kernel32, handle = _win_process(pid, 0x00100000)  # SYNCHRONIZE
+    if not handle:
+        return True
+    try:
+        return kernel32.WaitForSingleObject(handle, int(seconds * 1000)) == 0  # WAIT_OBJECT_0
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="direct force-kill of the browser tree is Windows-only")
+def test_browser_that_will_not_exit_is_force_killed_but_its_driver_is_not():
+    # Live: browser.close() outlasted its 3 s bound and Chromium (11 processes,
+    # 1.1 GB) stayed alive ~41 s after done; only the driver stop killed it, via
+    # a taskkill that took 10+ s to start on a busy host.
+    python = getattr(sys, "_base_executable", sys.executable)  # no venv redirector process
+    script = ("import subprocess, time\n"
+              "kids = [subprocess.Popen(['ping', '-n', '120', '127.0.0.1'], stdout=subprocess.DEVNULL) for _ in range(2)]\n"
+              "print(*(kid.pid for kid in kids), flush=True)\n"
+              "time.sleep(120)\n")
+    driver = subprocess.Popen([python, "-c", script], stdout=subprocess.PIPE, text=True)
+    renderers = []
+    try:
+        renderers = [int(pid) for pid in driver.stdout.readline().split()]
+        assert len(renderers) == 2
+
+        class Browser:  # Playwright 1.59 keeps the driver process at this path.
+            contexts = []
+            _impl_obj = SimpleNamespace(_connection=SimpleNamespace(_transport=SimpleNamespace(_proc=driver)))
+
+            async def close(self):
+                await asyncio.sleep(60)  # a graceful exit that does not finish
+
+        async def close():
+            started = time.monotonic()
+            await scraper.close_browser_bounded(Browser())
+            return time.monotonic() - started
+
+        assert asyncio.run(close()) < 1.0
+        assert all(_wait_process_exit(pid, 5) for pid in renderers)
+        assert driver.poll() is None  # the driver stays to stop cleanly
+    finally:
+        driver.kill()
+        for pid in renderers:
+            kernel32, handle = _win_process(pid, 0x0001)  # PROCESS_TERMINATE
+            if handle:
+                kernel32.TerminateProcess(handle, 1)
+                kernel32.CloseHandle(handle)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="direct force-kill of the browser tree is Windows-only")
+def test_real_chromium_that_will_not_exit_is_disconnected_soon_after_the_grace():
+    async def check():
+        async with scraper.playwright_session(async_playwright) as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.set_content("<p>fixture</p>")
+            disconnected = asyncio.Event()
+            browser.on("disconnected", lambda _browser: disconnected.set())
+
+            async def never_exits():
+                await asyncio.sleep(60)
+
+            browser.close = never_exits
+            started = time.monotonic()
+            await scraper.close_browser_bounded(browser)
+            assert time.monotonic() - started < 1.0
+            # Only a kill ends this browser before the driver stops. Process
+            # teardown itself can take seconds on a loaded Windows host.
+            await asyncio.wait_for(disconnected.wait(), 30)
+
+    asyncio.run(check())
 
 
 def test_threads_failed_final_save_still_closes_browser_and_workbook(tmp_path, monkeypatch):
