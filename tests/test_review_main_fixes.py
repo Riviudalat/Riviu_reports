@@ -39,13 +39,12 @@ def test_multi_partner_export_uses_single_snapshot(tmp_path, monkeypatch):
         book.active.append(['https://www.threads.com/@demo/post/Fixture','demo',views,0,'A','B'])
         book.save(path); book.close()
     write(10)
-    original = reports.build_workbook_rows
-    calls=[]
+    original = reports.build_partner_report_rows
     def read(snapshot, **kwargs):
-        calls.append(snapshot)
-        if len(calls)==1: write(999)
+        # A scan replaces the workbook after the partner list was read, before the rows are.
+        write(999)
         return original(snapshot, **kwargs)
-    monkeypatch.setattr(reports,'build_workbook_rows',read)
+    monkeypatch.setattr(reports,'build_partner_report_rows',read)
     result = reports.build_export_payload(path,['A','B'],False,0,'Data','threads')
     with zipfile.ZipFile(io.BytesIO(result['content'])) as archive:
         values=[]
@@ -53,7 +52,6 @@ def test_multi_partner_export_uses_single_snapshot(tmp_path, monkeypatch):
             book=openpyxl.load_workbook(io.BytesIO(archive.read(name)))
             values.append(book.active['D4'].value);book.close()
     assert values == [10,10]
-    assert len(set(map(str,calls)))==1 and str(calls[0])!=str(path)
 
 
 def test_threads_exact_unknown_clears_stale_views_and_channel_is_literal():
