@@ -69,7 +69,7 @@ function platformConfig(platform = activePlatform) {
 }
 
 function emptyPlatformSource() {
-    return { fileId: '', label: '', displaySheet: '', scanSheet: '', pushSheet: '', sheets: [], url: '', dirty: false };
+    return { fileId: '', label: '', displaySheet: '', scanSheet: '', pushSheet: '', sheets: [], hiddenSheets: [], url: '', dirty: false };
 }
 
 const platformScrapeModes = Object.fromEntries(PLATFORM_KEYS.map(key => [key, PLATFORMS[key].defaultScrapeMode]));
@@ -113,11 +113,14 @@ let desktopUpdateInstalling = false;
 let desktopStartupUpdatePending = false;
 let websocketSessionReady = false;
 const WS_RECONNECT_BASE_MS = 1000;
-const WS_RECONNECT_MAX_MS = 30000;
-const WS_PROBE_AFTER_FAILURES = 5;
+const WS_RECONNECT_MAX_MS = 5000;
+const WS_LOST_AFTER_MS = 15000;
+const CONNECTION_RECONNECTING_TEXT = 'Đang kết nối lại tới server…';
+const CONNECTION_LOST_TEXT = 'Mất kết nối tới server. Ứng dụng vẫn tự thử lại, hoặc tải lại trang (F5).';
 let wsReconnectFailures = 0;
-let wsSessionProbed = false;
-let wsConnectionAbandoned = false;
+let wsDisconnectedAt = 0;
+let wsRetryPending = false;
+let wsConnectionLost = false;
 let scanPhase = 'idle';
 let currentRunContext = null;
 let lastTerminalStatus = '';
@@ -256,7 +259,7 @@ async function setPlatform(platform) {
     clearLiveResults({ emptyText: 'Chưa có kết quả mới' });
     resetProgressDisplay();
     if (isSummarySheetName(currentSheetName) && summarySheetPlatform(currentSheetName) !== platform) {
-        currentSheetName = filterDataSheets(window.lastWorkbookSheets || [])[0] || '';
+        currentSheetName = dataSheetsVisibleFirst(window.lastWorkbookSheets || [])[0] || '';
     }
     setWorkspaceTab('sheet');
     void loadPreview();
@@ -657,8 +660,31 @@ function filterDataSheets(sheets) {
     return (Array.isArray(sheets) ? sheets : []).filter(sheet => sheet && !isSummarySheetName(sheet) && !isResultSheetName(sheet));
 }
 
-function renderSheetSelect(selectEl, sheets, preferredSheet, onUpdate) {
-    const validSheets = filterDataSheets(sheets);
+// Sheets the workbook hides in Excel (sheet_state hidden, e.g. old months) never become tabs.
+// The sheet selects keep them reachable after the visible sheets, marked "(ẩn)".
+function hiddenSheetSet(hiddenSheets = activeSource().hiddenSheets) {
+    return new Set(Array.isArray(hiddenSheets) ? hiddenSheets : []);
+}
+
+function dataSheetsVisibleFirst(sheets, hiddenSheets = activeSource().hiddenSheets) {
+    const hidden = hiddenSheetSet(hiddenSheets);
+    const dataSheets = filterDataSheets(sheets);
+    return [...dataSheets.filter(sheet => !hidden.has(sheet)), ...dataSheets.filter(sheet => hidden.has(sheet))];
+}
+
+function appendSheetOptions(selectEl, sheets, selectedSheet, hiddenSheets) {
+    const hidden = hiddenSheetSet(hiddenSheets);
+    for (const sheet of sheets) {
+        const opt = document.createElement('option');
+        opt.value = sheet;
+        opt.textContent = hidden.has(sheet) ? `${sheet} (ẩn)` : sheet;
+        if (sheet === selectedSheet) opt.selected = true;
+        selectEl.appendChild(opt);
+    }
+}
+
+function renderSheetSelect(selectEl, sheets, preferredSheet, onUpdate, hiddenSheets = activeSource().hiddenSheets) {
+    const validSheets = dataSheetsVisibleFirst(sheets, hiddenSheets);
     selectEl.innerHTML = '';
     if (validSheets.length === 0) {
         selectEl.innerHTML = '<option value="">Không có sheet</option>';
@@ -669,13 +695,7 @@ function renderSheetSelect(selectEl, sheets, preferredSheet, onUpdate) {
     const currentValue = preferredSheet && validSheets.includes(preferredSheet)
         ? preferredSheet
         : (validSheets.includes(selectEl.value) ? selectEl.value : validSheets[0]);
-    validSheets.forEach(sheet => {
-        const opt = document.createElement('option');
-        opt.value = sheet;
-        opt.textContent = sheet;
-        if (sheet === currentValue) opt.selected = true;
-        selectEl.appendChild(opt);
-    });
+    appendSheetOptions(selectEl, validSheets, currentValue, hiddenSheets);
     if (!validSheets.includes(selectEl.value)) selectEl.value = validSheets[0];
     onUpdate(selectEl.value);
     selectEl.disabled = false;
@@ -1145,7 +1165,7 @@ function renderSourceRows() {
     for (const platform of PLATFORM_KEYS) {
         const source = platformSources[platform], controls = sourceControls(platform);
         if (controls.url && controls.url.value !== source.url) controls.url.value = source.url;
-        if (controls.sheet) renderSheetSelect(controls.sheet, source.sheets, source.pushSheet || source.scanSheet, value => { source.pushSheet = value; });
+        if (controls.sheet) renderSheetSelect(controls.sheet, source.sheets, source.pushSheet || source.scanSheet, value => { source.pushSheet = value; }, source.hiddenSheets);
         if (controls.label) { controls.label.textContent = source.label || source.fileId || 'Chưa chọn file'; controls.label.title = source.label || source.fileId; }
     }
     setGooglePushState();
@@ -1173,6 +1193,7 @@ async function activateSource(platform) {
             const { response, data } = await fetchFileList(platform, source.fileId);
             if (response.ok && data.current === source.fileId && Array.isArray(data.sheets)) {
                 source.sheets = data.sheets;
+                source.hiddenSheets = data.hiddenSheets || [];
                 source.label ||= data.currentLabel || '';
             }
         } catch {}
@@ -1238,6 +1259,7 @@ async function initializeSources({ applyGoogleSheetUrl = false } = {}) {
             if (!isCurrent(data)) return;
             if (!response.ok || data.error || data.current !== saved.fileId) throw new Error(data.error || 'Không tải được workbook đã lưu.');
             saved.sheets = data.sheets || [];
+            saved.hiddenSheets = data.hiddenSheets || [];
             saved.label = data.currentLabel || saved.fileId;
             // The workbook exists: a rejected selection must not forget the saved file.
             try { await activateSource(platform); }
@@ -1262,6 +1284,7 @@ function applyFileListState(data, { applyGoogleSheetUrl = false } = {}) {
     const source = activeSource();
     const sheets = data.sheets || [];
     source.sheets = sheets;
+    source.hiddenSheets = data.hiddenSheets || [];
     source.label = source.fileId ? (data.currentLabel || source.fileId) : '';
     if (!sheets.includes(source.displaySheet)) source.displaySheet = data.currentSheet || data.scanSheet || '';
     if (!sheets.includes(source.scanSheet)) source.scanSheet = data.scanSheet || data.currentSheet || '';
@@ -1372,7 +1395,7 @@ async function syncGoogleSheet(platform = activePlatform) {
 
         if (revision !== sourceRevision) return;
         const source = platformSources[platform];
-        Object.assign(source, { fileId: data.file, label: data.label || data.file, displaySheet: data.currentSheet || '', scanSheet: data.scanSheet || data.currentSheet || '', pushSheet: data.scanSheet || data.currentSheet || '', sheets: data.sheets || [], url, dirty: false });
+        Object.assign(source, { fileId: data.file, label: data.label || data.file, displaySheet: data.currentSheet || '', scanSheet: data.scanSheet || data.currentSheet || '', pushSheet: data.scanSheet || data.currentSheet || '', sheets: data.sheets || [], hiddenSheets: data.hiddenSheets || [], url, dirty: false });
         if (platform === activePlatform) {
             await activateSource(platform);
             restoreActiveSource();
@@ -1408,7 +1431,7 @@ async function uploadFile(input) {
         if (!data.success) throw new Error(data.error || 'Tải file thất bại');
         const displaySheet = data.sheet || '';
         const scanSheet = data.scanSheet || displaySheet;
-        Object.assign(platformSources[platform], { fileId: data.filename, displaySheet, scanSheet, pushSheet: scanSheet, sheets: data.sheets || [], url: '', dirty: false });
+        Object.assign(platformSources[platform], { fileId: data.filename, displaySheet, scanSheet, pushSheet: scanSheet, sheets: data.sheets || [], hiddenSheets: data.hiddenSheets || [], url: '', dirty: false });
         await activateSource(platform);
         restoreActiveSource();
         await updateFileList({ applyGoogleSheetUrl: true });
@@ -1514,8 +1537,9 @@ async function downloadCurrentWorkbook() {
 function renderSheetTabs(sheets, currentSheet) {
     const tabs = document.getElementById('sheetTabs');
     tabs.innerHTML = '';
-    const visibleSheets = visibleSheetTabs(sheets);
-    if (!visibleSheets || visibleSheets.length <= 1) return;
+    const hidden = hiddenSheetSet();
+    const visibleSheets = visibleSheetTabs(sheets).filter(sheet => !hidden.has(sheet));
+    if (visibleSheets.length <= 1) return;
 
     visibleSheets.forEach(sheet => {
         const button = document.createElement('button');
@@ -1588,12 +1612,14 @@ function renderEmptySourcePreview() {
         document.getElementById(id).textContent = '0';
     }
     renderSheetTabs([], '');
+    syncScanControls();
 }
 
 function applyPreviewSource(data) {
     const source = activeSource();
     const sheets = data.sheets || [];
     source.displaySheet = data.currentSheet || '';
+    source.hiddenSheets = data.hiddenSheets || [];
     syncCompactSourceSummary(data.fileLabel || data.file || '', source.displaySheet);
     renderSheetTabs(sheets, source.displaySheet);
     renderScanSheetOptions(sheets, source.scanSheet);
@@ -1696,7 +1722,7 @@ async function renderSummaryDashboard(dataSheetName = '') {
     const resolvedDataSheet = dataSheetName
         || dataSheetNameForSummaryTab(currentSheetName, window.lastWorkbookSheets || [])
         || currentScanSheetName
-        || filterDataSheets(window.lastWorkbookSheets || [])[0]
+        || dataSheetsVisibleFirst(window.lastWorkbookSheets || [])[0]
         || '';
     const query = `?${sourceQuery({ sheet_name: resolvedDataSheet || '' })}`;
 
@@ -1750,6 +1776,14 @@ function scanIsBusy() {
     return ['starting', 'running', 'saving', 'cancelling'].includes(scanPhase);
 }
 
+// Why an idle Start button cannot start a scan right now ('' when it can); shown as its tooltip.
+function startBlockedReason() {
+    if (wsConnectionLost) return CONNECTION_LOST_TEXT;
+    if (wsReconnectFailures > 0) return CONNECTION_RECONNECTING_TEXT;
+    if (sourcesInitialized && !currentFileId) return 'Chưa chọn nguồn cho nền tảng này.';
+    return '';
+}
+
 function syncScanControls() {
     scheduleSourcePreferencesSave();
     const busy = scanIsBusy() || desktopUpdateInstalling || threadsCookieBusy || sourceBusy;
@@ -1758,9 +1792,11 @@ function syncScanControls() {
         if (input) input.disabled = busy || (['threadsSessionUse', 'threadsCookieVerify', 'threadsCookieDelete'].includes(id) && !threadsCookieState.configured);
     }
     document.querySelectorAll('.threads-cookie-close').forEach(button => { button.disabled = threadsCookieBusy; });
-    startBtn.disabled = busy;
+    const startBlocked = busy ? '' : startBlockedReason();
+    startBtn.disabled = busy || Boolean(startBlocked);
+    startBtn.title = startBlocked;
     startBtn.innerHTML = busy ? BTN_START_BUSY : BTN_START_IDLE;
-    cancelBtn.disabled = !scanIsBusy() || ['saving', 'cancelling'].includes(scanPhase);
+    cancelBtn.disabled = !scanIsBusy() || ['saving', 'cancelling'].includes(scanPhase) || wsReconnectFailures > 0;
     cancelBtn.innerHTML = scanPhase === 'cancelling' ? BTN_CANCEL_BUSY : BTN_CANCEL_IDLE;
     for (const input of [workerCountSelect, scrapeModeSelect, scanSheetSelect, proxyUseCheckbox, proxyConfigBtn]) {
         if (input) input.disabled = busy;
@@ -1805,7 +1841,7 @@ function showRunSource({ platform, fileId, sheetName }) {
         applyPlatformUI(runPlatform);
     }
     if (fileChanged) {
-        Object.assign(slot, { fileId, label: fileId, sheets: sheetName ? [sheetName] : [], displaySheet: sheetName || '', pushSheet: sheetName || '' });
+        Object.assign(slot, { fileId, label: fileId, sheets: sheetName ? [sheetName] : [], hiddenSheets: [], displaySheet: sheetName || '', pushSheet: sheetName || '' });
     }
     if (sheetName) slot.scanSheet = sheetName;
     if (platformChanged || fileChanged) {
@@ -1852,14 +1888,14 @@ function handleSessionSnapshot(session) {
 }
 
 function connectWS() {
-    if (wsConnectionAbandoned) return;
     websocketSessionReady = false;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     ws = new WebSocket(`${protocol}//${window.location.host}/ws`);
     ws.onmessage = handleSocketMessage;
     ws.onopen = () => {
         wsReconnectFailures = 0;
-        wsSessionProbed = false;
+        wsConnectionLost = false;
+        renderConnectionState();
         addLog('Hệ thống đã kết nối trực tiếp.');
     };
     ws.onclose = handleSocketClose;
@@ -1889,20 +1925,28 @@ function reconnectDelay(failures) {
     return Math.min(WS_RECONNECT_BASE_MS * 2 ** Math.max(failures - 1, 0), WS_RECONNECT_MAX_MS);
 }
 
-// After a server restart the old session cookie is rejected and /ws closes before the
-// handshake forever. Back off, log the outage once, and after a few failures check once
-// whether the page itself is still served; if not, ask for a reload instead of retrying.
 function handleSocketClose() {
     websocketSessionReady = false;
-    if (wsConnectionAbandoned) return;
+    scheduleReconnect();
+}
+
+// After a server restart the old session cookie is rejected, so /ws keeps closing until the
+// page loads / again, which issues a fresh cookie. Every failure therefore probes / first
+// (the first one at once) and reconnects as soon as the probe answers. Failed probes back off
+// up to a cap and never stop, so a long outage recovers on its own when the server returns;
+// the session snapshot sent on connect then re-syncs any run that is still going.
+function scheduleReconnect() {
+    if (wsRetryPending) return;
     wsReconnectFailures += 1;
-    if (wsReconnectFailures === 1) addLog('Mất kết nối. Đang tự động kết nối lại...');
-    if (wsReconnectFailures >= WS_PROBE_AFTER_FAILURES && !wsSessionProbed) {
-        wsSessionProbed = true;
-        void probeLocalSession();
-        return;
+    if (wsReconnectFailures === 1) {
+        wsDisconnectedAt = Date.now();
+        addLog('Mất kết nối. Đang tự động kết nối lại...');
     }
-    setTimeout(connectWS, reconnectDelay(wsReconnectFailures));
+    if (Date.now() - wsDisconnectedAt >= WS_LOST_AFTER_MS) wsConnectionLost = true;
+    renderConnectionState();
+    wsRetryPending = true;
+    if (wsReconnectFailures === 1) void probeLocalSession();
+    else setTimeout(() => void probeLocalSession(), reconnectDelay(wsReconnectFailures - 1));
 }
 
 async function probeLocalSession() {
@@ -1911,20 +1955,19 @@ async function probeLocalSession() {
         const response = await fetch('/', { cache: 'no-store', credentials: 'same-origin' });
         reachable = Boolean(response.ok);
     } catch {}
-    if (reachable) {
-        setTimeout(connectWS, reconnectDelay(wsReconnectFailures));
-        return;
-    }
-    abandonConnection();
+    wsRetryPending = false;
+    if (reachable) connectWS();
+    else scheduleReconnect();
 }
 
-function abandonConnection() {
-    wsConnectionAbandoned = true;
-    websocketSessionReady = false;
+function renderConnectionState() {
+    const state = wsReconnectFailures === 0 ? '' : wsConnectionLost ? 'lost' : 'reconnecting';
     const banner = document.getElementById('connectionBanner');
-    if (banner) banner.hidden = false;
-    // The scan state is unknown now; do not keep every control locked behind it.
-    scanPhase = 'idle';
+    if (banner) {
+        banner.hidden = !state;
+        banner.dataset.state = state;
+        if (state) banner.textContent = state === 'lost' ? CONNECTION_LOST_TEXT : CONNECTION_RECONNECTING_TEXT;
+    }
     syncScanControls();
 }
 
@@ -2660,10 +2703,10 @@ function sheetsFromScanSelect() {
     return Array.from(scanSheetSelect.options).map(option => option.value).filter(Boolean);
 }
 
-function renderReportSheetOptions(sheets, selectedSheet = '') {
+function renderReportSheetOptions(sheets, selectedSheet = '', hiddenSheets = activeSource().hiddenSheets) {
     const select = document.getElementById('reportSheetSelect');
     if (!select) return;
-    const validSheets = filterDataSheets(sheets);
+    const validSheets = dataSheetsVisibleFirst(sheets, hiddenSheets);
     reportSheetUpdating = true;
     select.innerHTML = '';
     if (validSheets.length === 0) {
@@ -2676,13 +2719,7 @@ function renderReportSheetOptions(sheets, selectedSheet = '') {
     const currentValue = selectedSheet && validSheets.includes(selectedSheet)
         ? selectedSheet
         : validSheets[0];
-    validSheets.forEach(sheet => {
-        const opt = document.createElement('option');
-        opt.value = sheet;
-        opt.textContent = sheet;
-        if (sheet === currentValue) opt.selected = true;
-        select.appendChild(opt);
-    });
+    appendSheetOptions(select, validSheets, currentValue, hiddenSheets);
     reportSheetName = select.value;
     select.disabled = false;
     reportSheetUpdating = false;
@@ -2711,7 +2748,7 @@ async function loadReportPartners(sheetName = '') {
         if (!res.ok) throw new Error(data.error || 'Không tải được danh sách đối tác');
         const sheetList = resolveReportSheets(data);
         const activeSheet = data.currentSheet || data.dataSheet || requestedSheet || sheetList[0] || '';
-        renderReportSheetOptions(sheetList, activeSheet);
+        renderReportSheetOptions(sheetList, activeSheet, data.hiddenSheets || activeSource().hiddenSheets);
         reportPartners = normalizeReportPartners(data.partners);
         reportSheetName = activeSheet || reportSheetName;
         document.getElementById('reportModalSubtitle').textContent = `${data.fileLabel || data.file} • ${reportSheetName || '—'} • ${reportPartners.length} đối tác`;
@@ -3099,7 +3136,7 @@ window.onload = async () => {
         try {
             const { response, data } = await fetchFileList(platform, source.fileId);
             if (!response.ok) { source.fileId = ''; continue; }
-            Object.assign(source, { sheets: data.sheets || [], label: data.currentLabel || data.current });
+            Object.assign(source, { sheets: data.sheets || [], hiddenSheets: data.hiddenSheets || [], label: data.currentLabel || data.current });
         } catch {}
     }
     renderSourceRows();

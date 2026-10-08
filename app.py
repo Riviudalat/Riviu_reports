@@ -46,6 +46,7 @@ from workbook_utils import (
     clean_text,
     download_google_sheet,
     ensure_data_dir,
+    find_data_sheet_listing,
     find_data_sheet_names,
     google_sheet_source_for_file,
     get_platform,
@@ -613,9 +614,9 @@ async def list_files(file_id: str | None = None, platform: str = "tiktok"):
         except Exception:
             target_spreadsheet_id = ""
     try:
-        sheets = await asyncio.to_thread(find_data_sheet_names, target_path) if target_path else []
+        sheets, hidden_sheets = await asyncio.to_thread(find_data_sheet_listing, target_path) if target_path else ([], [])
     except Exception:
-        sheets = []
+        sheets, hidden_sheets = [], []
     selected_sheet = CURRENT_SELECTED_SHEET if file_id is None else (sheets[0] if sheets else "")
     scan_sheet = (CURRENT_SCAN_SHEET or selected_sheet) if file_id is None else selected_sheet
     state = {
@@ -625,6 +626,7 @@ async def list_files(file_id: str | None = None, platform: str = "tiktok"):
         "currentLabel": file_label,
         "currentSheet": selected_sheet,
         "sheets": sheets,
+        "hiddenSheets": hidden_sheets,
         "scanSheet": scan_sheet,
         "googleSheetUrl": target_sheet_url,
         "platform": platform,
@@ -957,7 +959,7 @@ async def report_partners(
         return JSONResponse(content={"error": "File không tồn tại"}, status_code=404)
 
     try:
-        data_sheets = await asyncio.to_thread(find_data_sheet_names, target_path)
+        data_sheets, hidden_sheets = await asyncio.to_thread(find_data_sheet_listing, target_path)
         requested_sheet = clean_text(sheet_name) or (data_sheets[0] if data_sheets else "")
         if requested_sheet and requested_sheet not in data_sheets:
             return JSONResponse(content={"error": f"Sheet {requested_sheet} không tồn tại trong file."}, status_code=400)
@@ -981,6 +983,7 @@ async def report_partners(
             "file_id": file_id,
             "fileLabel": file_label,
             "sheets": data_sheets,
+            "hiddenSheets": hidden_sheets,
             "currentSheet": requested_sheet,
             "dataSheet": requested_sheet,
             "allSheets": all_sheets,

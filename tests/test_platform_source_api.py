@@ -110,6 +110,24 @@ def test_explicit_preview_summary_partners_download_and_export_use_b(client, sou
     assert selection() == before
 
 
+def test_sheet_lists_report_the_workbooks_hidden_sheets(client, source_backend):
+    book = Workbook()
+    old_month = book.active
+    old_month.title = "Tháng 6"
+    old_month.sheet_state = "hidden"
+    for sheet in (old_month, book.create_sheet("Tháng 8")):
+        sheet.append(["Link", "Tên Kênh", "Đối tác", "LƯỢT XEM"])
+        sheet.append([f"https://www.tiktok.com/@{sheet.title[-1]}/video/1", "kenh", "Cafe", 100])
+    book.save(source_backend / "C.xlsx")
+    book.close()
+    query = {"file_id": "C.xlsx", "platform": "tiktok"}
+    for route in ("/list-files", "/preview-excel", "/report-partners"):
+        data = client.get(route, params=query).json()
+        assert data["hiddenSheets"] == ["Tháng 6"], route
+        assert set(data["sheets"]) == {"Tháng 6", "Tháng 8"}, route
+    assert client.get("/list-files", params={"file_id": "B.xlsx", "platform": "tiktok"}).json()["hiddenSheets"] == []
+
+
 def test_threads_report_apis_honour_min_views_like_tiktok(client, source_backend):
     book = Workbook()
     sheet = book.active

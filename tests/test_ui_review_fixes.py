@@ -270,31 +270,107 @@ def test_idle_session_and_completed_old_run_do_not_lock_or_change_selected_file(
     """)
 
 
-@pytest.mark.parametrize("probe", ["forbidden", "offline", "ok"])
-def test_websocket_reconnect_backs_off_and_stops_when_session_is_gone(probe):
+def test_rejected_handshake_probes_the_page_at_once_and_reconnects_when_it_answers():
+    # After a quick server restart the old session cookie is rejected. Loading / issues a
+    # fresh one, so the first failure must probe at once and reconnect without a backoff wait.
     run_js("""(async()=>{
       const timers=[]; setTimeout=(fn,ms)=>{timers.push({fn,ms});};
       const logs=[]; addLog=message=>logs.push(message);
-      const probes=[]; fetch=async(url)=>{probes.push(url);
-        if(PROBE==='offline') throw Error('fixture offline');
-        return {ok:PROBE==='ok',status:PROBE==='ok'?200:403,json:async()=>({})};};
-      el('connectionBanner').hidden=true;
-      connectWS(); scanPhase='running'; syncScanControls();
-      for(let i=0;i<4;i++){ sockets[sockets.length-1].onclose(); timers[timers.length-1].fn(); }
-      assert.deepEqual(timers.map(t=>t.ms),[1000,2000,4000,8000]);
-      sockets[sockets.length-1].onclose();
-      for(let i=0;i<5;i++) await Promise.resolve();
-      assert.deepEqual(probes,['/']);
+      const probes=[]; fetch=async(url,options)=>{probes.push([url,options.credentials]);
+        return {ok:true,status:200,json:async()=>({})};};
+      const flush=async()=>{for(let i=0;i<5;i++) await Promise.resolve();};
+      activePlatform='tiktok'; currentFileId='A.xlsx';
+      connectWS(); sockets[0].onopen();
+      sockets[0].onmessage({data:JSON.stringify({type:'session',data:{runId:'run-1',platform:'tiktok',
+        fileId:'A.xlsx',sheetName:'S',running:true,status:{phase:'running',total:4,processed:1,success:1}}})});
+      sockets[0].onclose();
+      assert.deepEqual(probes,[['/','same-origin']]);
+      assert.equal(el('connectionBanner').hidden,false);
+      assert.equal(el('connectionBanner').textContent,'Đang kết nối lại tới server…');
+      assert.equal(el('cancelBtn').disabled,true);
+      await flush();
+      assert.equal(sockets.length,2); assert.equal(timers.length,0);
+      sockets[1].onopen();
+      assert.equal(el('connectionBanner').hidden,true); assert.equal(el('cancelBtn').disabled,false);
+      sockets[1].onmessage({data:JSON.stringify({type:'session',data:{runId:'run-1',platform:'tiktok',
+        fileId:'A.xlsx',sheetName:'S',running:true,status:{phase:'running',total:4,processed:2,success:2}}})});
+      assert.equal(scanPhase,'running'); assert.equal(currentRunContext.runId,'run-1');
+      assert.equal(el('processedLinks').textContent,2);
       assert.equal(logs.filter(m=>String(m).includes('Mất kết nối')).length,1);
-      if(PROBE==='ok'){
-        assert.equal(el('connectionBanner').hidden,true); assert.equal(timers.length,5);
-        assert.equal(timers[4].ms,16000); assert.equal(scanPhase,'running');
-      } else {
-        assert.equal(el('connectionBanner').hidden,false); assert.equal(timers.length,4);
-        assert.equal(scanPhase,'idle'); assert.equal(el('startBtn').disabled,false);
-        sockets[sockets.length-1].onclose(); assert.equal(timers.length,4); assert.equal(probes.length,1);
-      }
-    })()""".replace('PROBE', json.dumps(probe)))
+      // The probe answered but the socket still fails: back off instead of spinning.
+      sockets[1].onclose(); await flush(); sockets[2].onclose();
+      assert.deepEqual(timers.map(t=>t.ms),[1000]);
+    })()""")
+
+
+@pytest.mark.parametrize("outage", ["offline", "forbidden"])
+def test_long_outage_shows_lost_banner_keeps_probing_and_recovers_on_its_own(outage):
+    run_js("""(async()=>{
+      let now=0; Date.now=()=>now;
+      const timers=[]; setTimeout=(fn,ms)=>{timers.push({fn,ms});};
+      const logs=[]; addLog=message=>logs.push(message);
+      let reloads=0; updateFileList=async()=>{reloads++;}; loadPreview=async()=>{reloads++;};
+      let up=false; let probes=0; fetch=async()=>{probes++;
+        if(!up && OUTAGE==='offline') throw Error('fixture offline');
+        return {ok:up,status:up?200:403,json:async()=>({})};};
+      const flush=async()=>{for(let i=0;i<5;i++) await Promise.resolve();};
+      activePlatform='tiktok'; currentFileId='A.xlsx';
+      connectWS(); sockets[0].onopen();
+      const snapshot=(running,phase)=>({data:JSON.stringify({type:'session',data:{runId:'live-run',platform:'tiktok',
+        fileId:'A.xlsx',sheetName:'S',running,results:[],status:{phase,done:!running,total:1,processed:1,success:1}}})});
+      sockets[0].onmessage(snapshot(true,'running'));
+      sockets[0].onclose(); await flush();
+      const delays=[];
+      while(now<40000){ const timer=timers.shift(); delays.push(timer.ms); now+=timer.ms; timer.fn(); await flush(); }
+      assert.equal(sockets.length,1);
+      assert.ok(probes>=8); assert.equal(Math.max(...delays),5000);
+      assert.equal(el('connectionBanner').hidden,false);
+      assert.equal(el('connectionBanner').dataset.state,'lost');
+      assert.ok(el('connectionBanner').textContent.includes('F5'));
+      scanPhase='idle'; syncScanControls();
+      assert.equal(el('startBtn').disabled,true); assert.ok(el('startBtn').title.includes('Mất kết nối'));
+      scanPhase='running'; syncScanControls();
+      // The server is back: the next background probe reconnects without a page reload.
+      up=true; assert.equal(timers.length,1); timers.shift().fn(); await flush();
+      assert.equal(sockets.length,2); sockets[1].onopen();
+      assert.equal(el('connectionBanner').hidden,true);
+      // The run this page followed finished during the outage: it still completes once.
+      sockets[1].onmessage(snapshot(false,'completed'));
+      assert.equal(logs.filter(m=>String(m).includes('HOÀN TẤT')).length,1); assert.equal(reloads,2);
+      assert.equal(el('startBtn').disabled,false); assert.equal(el('startBtn').title,'');
+    })()""".replace('OUTAGE', json.dumps(outage)))
+
+
+def test_start_button_is_disabled_with_a_reason_when_it_cannot_start():
+    run_js("""
+      connectWS(); sockets[0].onopen();
+      sourcesInitialized=true; activePlatform='threads'; currentFileId=''; syncScanControls();
+      assert.equal(el('startBtn').disabled,true);
+      assert.equal(el('startBtn').title,'Chưa chọn nguồn cho nền tảng này.');
+      currentFileId='Threads.xlsx'; syncScanControls();
+      assert.equal(el('startBtn').disabled,false); assert.equal(el('startBtn').title,'');
+      fetch=()=>new Promise(()=>{}); sockets[0].onclose();
+      assert.equal(el('startBtn').disabled,true); assert.equal(el('startBtn').title,'Đang kết nối lại tới server…');
+    """)
+
+
+def test_hidden_sheets_are_not_tabs_and_are_marked_in_sheet_selects():
+    run_js("""(async()=>{
+      activePlatform='tiktok'; currentFileId='Book.xlsx'; reportPartners=[];
+      renderPartnerList=()=>{}; updateReportSummary=()=>{};
+      const options=select=>JSON.stringify(select.children.map(option=>[option.value,option.textContent]));
+      applyPreviewSource({file:'Book.xlsx',currentSheet:'Tháng 8',hiddenSheets:['Tháng 6','Tháng 7'],
+        sheets:['Tháng 6','Tháng 8','Tổng kết tháng 8','Tháng 7','T8 26-08-2026-1409']});
+      assert.equal(JSON.stringify(el('sheetTabs').children.map(tab=>tab.textContent)),'["Tháng 8","Tổng kết tháng 8","T8 26-08-2026-1409"]');
+      assert.equal(options(el('scanSheetSelect')),HIDDEN_OPTIONS);
+      assert.equal(el('scanSheetSelect').value,'Tháng 8');
+      fetch=async()=>({ok:true,json:async()=>({file:'Book.xlsx',partners:[],currentSheet:'Tháng 6',
+        sheets:['Tháng 8','Tháng 6','Tháng 7'],hiddenSheets:['Tháng 6','Tháng 7']})});
+      await loadReportPartners('Tháng 6');
+      const report=el('reportSheetSelect').children;
+      assert.equal(options(el('reportSheetSelect')),HIDDEN_OPTIONS);
+      assert.equal(report.find(option=>option.selected).value,'Tháng 6');
+    })()""".replace("HIDDEN_OPTIONS", json.dumps(json.dumps([["Tháng 8", "Tháng 8"], ["Tháng 6", "Tháng 6 (ẩn)"], ["Tháng 7", "Tháng 7 (ẩn)"]], ensure_ascii=False, separators=(",", ":")), ensure_ascii=False)))
 
 
 def test_preview_total_badge_follows_new_workbook_while_source_is_busy():

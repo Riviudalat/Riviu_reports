@@ -979,6 +979,7 @@ def read_sheet_preview(file_path, sheet_name=None, limit=None, *, platform=None)
 
         return {
             "sheets": sheets,
+            "hiddenSheets": hidden_sheet_names_in_workbook(workbook),
             "currentSheet": current_sheet,
             "columns": [column_labels[column] for column in public_columns],
             "data": data,
@@ -1244,14 +1245,28 @@ def find_data_sheet_names(file_path):
         workbook.close()
 
 
+def find_data_sheet_listing(file_path):
+    """(data sheets, hidden sheet titles) from one workbook open."""
+    workbook = load_excel_file(file_path)
+    try:
+        return find_data_sheet_names_in_workbook(workbook), hidden_sheet_names_in_workbook(workbook)
+    finally:
+        workbook.close()
+
+
+def hidden_sheet_names_in_workbook(workbook):
+    """Titles of the worksheets Excel hides (hidden or veryHidden), in workbook order."""
+    try:
+        return [ws.title for ws in workbook.book.worksheets if ws.sheet_state != "visible"]
+    except AttributeError:
+        return []
+
+
 def find_data_sheet_names_in_workbook(workbook):
     """Data sheets with visible ones first: callers default to [0], which must not be a hidden old month."""
     sheets = workbook.sheet_names
     data_sheets = [sheet for sheet in sheets if not is_summary_sheet_name(sheet) and not is_result_sheet_name(sheet)]
-    try:
-        hidden = {ws.title for ws in workbook.book.worksheets if ws.sheet_state != "visible"}
-    except AttributeError:
-        hidden = set()
+    hidden = set(hidden_sheet_names_in_workbook(workbook))
     return [sheet for sheet in data_sheets if sheet not in hidden] + [sheet for sheet in data_sheets if sheet in hidden]
 
 
