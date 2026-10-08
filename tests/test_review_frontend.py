@@ -25,7 +25,7 @@ def browser():
 @pytest.fixture
 def page(browser):
     context = browser.new_context()
-    markup = (ROOT / "templates" / "index.html").read_text(encoding="utf-8")
+    markup = (ROOT / "riviu" / "web" / "templates" / "index.html").read_text(encoding="utf-8")
     markup = re.sub(r"<script\b[^>]*>.*?</script>", "", markup, flags=re.DOTALL)
 
     def route_offline(route):
@@ -37,7 +37,7 @@ def page(browser):
     context.route("**/*", route_offline)
     current = context.new_page()
     current.goto("http://riviu.fixture.invalid:1234/")
-    current.add_style_tag(content=(ROOT / "static" / "styles.css").read_text(encoding="utf-8"))
+    current.add_style_tag(content=(ROOT / "riviu" / "web" / "static" / "styles.css").read_text(encoding="utf-8"))
     current.evaluate("""() => {
         window.WebSocket = class {static OPEN=1; constructor(){this.readyState=1;} send(){}};
         window.fetch = async () => {throw Error('Unexpected fixture request');};
@@ -46,7 +46,7 @@ def page(browser):
             threads:{fileId:'data/B.xlsx',displaySheet:'B',scanSheet:'B',pushSheet:'B',url:''}
         };
     }""")
-    current.add_script_tag(content=(ROOT / "static" / "app.js").read_text(encoding="utf-8"))
+    current.add_script_tag(content=(ROOT / "riviu" / "web" / "static" / "app.js").read_text(encoding="utf-8"))
     yield current
     context.close()
 
@@ -129,6 +129,18 @@ def test_empty_platform_clears_summary_and_shows_empty_table(page):
     assert page.evaluate("window.lastWorkbookSheets") == []
 
 
+def test_summary_dashboard_keeps_unknown_partner_metrics_blank(page):
+    cells = page.evaluate("""async () => {
+        sourcesInitialized=true; activePlatform='tiktok'; currentFileId='data/A.xlsx'; currentSheetName='Tổng kết A';
+        fetch=async()=>({ok:true,json:async()=>({file:'data/A.xlsx',
+            columns:['Stt','ĐỐI TÁC','TỔNG LINK','TỔNG LƯỢT XEM','TỔNG TIM'],
+            rows:[{'Stt':1,'ĐỐI TÁC':'Partner','TỔNG LINK':2,'TỔNG LƯỢT XEM':'','TỔNG TIM':0}],totals:{partners:1}})});
+        await renderSummaryDashboard('A');
+        return [...document.querySelectorAll('#summaryDashboard tbody td')].map(cell => cell.textContent);
+    }""")
+    assert cells == ["1", "Partner", "2", "", "0"]
+
+
 def test_stale_summary_error_cannot_repopulate_empty_platform(page):
     result = page.evaluate("""async () => {
         sourcesInitialized=true; activePlatform='tiktok'; currentFileId='data/A.xlsx'; currentSheetName='Tổng kết A';
@@ -196,6 +208,37 @@ def test_startup_loads_server_preferences_before_first_file_request(page):
     assert '/select-file' in urls
     assert result['file'] == 'data/A.xlsx'
     assert result['threads'] == 'data/B.xlsx'
+
+
+def test_first_load_never_adopts_server_selection_for_platform_without_source(page):
+    result = page.evaluate("""async () => {
+        const calls=[]; const writes=[];
+        fetch=async(url,options)=>{
+            calls.push(url);
+            let data={};
+            if(url==='/source-preferences' && options?.method==='POST') {writes.push(JSON.parse(options.body)); data={success:true};}
+            else if(url==='/source-preferences') data={sources:{threads:window.fixtureSources.threads}};
+            else if(url.startsWith('/list-files')) {
+                const params=new URL(url,location.origin).searchParams;
+                // Without file_id the server answers with its legacy global selection: the Threads workbook.
+                const fileId=params.has('file_id') ? params.get('file_id') : 'data/B.xlsx';
+                data={files:[{id:'data/B.xlsx',label:'B'}],current:fileId,currentLabel:fileId,
+                    currentSheet:fileId?'B':'',scanSheet:fileId?'B':'',sheets:fileId?['B']:[]};
+            } else if(url.startsWith('/preview-excel')) data={file:'data/B.xlsx',currentSheet:'B',sheets:['B'],columns:['LINK AIR'],data:[]};
+            return {ok:true,json:async()=>data};
+        };
+        await window.onload();
+        for(let i=0;i<10;i++) await Promise.resolve();
+        return {file:currentFileId,tiktok:platformSources.tiktok.fileId,threads:platformSources.threads.fileId,
+            previews:calls.filter(url=>url.startsWith('/preview-excel')).length,
+            persisted:writes.map(write=>write.sources.tiktok.fileId)};
+    }""")
+    assert result["file"] == "" and result["tiktok"] == ""
+    assert result["threads"] == "data/B.xlsx"
+    assert result["previews"] == 0
+    assert "data/B.xlsx" not in result["persisted"]
+    assert "Chưa chọn nguồn" in page.locator("#previewBody").inner_text()
+    assert page.locator("#excelFileSelect").input_value() == ""
 
 
 def test_saved_source_different_from_server_current_restores_each_sheet(page):
@@ -355,3 +398,100 @@ def test_preferences_reject_invalid_server_values(page, invalid):
         return {file:platformSources.tiktok.fileId,ready:sourcePreferencesReady};
     }""", invalid)
     assert result == {"file": "", "ready": True}
+
+
+def test_report_modal_opens_on_current_scan_sheet_not_first_workbook_sheet(page):
+    requested = page.evaluate("""async () => {
+        sourcesInitialized=true; activePlatform='tiktok'; currentFileId='data/A.xlsx';
+        Object.assign(platformSources.tiktok,{sheets:['Tháng 1','Tháng 2','Tổng hợp Tháng 2'],
+            displaySheet:'Tổng hợp Tháng 2',scanSheet:'Tháng 2'});
+        const calls=[];
+        fetch=async url=>{calls.push(url);
+            // Like the server: without sheet_name the report falls back to the first data sheet.
+            const sheet=new URL(url,location.origin).searchParams.get('sheet_name')||'Tháng 1';
+            return {ok:true,json:async()=>({file:'data/A.xlsx',currentSheet:sheet,sheets:['Tháng 1','Tháng 2'],
+                partners:[{name:'Partner '+sheet,linkCount:1}]})};};
+        await openReportModal(); return calls;
+    }""")
+    assert len(requested) == 1
+    assert "sheet_name=Th%C3%A1ng+2" in requested[0]
+    assert page.locator("#reportSheetSelect").input_value() == "Tháng 2"
+    assert "Partner Tháng 2" in page.locator("#partnerList").inner_text()
+
+
+def test_threads_report_uses_tiktok_min_view_filter(page):
+    result = page.evaluate("""async () => {
+        sourcesInitialized=true; applyPlatformUI('threads'); currentFileId='data/B.xlsx';
+        Object.assign(platformSources.threads,{sheets:['B'],displaySheet:'B',scanSheet:'B'});
+        const calls=[];
+        fetch=async(url,options)=>{calls.push([url,options?.body?JSON.parse(options.body):null]);
+            if(url==='/export-report') return {ok:true,headers:{get:()=>''},blob:async()=>new Blob(['x'])};
+            return {ok:true,json:async()=>({file:'data/B.xlsx',currentSheet:'B',sheets:['B'],
+                partners:[{name:'Partner B',linkCount:2}]})};};
+        await openReportModal();
+        selectAllPartners();
+        await exportPartnerReport();
+        return calls;
+    }""")
+    partners_url = result[0][0]
+    assert "platform=threads" in partners_url
+    assert "apply_min_views=true" in partners_url and "min_views=100" in partners_url
+    export = next(body for url, body in result if url == "/export-report")
+    assert export["platform"] == "threads"
+    assert export["applyMinViews"] is True and export["minViews"] == 100
+
+
+def test_report_min_view_row_is_shown_for_threads(page):
+    page.evaluate("""() => { applyPlatformUI('threads');
+        const modal=document.getElementById('reportModal'); modal.classList.add('active'); }""")
+    assert page.locator("#reportMinViewRow").is_visible()
+
+
+def test_rejected_saved_sheet_on_startup_keeps_saved_file(page):
+    result = page.evaluate("""async () => {
+        const writes=[];
+        fetch=async(url,options)=>{
+            let data={}, status=200;
+            if(url==='/source-preferences' && options?.method==='POST') {writes.push(JSON.parse(options.body)); data={success:true};}
+            else if(url==='/source-preferences') data={sources:window.fixtureSources};
+            else if(url.startsWith('/list-files')) data={files:[{id:'data/A.xlsx',label:'A'}],current:'data/A.xlsx',
+                currentLabel:'A',currentSheet:'A',scanSheet:'A',sheets:['A']};
+            else if(url==='/select-file') {status=409; data={error:'Đang xử lý dữ liệu'};}
+            else if(url.startsWith('/preview-excel')) data={file:'data/A.xlsx',currentSheet:'A',sheets:['A'],columns:['LINK AIR'],data:[]};
+            else if(options?.method==='POST') data={success:true};
+            return {ok:status===200,status,json:async()=>data};
+        };
+        await window.onload();
+        for(let i=0;i<10;i++) await Promise.resolve();
+        return {file:platformSources.tiktok.fileId,scan:currentScanSheetName,
+            persisted:writes.map(write=>write.sources.tiktok.fileId)};
+    }""")
+    assert result["file"] == "data/A.xlsx"
+    assert result["scan"] == "A"
+    assert "" not in result["persisted"]
+
+
+def test_switching_to_platform_keeps_saved_scan_sheet_before_preview(page):
+    result = page.evaluate("""async () => {
+        sourcesInitialized=true; activePlatform='tiktok';
+        Object.assign(platformSources.threads,{fileId:'data/B.xlsx',displaySheet:'Tháng 2',scanSheet:'Tháng 2',
+            pushSheet:'',sheets:[]});
+        const selects=[];
+        fetch=async(url,options)=>{
+            let data={};
+            if(url.startsWith('/list-files')) data={files:[{id:'data/B.xlsx',label:'B'}],current:'data/B.xlsx',
+                currentLabel:'B',currentSheet:'Tháng 1',scanSheet:'Tháng 1',sheets:['Tháng 1','Tháng 2']};
+            else if(url==='/select-file') {const body=JSON.parse(options.body); selects.push(body);
+                data={success:true,sheet:body.sheet_name||'Tháng 1',scanSheet:body.scan_sheet||'Tháng 1'};}
+            else if(url.startsWith('/preview-excel')) data={file:'data/B.xlsx',currentSheet:'Tháng 2',
+                sheets:['Tháng 1','Tháng 2'],columns:['LINK AIR'],data:[]};
+            else if(options?.method==='POST') data={success:true};
+            return {ok:true,status:200,json:async()=>data};
+        };
+        await setPlatform('threads');
+        for(let i=0;i<10;i++) await Promise.resolve();
+        return {selects,scan:currentScanSheetName};
+    }""")
+    assert result["selects"][-1]["scan_sheet"] == "Tháng 2"
+    assert result["scan"] == "Tháng 2"
+    assert page.locator("#scanSheetSelect").input_value() == "Tháng 2"

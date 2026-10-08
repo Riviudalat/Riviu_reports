@@ -3,20 +3,29 @@ import os
 import urllib.request
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow
+from google_auth_oauthlib.flow import InstalledAppFlow, WSGITimeoutError
 from googleapiclient.discovery import build
 
-from workbook_utils import (
+from riviu.workbook_utils import (
     format_google_sheet_datetime,
+    get_platform,
     google_to_excel_sheet_titles,
     month_label_for_sheet_name,
     store_google_sheet_title_map,
     set_cell_literal,
+    write_json_atomic,
 )
 
 CLIENT_SECRET_FILENAME = "google_oauth_client.json"
 TOKEN_FILENAME = "google_oauth_token.json"
-RESULT_SHEET_PREFIX = "Report Seeding Tiktok"
+LOGIN_TIMEOUT_SECONDS = 300
+
+
+class GoogleLoginRequired(RuntimeError):
+    """Raised instead of opening a browser login from a background push or sync."""
+
+    def __init__(self, message="Cần đăng nhập Google lại trong phần Cấu hình Google."):
+        super().__init__(message)
 
 
 def fetch_account_email(access_token):
@@ -51,20 +60,29 @@ def rgb(red, green, blue):
     return {"red": red / 255, "green": green / 255, "blue": blue / 255}
 
 
-def column_widths(column_count):
-    widths = [46, 94, 510, 150, 120, 68, 150, 145, 112]
-    partner_count = max(0, column_count - 10)
-    widths.extend([210] * partner_count)
-    widths.append(145)
-    return widths[:column_count]
+PUSH_COLUMN_WIDTHS = {
+    "Stt": 46, "Ngày": 94, "Link": 510, "Tên Kênh": 150, "LƯỢT XEM": 120, "TIM": 68,
+    "BÌNH LUẬN": 150, "LƯỢT LƯU": 145, "REPOST": 145, "CHIA SẺ": 112,
+    "Cập nhật lần cuối": 145,
+}
+PARTNER_COLUMN_WIDTH = 210
 
 
-def format_result_sheet(service, spreadsheet_id, sheet_id, row_count, column_count):
+def column_widths(headers):
+    return [
+        PUSH_COLUMN_WIDTHS.get(header, PARTNER_COLUMN_WIDTH if str(header).startswith("Đối tác") else 120)
+        for header in headers
+    ]
+
+
+def format_result_sheet(service, spreadsheet_id, sheet_id, headers, row_count, metric_count=5):
+    column_count = len(headers)
     if not row_count or not column_count:
         return
 
     frozen_rows = 1
-    widths = column_widths(column_count)
+    widths = column_widths(headers)
+    metric_end = 4 + metric_count
     requests = [
         {
             "updateSheetProperties": {
@@ -117,7 +135,7 @@ def format_result_sheet(service, spreadsheet_id, sheet_id, row_count, column_cou
         },
         {
             "repeatCell": {
-                "range": {"sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": row_count, "startColumnIndex": 4, "endColumnIndex": 9},
+                "range": {"sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": row_count, "startColumnIndex": 4, "endColumnIndex": metric_end},
                 "cell": {
                     "userEnteredFormat": {
                         "horizontalAlignment": "RIGHT",
@@ -129,7 +147,7 @@ def format_result_sheet(service, spreadsheet_id, sheet_id, row_count, column_cou
         },
         {
             "repeatCell": {
-                "range": {"sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": row_count, "startColumnIndex": 9, "endColumnIndex": column_count},
+                "range": {"sheetId": sheet_id, "startRowIndex": 1, "endRowIndex": row_count, "startColumnIndex": metric_end, "endColumnIndex": column_count},
                 "cell": {"userEnteredFormat": {"horizontalAlignment": "LEFT"}},
                 "fields": "userEnteredFormat.horizontalAlignment",
             }
@@ -175,7 +193,7 @@ def format_result_sheet(service, spreadsheet_id, sheet_id, row_count, column_cou
                         "startRowIndex": row_count - 1,
                         "endRowIndex": row_count,
                         "startColumnIndex": 4,
-                        "endColumnIndex": 9,
+                        "endColumnIndex": metric_end,
                     },
                     "cell": {
                         "userEnteredFormat": {
@@ -259,7 +277,12 @@ def token_path(base_dir):
     return os.path.join(base_dir, "data", TOKEN_FILENAME)
 
 
+def write_token(token_file, creds):
+    write_json_atomic(token_file, json.loads(creds.to_json()))
+
+
 def try_load_credentials(base_dir):
+    """Return stored credentials (refreshed when possible) without ever opening a browser."""
     token_file = token_path(base_dir)
     if not os.path.exists(token_file):
         return None
@@ -273,8 +296,7 @@ def try_load_credentials(base_dir):
             return creds
         if creds.expired and creds.refresh_token and creds.has_scopes(SCOPES):
             creds.refresh(Request())
-            with open(token_file, "w", encoding="utf-8") as file_obj:
-                file_obj.write(creds.to_json())
+            write_token(token_file, creds)
             return creds
         return creds
     except Exception:
@@ -293,8 +315,7 @@ def oauth_status(base_dir):
                 account_email = fetch_account_email(token_data.get("token", ""))
                 if account_email:
                     token_data["account"] = account_email
-                    with open(token_file, "w", encoding="utf-8") as file_obj:
-                        json.dump(token_data, file_obj, ensure_ascii=False, indent=2)
+                    write_json_atomic(token_file, token_data)
         except (OSError, json.JSONDecodeError):
             account_email = ""
     creds = try_load_credentials(base_dir)
@@ -309,8 +330,7 @@ def oauth_status(base_dir):
 def save_oauth_client(base_dir, payload):
     path = client_secret_path(base_dir)
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w", encoding="utf-8") as file_obj:
-        json.dump(payload, file_obj, ensure_ascii=False, indent=2)
+    write_json_atomic(path, payload)
     return path
 
 
@@ -318,28 +338,28 @@ def load_credentials(base_dir):
     creds = try_load_credentials(base_dir)
     if creds and creds.valid:
         return creds
+    raise GoogleLoginRequired()
 
-    token_file = token_path(base_dir)
+
+def authorize_google(base_dir, timeout_seconds=LOGIN_TIMEOUT_SECONDS):
+    """Interactive browser login; only the explicit login endpoint may call this."""
+    creds = try_load_credentials(base_dir)
+    if creds and creds.valid:
+        return True
     client_file = client_secret_path(base_dir)
-
     if not os.path.exists(client_file):
         raise FileNotFoundError("Chưa có file OAuth client Google.")
-
     flow = InstalledAppFlow.from_client_secrets_file(client_file, SCOPES)
-    creds = flow.run_local_server(host="127.0.0.1", port=0, open_browser=True)
-    with open(token_file, "w", encoding="utf-8") as file_obj:
-        file_obj.write(creds.to_json())
-    return creds
-
-
-def authorize_google(base_dir):
-    load_credentials(base_dir)
+    try:
+        creds = flow.run_local_server(host="127.0.0.1", port=0, open_browser=True, timeout_seconds=timeout_seconds)
+    except WSGITimeoutError as error:
+        raise TimeoutError("Hết thời gian chờ đăng nhập Google. Hãy thử lại.") from error
+    write_token(token_path(base_dir), creds)
     return True
 
 
 def sheets_service(base_dir):
-    credentials = load_credentials(base_dir)
-    return build("sheets", "v4", credentials=credentials, cache_discovery=False)
+    return build("sheets", "v4", credentials=load_credentials(base_dir), cache_discovery=False)
 
 
 def download_google_sheet_authenticated(base_dir, spreadsheet_id, destination_path):
@@ -364,6 +384,8 @@ def download_google_sheet_authenticated(base_dir, spreadsheet_id, destination_pa
             values = service.spreadsheets().values().get(
                 spreadsheetId=spreadsheet_id,
                 range=f"'{escaped}'!A:ZZ",
+                valueRenderOption="UNFORMATTED_VALUE",
+                dateTimeRenderOption="FORMATTED_STRING",
             ).execute().get("values", [])
             worksheet = workbook.create_sheet(title=title_mapping[title])
             for row_index, row in enumerate(values, start=1):
@@ -378,7 +400,8 @@ def create_result_sheet_title(source_sheet_name="", *, platform="tiktok"):
     timestamp = format_google_sheet_datetime()
     month_label = month_label_for_sheet_name(source_sheet_name)
     title = f"{month_label} {timestamp}" if month_label else timestamp
-    return f"Report Seeding Threads {title}" if platform == "threads" else title
+    prefix = get_platform(platform).google_sheet_prefix
+    return f"{prefix} {title}" if prefix else title
 
 
 def ensure_unique_sheet_title(existing_titles, desired_title):
@@ -390,15 +413,6 @@ def ensure_unique_sheet_title(existing_titles, desired_title):
     while f"{base}-{suffix}" in existing_titles:
         suffix += 1
     return f"{base}-{suffix}"
-
-
-def list_google_sheet_titles(base_dir, spreadsheet_id):
-    service = sheets_service(base_dir)
-    spreadsheet = service.spreadsheets().get(
-        spreadsheetId=spreadsheet_id,
-        fields="sheets.properties.title",
-    ).execute()
-    return [item["properties"]["title"] for item in spreadsheet.get("sheets", [])]
 
 
 def push_rows_to_new_sheet(base_dir, spreadsheet_id, rows, source_sheet_name="", *, platform="tiktok"):
@@ -425,7 +439,7 @@ def push_rows_to_new_sheet(base_dir, spreadsheet_id, rows, source_sheet_name="",
     # Only the app-generated final metric totals may be interpreted as formulas.
     # All channel, partner, date, and source text above remains RAW, unchanged.
     if len(rows) > 2 and len(rows[-1]) > 2 and rows[-1][2] == "TỔNG":
-        for index in range(4, min(9, len(rows[-1]))):
+        for index in range(4, min(4 + len(get_platform(platform).metric_columns), len(rows[-1]))):
             column = chr(ord("A") + index)
             expected = f"=SUM({column}2:{column}{len(rows) - 1})"
             if rows[-1][index] != expected:
@@ -436,6 +450,7 @@ def push_rows_to_new_sheet(base_dir, spreadsheet_id, rows, source_sheet_name="",
                 valueInputOption="USER_ENTERED",
                 body={"values": [[expected]]},
             ).execute()
-    format_result_sheet(service, spreadsheet_id, sheet_id, len(rows), max(len(row) for row in rows))
+    metric_count = len(get_platform(platform).metric_columns)
+    format_result_sheet(service, spreadsheet_id, sheet_id, rows[0], len(rows), metric_count)
     apply_link_formatting(service, spreadsheet_id, sheet_id, rows)
     return title

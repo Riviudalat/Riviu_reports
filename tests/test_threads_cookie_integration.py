@@ -8,10 +8,10 @@ import openpyxl
 import pytest
 from fastapi.testclient import TestClient
 
-import app as backend
-import proxy_utils
-import threads_scraper as threads
-import threads_session as sessions
+from riviu import app as backend
+from riviu import proxy_utils
+from riviu.platforms import threads
+from riviu.platforms import threads_session as sessions
 from test_backend_review_fixes import isolated_backend, run_fixture_websocket_start
 from test_threads_transport import Events, NoBrowser, URL, html_fixture, metrics, workbook
 from test_ui_review_fixes import run_js
@@ -126,6 +126,55 @@ def test_authenticated_browser_uses_synthetic_cookie_and_verified_target(monkeyp
     assert COOKIE["value"] not in json.dumps(result)
 
 
+def fetch_authenticated(monkeypatch, html):
+    from playwright.async_api import APIRequestContext, async_playwright
+    class Response:
+        status = 200
+        headers = {"content-type": "text/html; charset=utf-8"}
+        async def body(self): return html.encode()
+        async def dispose(self): pass
+    async def get(self, url, **kwargs): return Response()
+    monkeypatch.setattr(APIRequestContext, "get", get)
+    async def check():
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(headless=True)
+            try: return await threads.fetch_threads_browser(browser, URL, session_cookies=[COOKIE])
+            finally: await browser.close()
+    return asyncio.run(check())
+
+
+def test_verified_session_survives_page_dropping_its_json_scripts(monkeypatch):
+    # React may remove the data scripts that carried the viewer after the navigation proved the login.
+    drop = '<script>for (const node of [...document.scripts]) if (node.type === "application/json") node.remove();</script>'
+    result = fetch_authenticated(monkeypatch, auth_html() + html_fixture() + drop)
+    assert result["error"] == "" and "error_kind" not in result
+    assert result["metrics"] == {"views": 15, "likes": 0, "comments": 0, "reposts": 0, "shares": 2}
+
+
+@pytest.mark.parametrize("target,kind", [("/?error=invalid_post", "invalid_post"), ("/", "redirect")])
+def test_session_client_side_move_off_the_post_is_classified(monkeypatch, target, kind):
+    # The redirect guard pins the HTTP final URL; the page can still move itself afterwards.
+    move = f'<script>history.replaceState(null, "", "{target}");</script>'
+    result = fetch_authenticated(monkeypatch, auth_html() + html_fixture() + move)
+    assert result["error_kind"] == kind
+    assert all(value is None for value in result["metrics"].values())
+
+
+def test_cookie_session_rejects_socks5_auth_route_before_chromium(tmp_path, monkeypatch):
+    path = workbook(tmp_path)
+    original = path.read_bytes()
+    def no_chromium(): raise AssertionError("Chromium must not start")
+    monkeypatch.setattr(sessions, "_playwright_factory", no_chromium)
+    socks = proxy_utils.normalize_proxy_config({"type": "socks5", "host": "proxy.example", "port": 1080,
+                                                "username": "private-user", "password": "private-pass"})
+    # Request mode accepts SOCKS5 auth, but the cookie check always runs in Chromium.
+    with pytest.raises(sessions.SessionError) as caught:
+        asyncio.run(threads.run_threads_scraper(path, mode="request", use_proxy=True, session_cookies=(COOKIE,), proxy_configs=[socks]))
+    assert caught.value.state == "proxy_unsupported"
+    assert "proxy HTTP" in str(caught.value) and "private" not in str(caught.value)
+    assert path.read_bytes() == original
+
+
 def test_authenticated_share_redirect_extracts_header_at_real_permalink(monkeypatch):
     from playwright.async_api import APIRequestContext, async_playwright
     from test_threads_header_views import header
@@ -213,7 +262,7 @@ def test_websocket_auth_snapshot_follows_proxy_without_extra_consent(session_bac
         imported = await session_backend.import_cookie([COOKIE])
         generation = imported["status"]["generation"]
         calls = []
-        async def runner(path, workers, **kwargs): calls.append(kwargs)
+        async def runner(path, options, **kwargs): calls.append(options)
         monkeypatch.setattr(backend, "run_scraper_safely", runner)
         messages = await run_fixture_websocket_start(monkeypatch, {
             "platform": "threads", "use_threads_session": True, "threads_session_generation": generation,
@@ -226,14 +275,22 @@ def test_websocket_auth_snapshot_follows_proxy_without_extra_consent(session_bac
     asyncio.run(check())
 
 
-def test_scan_failure_invalidates_green_session_without_leaking(session_backend, isolated_backend, monkeypatch):
+@pytest.mark.parametrize("error,invalidates", [
+    (lambda: sessions.SessionError("unknown"), True),
+    # Workbook/save/push failures say nothing about the cookies, so a verified session stays usable.
+    (lambda: RuntimeError(COOKIE["value"]), False),
+])
+def test_only_session_errors_invalidate_session_and_nothing_leaks(session_backend, isolated_backend, monkeypatch, error, invalidates):
     async def check():
         imported = await session_backend.import_cookie([COOKIE])
-        async def failed(*_args, **_kwargs): raise RuntimeError(COOKIE["value"])
+        before = session_backend.status()["state"]
+        async def failed(*_args, **_kwargs): raise error()
         monkeypatch.setattr(backend, "run_threads_scraper", failed)
-        await backend.run_scraper_safely(str(isolated_backend / "A.xlsx"), 1, platform="threads", sheet_name="Data",
-                                         threads_cookies=session_backend.snapshot(), threads_generation=imported["status"]["generation"])
-        assert session_backend.status()["state"] == "unknown"
+        await backend.run_scraper_safely(str(isolated_backend / "A.xlsx"), backend.scan_options(
+            platform="threads", sheet_name="Data",
+            threads_cookies=session_backend.snapshot(), threads_generation=imported["status"]["generation"]))
+        assert session_backend.status()["state"] == ("unknown" if invalidates else before)
+        assert backend.manager.last_status["phase"] == "failed"
         assert COOKIE["value"] not in json.dumps(backend.manager.snapshot())
     asyncio.run(check())
 

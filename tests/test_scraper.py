@@ -1,13 +1,12 @@
 import pytest
 
-from scraper import (
+from riviu.platforms.tiktok import (
     channel_name_for_sheet,
     channel_name_quality,
     counts_match,
     enrich_channel_name,
     extract_media_id,
     fetch_profile_channel_name_request,
-    format_metric_log_line,
     format_scrape_result_log,
     is_tiktok_error_page,
     parse_count_value,
@@ -47,7 +46,7 @@ def test_parse_counts_extracts_metrics_from_reflow_detail_json():
 
 
 def test_build_request_url_candidates_includes_video_rewrite():
-    from scraper import build_request_url_candidates
+    from riviu.platforms.tiktok import build_request_url_candidates
 
     candidates = build_request_url_candidates(
         "https://www.tiktok.com/@demo/photo/764002"
@@ -61,7 +60,7 @@ def test_build_request_url_candidates_includes_video_rewrite():
 
 
 def test_build_duplicate_link_payload_lists_all_sheet_rows():
-    import scraper
+    from riviu.platforms import tiktok as scraper
 
     assert hasattr(scraper, "build_duplicate_link_payload")
     payload = scraper.build_duplicate_link_payload([
@@ -93,7 +92,7 @@ def test_build_duplicate_link_payload_lists_all_sheet_rows():
 
 
 def test_build_duplicate_link_payload_ignores_unique_urls_and_preserves_sheets():
-    import scraper
+    from riviu.platforms import tiktok as scraper
 
     assert hasattr(scraper, "build_duplicate_link_payload")
     payload = scraper.build_duplicate_link_payload([
@@ -119,7 +118,7 @@ def test_build_duplicate_link_payload_ignores_unique_urls_and_preserves_sheets()
 
 
 def test_proxy_request_budget_keeps_photo_r1_candidate(monkeypatch):
-    import scraper
+    from riviu.platforms import tiktok as scraper
 
     media_id = "7657817433285135636"
     source_url = (
@@ -171,56 +170,8 @@ def test_proxy_request_budget_keeps_photo_r1_candidate(monkeypatch):
     assert r1_url in fetched_urls
 
 
-def test_scrape_link_request_parses_photo_statsv2():
-    content = """
-    <script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">
-    {
-      "__DEFAULT_SCOPE__": {
-        "webapp.photo-detail": {
-          "itemInfo": {
-            "itemStruct": {
-              "id": "764002",
-              "stats": {
-                "playCount": 0,
-                "diggCount": 45,
-                "commentCount": 2,
-                "collectCount": 0,
-                "shareCount": 1
-              },
-              "statsV2": {
-                "playCount": "1234",
-                "diggCount": "45",
-                "commentCount": "2",
-                "collectCount": "0",
-                "shareCount": "1"
-              }
-            }
-          }
-        }
-      }
-    }
-    </script>
-    """
-    from scraper import scrape_link_request
-
-    def fake_fetch(url, timeout=30):
-        return "https://www.tiktok.com/@demo/photo/764002", content
-
-    import scraper as scraper_module
-
-    original = scraper_module.fetch_tiktok_html
-    scraper_module.fetch_tiktok_html = fake_fetch
-    try:
-        data, channel, status = scrape_link_request("https://www.tiktok.com/@demo/photo/764002")
-    finally:
-        scraper_module.fetch_tiktok_html = original
-
-    assert status == "Success"
-    assert data["Views"] == "1234"
-
-
 def test_parse_counts_extracts_matching_photo_metrics_from_api_data():
-    from scraper import parse_counts
+    from riviu.platforms.tiktok import parse_counts
 
     content = """
     <script id="api-data" type="application/json">
@@ -295,7 +246,7 @@ def test_parse_counts_handles_api_data_script_variants():
 
 
 def test_universal_detail_parser_matches_normalized_scope_keys():
-    from scraper import parse_counts_from_universal_data
+    from riviu.platforms.tiktok import parse_counts_from_universal_data
 
     data = {
         "__DEFAULT_SCOPE__": {
@@ -326,7 +277,7 @@ def test_universal_detail_parser_matches_normalized_scope_keys():
 
 
 def test_hybrid_browser_worker_count_caps_fallback_workers():
-    from scraper import hybrid_browser_worker_count, MAX_BROWSER_FALLBACK_WORKERS
+    from riviu.platforms.tiktok import hybrid_browser_worker_count, MAX_BROWSER_FALLBACK_WORKERS
 
     assert hybrid_browser_worker_count(50, 1000) == MAX_BROWSER_FALLBACK_WORKERS
     assert hybrid_browser_worker_count(6, 20) >= 3
@@ -499,13 +450,7 @@ def test_parse_counts_rejects_single_embedded_item_with_different_media_id():
     data, found = parse_counts(content, media_id="123")
 
     assert found is False
-    assert data == {
-        "Views": "0",
-        "Likes": "0",
-        "Comments": "0",
-        "Saves": "0",
-        "Shares": "0",
-    }
+    assert data == {"Views": None, "Likes": None, "Comments": None, "Saves": None, "Shares": None}
 
 
 def test_parse_counts_rejects_sigi_item_key_with_mismatched_inner_id():
@@ -531,10 +476,10 @@ def test_parse_counts_rejects_sigi_item_key_with_mismatched_inner_id():
     data, found = parse_counts(content, media_id="123")
 
     assert found is False
-    assert data["Views"] == "0"
+    assert data["Views"] is None
 
 
-def test_parse_counts_treats_missing_collect_count_as_zero_for_exact_item():
+def test_parse_counts_treats_missing_collect_count_as_unknown_for_exact_item():
     content = """
     <script id="SIGI_STATE" type="application/json">
     {
@@ -556,11 +501,12 @@ def test_parse_counts_treats_missing_collect_count_as_zero_for_exact_item():
     data, found = parse_counts(content, media_id="123")
 
     assert found is True
+    # Not a confirmed zero: Saves stays blank instead of overwriting the sheet with 0.
     assert data == {
         "Views": "500",
         "Likes": "25",
         "Comments": "1",
-        "Saves": "0",
+        "Saves": None,
         "Shares": "3",
     }
 
@@ -591,29 +537,7 @@ def test_parse_counts_rejects_idless_item_when_media_id_is_expected():
     data, found = parse_counts(content, media_id="123")
 
     assert found is False
-    assert data["Views"] == "0"
-
-
-def test_parse_counts_returns_defaults_when_missing():
-    data, found = parse_counts("<html></html>")
-    assert found is False
-    assert data["Views"] == "0"
-
-
-def test_parse_counts_rejects_ambiguous_multiple_items_without_media_id():
-    content = """
-    <script id="SIGI_STATE" type="application/json">
-    {
-      "ItemModule": {
-        "111": {"id":"111","stats":{"playCount":10,"diggCount":1,"commentCount":0,"collectCount":0,"shareCount":0}},
-        "222": {"id":"222","stats":{"playCount":20,"diggCount":2,"commentCount":0,"collectCount":0,"shareCount":0}}
-      }
-    }
-    </script>
-    """
-    data, found = parse_counts(content, media_id="")
-    assert found is False
-    assert data["Views"] == "0"
+    assert data["Views"] is None
 
 
 def test_parse_count_value_supports_suffixes():
@@ -629,6 +553,13 @@ def test_validate_metrics_rejects_implausible_values():
     assert validate_metrics(
         {"Views": "1000", "Likes": "50", "Comments": "4", "Saves": "2", "Shares": "1"}
     ) is True
+    # Unknown Saves is tolerated; unknown Views is not.
+    assert validate_metrics(
+        {"Views": "1000", "Likes": "50", "Comments": "4", "Saves": None, "Shares": "1"}
+    ) is True
+    assert validate_metrics(
+        {"Views": None, "Likes": "50", "Comments": "4", "Saves": "2", "Shares": "1"}
+    ) is False
 
 
 def test_counts_match_requires_all_metrics_equal():
@@ -636,6 +567,8 @@ def test_counts_match_requires_all_metrics_equal():
     right = {"Views": "10", "Likes": "1", "Comments": "0", "Saves": "0", "Shares": "0"}
     assert counts_match(left, right) is True
     assert counts_match(left, {**right, "Views": "11"}) is False
+    assert counts_match({**left, "Saves": None}, {**right, "Saves": None}) is True
+    assert counts_match({**left, "Saves": None}, right) is False
 
 
 def test_format_scrape_result_log_error_and_success():
@@ -660,11 +593,18 @@ def test_format_scrape_result_log_error_and_success():
     assert "Tim 1" in success_msg
     assert "Tháng 6#5" in success_msg
 
-
-def test_format_metric_log_line_uses_integers():
-    assert format_metric_log_line(
-        {"Views": "39", "Likes": "5", "Comments": "0", "Saves": "0", "Shares": "0"}
-    ) == "view=39 tim=5 cmt=0 save=0 share=0"
+    unknown_msg, _level, unknown_details = format_scrape_result_log(
+        {
+            "url": "https://www.tiktok.com/@a/video/1",
+            "worker": 2,
+            "status": "Success",
+            "data": {"Views": "10", "Likes": "1", "Comments": "0", "Saves": None, "Shares": "0"},
+        },
+        4,
+        10,
+    )
+    assert unknown_details["metrics"]["saves"] is None
+    assert "Lưu —" in unknown_msg
 
 
 def test_parse_channel_name_from_page_uses_item_struct_when_url_handle_mismatch():
@@ -694,7 +634,7 @@ def test_parse_channel_name_from_page_uses_item_struct_when_url_handle_mismatch(
     }
     </script>
     """
-    from scraper import parse_channel_name_from_page, parse_fetched_request_page
+    from riviu.platforms.tiktok import parse_channel_name_from_page, parse_fetched_request_page
 
     name = parse_channel_name_from_page(
         content,
@@ -714,7 +654,7 @@ def test_parse_channel_name_from_page_uses_item_struct_when_url_handle_mismatch(
 
 
 def test_is_usable_channel_name_rejects_numeric_garbage():
-    from scraper import is_usable_channel_name
+    from riviu.platforms.tiktok import is_usable_channel_name
 
     assert is_usable_channel_name("1.0") is False
     assert is_usable_channel_name("1") is False
@@ -739,7 +679,6 @@ def test_channel_name_for_sheet_does_not_write_generated_handle():
         "",
         resolved_url=url,
         status="Success",
-        profile_lookup_attempted={"user16205752394791"},
     )
     assert result == "Lỗi"
 
@@ -751,7 +690,6 @@ def test_channel_name_for_sheet_keeps_real_handle_fallback():
         "",
         resolved_url=url,
         status="Success",
-        profile_lookup_attempted={".lt.h.chill"},
     )
     assert result == "@.lt.h.chill"
 
@@ -762,7 +700,7 @@ def test_fetch_profile_channel_name_request_allows_user_id_accounts():
     {"userInfo": {"user": {"uniqueId": "user2657244715931", "nickname": "Lê Việt Khoa"}}}
     </script>
     """
-    import scraper as scraper_module
+    from riviu.platforms import tiktok as scraper_module
 
     original = scraper_module.fetch_tiktok_html
     scraper_module.fetch_tiktok_html = lambda url, timeout=30: (url, profile_html)
@@ -779,6 +717,54 @@ def test_enrich_channel_name_uses_cache_for_generated_user_accounts():
     assert name == "Quỳnh Tiên"
 
 
+def test_enrich_channel_name_dedupes_lookups_with_initially_empty_shared_state(monkeypatch):
+    from riviu.platforms import tiktok as scraper
+
+    calls = []
+    names = {"demo": "Demo Name"}
+
+    def fake_fetch(url, timeout=30):
+        calls.append(url)
+        handle = url.rsplit("@", 1)[-1]
+        if handle not in names:
+            return url, "<html></html>"
+        return url, (
+            '<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">'
+            f'{{"userInfo": {{"user": {{"uniqueId": "{handle}", "nickname": "{names[handle]}"}}}}}}'
+            "</script>"
+        )
+
+    monkeypatch.setattr(scraper, "fetch_tiktok_html", fake_fetch)
+    # run_scraper passes these freshly created (empty) objects.
+    cache, attempted = {}, set()
+    for media_id in ("1", "2"):
+        assert enrich_channel_name(
+            f"https://www.tiktok.com/@demo/video/{media_id}", "",
+            channel_cache=cache, profile_lookup_attempted=attempted,
+        ) == "Demo Name"
+        assert enrich_channel_name(
+            f"https://www.tiktok.com/@ghost/video/{media_id}", "",
+            channel_cache=cache, profile_lookup_attempted=attempted,
+        ) == "@ghost"
+
+    assert calls == ["https://www.tiktok.com/@demo", "https://www.tiktok.com/@ghost"]
+    assert cache["demo"] == "Demo Name"
+
+
+def test_enrich_channel_name_skips_profile_fetch_when_sheet_has_real_name(monkeypatch):
+    from riviu.platforms import tiktok as scraper
+
+    monkeypatch.setattr(scraper, "fetch_tiktok_html", lambda *_a, **_kw: pytest.fail("profile fetched"))
+
+    assert enrich_channel_name(
+        "https://vt.tiktok.com/ZSdemo/",
+        "",
+        resolved_url="https://www.tiktok.com/@demo/video/1",
+        existing_channel="Kênh Thật",
+        profile_lookup_attempted=set(),
+    ) == "Kênh Thật"
+
+
 def test_enrich_channel_name_uses_resolved_url_for_short_links():
     short_url = "https://vt.tiktok.com/ZSxcMvARr/"
     resolved = "https://www.tiktok.com/@uyn.nh8183/photo/7652254869969014034"
@@ -787,7 +773,7 @@ def test_enrich_channel_name_uses_resolved_url_for_short_links():
     {"author": {"uniqueId": "uyn.nh8183", "nickname": "Uyển Như"}}
     </script>
     """
-    import scraper as scraper_module
+    from riviu.platforms import tiktok as scraper_module
 
     original = scraper_module.fetch_tiktok_html
     scraper_module.fetch_tiktok_html = lambda url, timeout=30: (url, profile_html)
@@ -843,8 +829,159 @@ def test_is_tiktok_error_page_detects_visible_error_text():
     assert is_tiktok_error_page(content) is True
 
 
+# Deleted/nonexistent posts come back as HTTP 200 whose only signal is the item
+# status code (10204 = item not found) in the embedded state (live capture shape).
+DELETED_POST_API_DATA = """
+<html><body><div id="app"><div>Mở TikTok</div></div>
+<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">
+{"__DEFAULT_SCOPE__":{"webapp.app-context":{"language":"vi-VN"},"webapp.reflow.video.strategy":{}}}
+</script>
+<script id="api-data" type="application/json">
+  {"videoDetail":{"statusCode":%s,"statusMessage":"","extra_info":{"web_visit_cnt_more_than_3":"0"}}}
+</script>
+</body></html>
+"""
+
+DELETED_POST_UNIVERSAL = """
+<html><body>
+<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">
+{"__DEFAULT_SCOPE__":{"webapp.video-detail":{"statusCode":%s,"statusMsg":""}}}
+</script>
+</body></html>
+"""
+
+
+@pytest.mark.parametrize("template", [DELETED_POST_API_DATA, DELETED_POST_UNIVERSAL], ids=["api-data", "universal"])
+def test_request_page_with_item_not_found_code_is_only_a_suspicion(template):
+    from riviu.platforms.tiktok import (
+        STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED,
+        is_suspected_gone_status,
+        parse_fetched_request_page,
+        should_clear_stale_metrics,
+    )
+
+    url = "https://www.tiktok.com/@a/video/7673695796168084756"
+    metrics, channel, status = parse_fetched_request_page(url, url, template % "10204")
+
+    # Live posts also get 10204 intermittently: one page never clears numbers.
+    assert status == STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED
+    assert is_suspected_gone_status(status) is True
+    assert should_clear_stale_metrics(status) is False
+    assert channel == ""
+    assert all(value is None for value in metrics.values())
+
+
+@pytest.mark.parametrize("template", [DELETED_POST_API_DATA, DELETED_POST_UNIVERSAL], ids=["api-data", "universal"])
+@pytest.mark.parametrize("code", ["10216", "10222"])
+def test_private_or_restricted_item_codes_are_not_treated_as_deleted(template, code):
+    from riviu.platforms.tiktok import is_suspected_gone_status, parse_fetched_request_page, should_clear_stale_metrics
+
+    url = "https://www.tiktok.com/@a/video/7673695796168084756"
+    _metrics, _channel, status = parse_fetched_request_page(url, url, template % code)
+
+    assert is_suspected_gone_status(status) is False
+    assert should_clear_stale_metrics(status) is False
+
+
+DELETED_POST_RENDERED = DELETED_POST_API_DATA.replace(
+    '<div>Mở TikTok</div>',
+    '<p class="css-1osbocj-PMsgTitle e10waoic3">Trang này không khả dụng</p>',
+) % "10204"
+
+LIVE_POST_RENDERED = """
+<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">
+{"__DEFAULT_SCOPE__":{"webapp.video-detail":{"statusCode":0,"itemInfo":{"itemStruct":{
+  "id":"7673695796168084756",
+  "stats":{"playCount":1214,"diggCount":30,"commentCount":4,"collectCount":2,"shareCount":1}
+}}}}}
+</script>
+"""
+
+
+class _RenderedPage:
+    """Playwright page stub: each navigation renders the next scripted HTML."""
+
+    url = "https://www.tiktok.com/@a/video/7673695796168084756"
+
+    def __init__(self, renders):
+        self.renders = list(renders)
+        self.current = ""
+
+    def navigate(self):
+        self.current = self.renders.pop(0) if len(self.renders) > 1 else self.renders[0]
+
+    async def wait_for_selector(self, *_args, **_kwargs):
+        return None
+
+    async def content(self):
+        return self.current
+
+    async def wait_for_timeout(self, _ms):
+        return None
+
+    async def query_selector(self, *_args, **_kwargs):
+        return None
+
+    async def evaluate(self, *_args, **_kwargs):
+        return None
+
+
+def _patch_browser_navigation(monkeypatch, scraper):
+    async def fake_navigate(page, _url, **_kwargs):
+        page.navigate()
+
+    async def no_sleep(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(scraper, "navigate_tiktok_page", fake_navigate)
+    monkeypatch.setattr(scraper.asyncio, "sleep", no_sleep)
+
+
+def test_browser_scan_rendered_deleted_post_is_unconfirmed_until_oembed_agrees(monkeypatch):
+    import asyncio
+
+    from riviu.platforms import tiktok as scraper
+
+    url = "https://www.tiktok.com/@a/video/7673695796168084756"
+    _patch_browser_navigation(monkeypatch, scraper)
+
+    data, channel, status, page_url = asyncio.run(scraper.scrape_single_link(_RenderedPage([DELETED_POST_RENDERED]), url))
+    assert scraper.should_clear_stale_metrics(status) is False
+    assert status == scraper.STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED
+    assert all(value is None for value in data.values())
+    assert page_url == url
+
+    asked = []
+    monkeypatch.setattr(scraper, "confirm_tiktok_post_gone", lambda link, *_a, **_k: asked.append(link) or True)
+    page = _RenderedPage([DELETED_POST_RENDERED])
+    _data, _channel, status, attempts, _resolved = asyncio.run(scraper.scrape_with_retries(page, url, retries=2))
+    # Page and oEmbed agree: confirmed gone, no further retries.
+    assert (status, attempts, asked) == (scraper.STATUS_TIKTOK_UNAVAILABLE, 1, [url])
+    assert scraper.should_clear_stale_metrics(status) is True
+
+
+def test_browser_transient_not_found_page_is_retried_not_final(monkeypatch):
+    import asyncio
+
+    from riviu.platforms import tiktok as scraper
+
+    url = "https://www.tiktok.com/@a/video/7673695796168084756"
+    _patch_browser_navigation(monkeypatch, scraper)
+    monkeypatch.setattr(scraper, "confirm_tiktok_post_gone", lambda *_a, **_k: False, raising=False)
+
+    page = _RenderedPage([DELETED_POST_RENDERED, LIVE_POST_RENDERED])
+    data, _channel, status, attempts, _resolved = asyncio.run(scraper.scrape_with_retries(page, url, retries=2))
+    assert (status, attempts, data["Views"]) == ("Success", 2, "1214")
+
+    # Still "not found" after every retry while oEmbed says live: keep old numbers.
+    page = _RenderedPage([DELETED_POST_RENDERED])
+    _data, _channel, status, attempts, _resolved = asyncio.run(scraper.scrape_with_retries(page, url, retries=2))
+    assert attempts == 3
+    assert scraper.should_clear_stale_metrics(status) is False
+
+
 def test_parse_fetched_request_page_rejects_redirect_to_different_media_id():
-    from scraper import STATUS_MEDIA_REDIRECT_MISMATCH, parse_fetched_request_page, should_clear_stale_metrics
+    from riviu.platforms.tiktok import STATUS_MEDIA_REDIRECT_MISMATCH, parse_fetched_request_page, should_clear_stale_metrics
 
     content = """
     <script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">
@@ -878,11 +1015,11 @@ def test_parse_fetched_request_page_rejects_redirect_to_different_media_id():
     assert status == STATUS_MEDIA_REDIRECT_MISMATCH
     assert should_clear_stale_metrics(status) is False
     assert channel == ""
-    assert metrics["Views"] == "0"
+    assert metrics["Views"] is None
 
 
 def test_parse_fetched_request_page_rejects_redirect_without_media_id():
-    from scraper import STATUS_MEDIA_REDIRECT_MISMATCH, parse_fetched_request_page
+    from riviu.platforms.tiktok import STATUS_MEDIA_REDIRECT_MISMATCH, parse_fetched_request_page
 
     content = """
     <script id="api-data" type="application/json">
@@ -901,11 +1038,11 @@ def test_parse_fetched_request_page_rejects_redirect_without_media_id():
 
     assert status == STATUS_MEDIA_REDIRECT_MISMATCH
     assert channel == ""
-    assert metrics["Views"] == "0"
+    assert metrics["Views"] is None
 
 
 def test_parse_fetched_request_page_blank_response_is_unreadable():
-    from scraper import STATUS_METRICS_UNREADABLE, parse_fetched_request_page
+    from riviu.platforms.tiktok import STATUS_METRICS_UNREADABLE, parse_fetched_request_page
 
     metrics, channel, status = parse_fetched_request_page(
         "https://www.tiktok.com/@source/video/123",
@@ -915,11 +1052,11 @@ def test_parse_fetched_request_page_blank_response_is_unreadable():
 
     assert status == STATUS_METRICS_UNREADABLE
     assert channel == "@source"
-    assert metrics["Views"] == "0"
+    assert metrics["Views"] is None
 
 
 def test_parse_fetched_request_page_prefers_exact_metrics_over_caption_error_phrase():
-    from scraper import parse_fetched_request_page
+    from riviu.platforms.tiktok import parse_fetched_request_page
 
     content = """
     <html><body>
@@ -958,7 +1095,7 @@ def test_parse_fetched_request_page_prefers_exact_metrics_over_caption_error_phr
 
 
 def test_partial_matching_item_with_caption_phrase_stays_unreadable():
-    from scraper import STATUS_METRICS_UNREADABLE, parse_fetched_request_page
+    from riviu.platforms.tiktok import STATUS_METRICS_UNREADABLE, parse_fetched_request_page
 
     content = """
     <html><body>
@@ -992,11 +1129,11 @@ def test_partial_matching_item_with_caption_phrase_stays_unreadable():
     )
 
     assert status == STATUS_METRICS_UNREADABLE
-    assert metrics["Views"] == "0"
+    assert metrics["Views"] is None
 
 
 def test_parse_fetched_request_page_requires_media_id_for_success():
-    from scraper import STATUS_METRICS_UNREADABLE, parse_fetched_request_page
+    from riviu.platforms.tiktok import STATUS_METRICS_UNREADABLE, parse_fetched_request_page
 
     content = """
     <script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">
@@ -1028,49 +1165,34 @@ def test_parse_fetched_request_page_requires_media_id_for_success():
     )
 
     assert status == STATUS_METRICS_UNREADABLE
-    assert metrics["Views"] == "0"
+    assert metrics["Views"] is None
 
 
 def test_configure_request_concurrency_never_reduces_worker_count():
-    import scraper
-    from scraper import configure_request_concurrency
+    from riviu.platforms import tiktok as scraper
+    from riviu.platforms.tiktok import configure_request_concurrency
 
-    configure_request_concurrency(20, proxy_count=0)
-    assert scraper._request_semaphore._value == 20
-    configure_request_concurrency(20, proxy_count=10)
+    configure_request_concurrency(20)
     assert scraper._request_semaphore._value == 20
 
 
-def test_clamp_worker_count_no_proxy_keeps_requested():
-    from scraper import clamp_worker_count
+def test_clamp_worker_count_keeps_requested_and_ignores_proxy_count():
+    from riviu.platforms.tiktok import clamp_worker_count
 
-    # Không proxy vẫn chạy đúng số luồng đã chọn, không tự giảm.
-    assert clamp_worker_count(50, proxy_count=0) == 50
-
-
-def test_clamp_worker_count_plenty_of_proxies_keeps_requested():
-    from scraper import clamp_worker_count
-
-    assert clamp_worker_count(30, proxy_count=10) == 30
-
-
-def test_clamp_worker_count_few_proxies_keeps_requested_and_distributes_evenly():
-    from scraper import clamp_worker_count
-
-    # 50 luồng chỉ có 3 proxy -> vẫn chạy đủ 50 luồng, chia đều cho 3 proxy
-    # (round-robin ở assign_worker_proxy), không tự giảm số luồng.
+    # Không tự giảm luồng theo số proxy; proxy_count chỉ còn để caller cũ không lỗi.
+    assert clamp_worker_count(50) == 50
     assert clamp_worker_count(50, proxy_count=3) == 50
 
 
 def test_clamp_worker_count_bounds_to_valid_range():
-    from scraper import MAX_WORKERS, clamp_worker_count
+    from riviu.platforms.tiktok import MAX_WORKERS, clamp_worker_count
 
-    assert clamp_worker_count(0, proxy_count=0) == 1
-    assert clamp_worker_count(999, proxy_count=0) == MAX_WORKERS
+    assert clamp_worker_count(0) == 1
+    assert clamp_worker_count(999) == MAX_WORKERS
 
 
 def test_is_request_rate_limited_status():
-    from scraper import is_request_rate_limited_status
+    from riviu.platforms.tiktok import is_request_rate_limited_status
 
     assert is_request_rate_limited_status("Error: HTTP 403") is True
     assert is_request_rate_limited_status("Error: HTTP 429") is True
@@ -1078,7 +1200,7 @@ def test_is_request_rate_limited_status():
 
 
 def test_is_transient_network_status():
-    from scraper import is_transient_network_status
+    from riviu.platforms.tiktok import is_transient_network_status
 
     assert is_transient_network_status("Error: [Errno 11001] getaddrinfo failed") is True
     assert is_transient_network_status("Error: [WinError 10054] connection was forcibly closed") is True
@@ -1092,7 +1214,7 @@ def test_is_transient_network_status():
 
 
 def test_is_hidden_stats_status_accepts_new_and_legacy():
-    from scraper import (
+    from riviu.platforms.tiktok import (
         STATUS_TIKTOK_NO_STATS,
         STATUS_TIKTOK_NO_STATS_LEGACY,
         is_hidden_stats_status,
@@ -1107,7 +1229,7 @@ def test_is_hidden_stats_status_accepts_new_and_legacy():
 
 
 def test_format_scrape_result_log_hidden_is_warn():
-    from scraper import STATUS_TIKTOK_NO_STATS, format_scrape_result_log
+    from riviu.platforms.tiktok import STATUS_TIKTOK_NO_STATS, format_scrape_result_log
 
     message, level, details = format_scrape_result_log(
         {
@@ -1129,7 +1251,7 @@ def test_format_scrape_result_log_hidden_is_warn():
 
 
 def test_scrape_link_retries_transient_network_errors(monkeypatch):
-    import scraper
+    from riviu.platforms import tiktok as scraper
 
     calls = {"n": 0}
 
@@ -1151,7 +1273,7 @@ def test_scrape_link_retries_transient_network_errors(monkeypatch):
 
 
 def test_scrape_link_retries_metrics_unreadable_without_hints(monkeypatch):
-    import scraper
+    from riviu.platforms import tiktok as scraper
 
     calls = {"n": 0}
 
@@ -1174,7 +1296,7 @@ def test_scrape_link_retries_metrics_unreadable_without_hints(monkeypatch):
 
 
 def test_author_only_matching_shell_is_unreadable_not_hidden():
-    from scraper import STATUS_METRICS_UNREADABLE, no_metrics_status
+    from riviu.platforms.tiktok import STATUS_METRICS_UNREADABLE, no_metrics_status
 
     content = """
     <script id="SIGI_STATE" type="application/json">
@@ -1186,7 +1308,7 @@ def test_author_only_matching_shell_is_unreadable_not_hidden():
 
 
 def test_explicit_matching_stats_hidden_marker_is_classified_as_hidden():
-    from scraper import STATUS_TIKTOK_NO_STATS, no_metrics_status
+    from riviu.platforms.tiktok import STATUS_TIKTOK_NO_STATS, no_metrics_status
 
     content = """
     <script id="SIGI_STATE" type="application/json">
@@ -1198,17 +1320,20 @@ def test_explicit_matching_stats_hidden_marker_is_classified_as_hidden():
 
 
 def test_should_clear_stale_metrics_only_matches_terminal_statuses():
-    from scraper import STATUS_TIKTOK_NO_STATS, should_clear_stale_metrics
+    from riviu.platforms.tiktok import STATUS_TIKTOK_NO_STATS, should_clear_stale_metrics
 
     assert should_clear_stale_metrics(STATUS_TIKTOK_NO_STATS) is True
+    # Only a deletion confirmed by two independent signals clears numbers.
     assert should_clear_stale_metrics("Error: Trang TikTok không khả dụng") is True
-    assert should_clear_stale_metrics("Error: HTTP 404") is True
-    assert should_clear_stale_metrics("Error: HTTP 410 Gone") is True
+    from riviu.platforms.tiktok import STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED
+    assert should_clear_stale_metrics(STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED) is False
+    assert should_clear_stale_metrics("Error: HTTP 404") is False
+    assert should_clear_stale_metrics("Error: HTTP 410 Gone") is False
     assert should_clear_stale_metrics("Error: Dịch vụ tạm thời không khả dụng") is False
 
 
 def test_request_redirect_to_different_media_does_not_expose_target_url(monkeypatch):
-    import scraper
+    from riviu.platforms import tiktok as scraper
 
     content = """
     <script id="SIGI_STATE" type="application/json">
@@ -1233,7 +1358,7 @@ def test_request_redirect_to_different_media_does_not_expose_target_url(monkeypa
 
 def test_request_candidate_terminal_status_is_not_overwritten_by_later_transient(monkeypatch):
     import urllib.error
-    import scraper
+    from riviu.platforms import tiktok as scraper
 
     calls = {"n": 0}
 
@@ -1257,7 +1382,7 @@ def test_request_candidate_terminal_status_is_not_overwritten_by_later_transient
 
 def test_request_shell_retry_preserves_terminal_http_error(monkeypatch):
     import urllib.error
-    import scraper
+    from riviu.platforms import tiktok as scraper
 
     calls = {"count": 0}
 
@@ -1275,12 +1400,12 @@ def test_request_shell_retry_preserves_terminal_http_error(monkeypatch):
 
     assert calls["count"] == 2
     assert status == "Error: HTTP 404"
-    assert scraper.should_clear_stale_metrics(status) is True
+    assert scraper.is_suspected_gone_status(status) is True
 
 
 def test_request_prefers_exact_hidden_status_over_earlier_http_404(monkeypatch):
     import urllib.error
-    import scraper
+    from riviu.platforms import tiktok as scraper
 
     calls = {"count": 0}
     hidden_content = """
@@ -1305,7 +1430,7 @@ def test_request_prefers_exact_hidden_status_over_earlier_http_404(monkeypatch):
 
 
 def test_proxy_candidate_budget_reaches_photo_video_alias(monkeypatch):
-    import scraper
+    from riviu.platforms import tiktok as scraper
 
     media_id = "7657817433285135636"
     source_url = f"https://www.tiktok.com/@demo/photo/{media_id}?sender_device=pc"
@@ -1339,7 +1464,7 @@ def test_proxy_candidate_budget_reaches_photo_video_alias(monkeypatch):
 
 
 def test_guard_result_media_identity_rejects_changed_short_url_target():
-    from scraper import STATUS_MEDIA_REDIRECT_MISMATCH, guard_result_media_identity
+    from riviu.platforms.tiktok import STATUS_MEDIA_REDIRECT_MISMATCH, guard_result_media_identity
 
     result = {
         "status": "Success",
@@ -1354,12 +1479,12 @@ def test_guard_result_media_identity_rejects_changed_short_url_target():
     assert guarded["status"] == STATUS_MEDIA_REDIRECT_MISMATCH
     assert guarded["resolved_url"] == ""
     assert guarded["channel_name"] == ""
-    assert guarded["data"] == {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
+    assert guarded["data"] == {"Views": None, "Likes": None, "Comments": None, "Saves": None, "Shares": None}
 
 
 def test_collect_rows_binds_resolved_media_only_to_the_same_source_url():
     import openpyxl
-    from scraper import collect_rows
+    from riviu.platforms.tiktok import collect_rows
 
     workbook = openpyxl.Workbook()
     sheet = workbook.active
@@ -1376,43 +1501,28 @@ def test_collect_rows_binds_resolved_media_only_to_the_same_source_url():
         "https://vt.tiktok.com/ZSold/",
     ])
 
+    # Legacy rows (no stored source URL): a replaced short link must not inherit
+    # the old target, while a link that names the same media id still matches.
+    sheet.append(["https://vt.tiktok.com/ZSreplaced/", "https://www.tiktok.com/@old/video/789", None])
+    sheet.append(["https://www.tiktok.com/@same/video/321", "https://www.tiktok.com/@same/video/321", None])
+
     rows = collect_rows(workbook)
 
     assert rows[0]["expected_media_id"] == "123"
     assert rows[1]["expected_media_id"] == ""
+    assert rows[2]["expected_media_id"] == ""
+    assert rows[3]["expected_media_id"] == "321"
     workbook.close()
 
 
-def test_scrape_with_retries_stops_after_terminal_browser_result(monkeypatch):
-    import asyncio
-    import scraper
-
-    calls = {"n": 0}
-
-    async def fake_scrape_single_link(*_args, **_kwargs):
-        calls["n"] += 1
-        empty = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
-        return empty, "", "Error: Trang TikTok không khả dụng", ""
-
-    monkeypatch.setattr(scraper, "scrape_single_link", fake_scrape_single_link)
-
-    result = asyncio.run(
-        scraper.scrape_with_retries(object(), "https://www.tiktok.com/@demo/video/1", retries=2)
-    )
-
-    assert calls["n"] == 1
-    assert result[2] == "Error: Trang TikTok không khả dụng"
-    assert result[3] == 1
-
-
 def test_select_fallback_result_preserves_terminal_request_evidence():
-    from scraper import select_fallback_result
+    from riviu.platforms.tiktok import select_fallback_result
 
     empty = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
     request_result = {
         "data": empty,
         "channel_name": "",
-        "status": "Error: HTTP 404",
+        "status": "Error: Trang TikTok không khả dụng",
         "attempts": 1,
         "resolved_url": "",
     }
@@ -1430,7 +1540,7 @@ def test_select_fallback_result_preserves_terminal_request_evidence():
 
 
 def test_scrape_link_breaks_early_on_no_stats(monkeypatch):
-    import scraper
+    from riviu.platforms import tiktok as scraper
 
     calls = {"n": 0}
 
@@ -1451,31 +1561,145 @@ def test_scrape_link_breaks_early_on_no_stats(monkeypatch):
     assert status == scraper.STATUS_TIKTOK_NO_STATS
 
 
-def test_request_retries_stop_after_terminal_status(monkeypatch):
-    import scraper
+REQUEST_LIVE_PAGE = """
+<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">
+{"__DEFAULT_SCOPE__":{"webapp.video-detail":{"statusCode":0,"itemInfo":{"itemStruct":{
+  "id":"7673695796168084756",
+  "stats":{"playCount":1214,"diggCount":30,"commentCount":4,"collectCount":2,"shareCount":1}
+}}}}}
+</script>
+"""
 
-    calls = {"n": 0}
 
-    def fake_impl(url, timeout=30):
-        calls["n"] += 1
-        empty = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
-        return empty, "", "Error: HTTP 404", True, ""
+def _request_scan(monkeypatch, pages, oembed_says_gone):
+    """Run the Request retry loop over scripted page answers (one per fetch)."""
+    import urllib.error
 
-    monkeypatch.setattr(scraper, "_scrape_link_request_impl", fake_impl)
+    from riviu.platforms import tiktok as scraper
+
+    url = "https://www.tiktok.com/@demo/video/7673695796168084756"
+    answers = list(pages)
+    asked = []
+
+    def fake_fetch(candidate, **_kwargs):
+        answer = answers.pop(0) if len(answers) > 1 else answers[0]
+        if isinstance(answer, int):
+            raise urllib.error.HTTPError(candidate, answer, "Not Found", None, None)
+        return candidate, answer
+
+    monkeypatch.setattr(scraper, "fetch_tiktok_html", fake_fetch)
     monkeypatch.setattr(scraper.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper, "confirm_tiktok_post_gone",
+                        lambda link, *_a, **_k: asked.append(link) or oembed_says_gone, raising=False)
+    data, _channel, status, attempts, _resolved = scraper.scrape_link_with_retries_request(
+        url, retries=2, channel_overrides={url.casefold(): "Kênh"},
+    )
+    return data, status, attempts, asked
 
-    _data, _channel, status, attempts, _resolved = scraper.scrape_link_with_retries_request(
-        "https://www.tiktok.com/@demo/video/1",
-        retries=2,
+
+def _write_over_old_numbers(status, data=None):
+    import openpyxl
+
+    from riviu.platforms import tiktok as scraper
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Link", "Tên Kênh", "LƯỢT XEM", "TIM"])
+    ws.append(["https://www.tiktok.com/@demo/video/7673695796168084756", "Kênh", 1210, 30])
+    contexts = {"Data": {"worksheet": ws, "columns": {"channel": 2, "views": 3, "likes": 4}}}
+    item = {"sheet_name": "Data", "row": 2, "url": "https://www.tiktok.com/@demo/video/7673695796168084756"}
+    scraper.write_result(contexts, item, data or scraper.empty_metrics(), "Kênh", status)
+    return [ws.cell(row=2, column=3).value, ws.cell(row=2, column=4).value]
+
+
+def test_request_single_item_not_found_then_success_updates_numbers(monkeypatch):
+    item_not_found = DELETED_POST_UNIVERSAL % "10204"
+
+    data, status, attempts, _asked = _request_scan(
+        monkeypatch, [item_not_found, REQUEST_LIVE_PAGE], oembed_says_gone=False
     )
 
-    assert status == "Error: HTTP 404"
-    assert attempts == 1
-    assert calls["n"] == 1
+    assert (status, attempts) == ("Success", 2)
+    assert _write_over_old_numbers(status, data) == [1214, 30]
+
+
+@pytest.mark.parametrize("gone_page", ["item-not-found", 404])
+def test_request_unconfirmed_not_found_keeps_old_numbers(monkeypatch, gone_page):
+    page = DELETED_POST_UNIVERSAL % "10204" if gone_page == "item-not-found" else gone_page
+
+    # Every page fetch says "gone", but oEmbed still answers for the post.
+    _data, status, attempts, asked = _request_scan(monkeypatch, [page], oembed_says_gone=False)
+
+    assert _write_over_old_numbers(status) == [1210, 30]
+    assert attempts == 3
+    assert len(asked) == 1
+
+
+@pytest.mark.parametrize("gone_page", ["item-not-found", 404])
+def test_request_confirmed_deletion_clears_old_numbers(monkeypatch, gone_page):
+    from riviu.platforms import tiktok as scraper
+
+    page = DELETED_POST_UNIVERSAL % "10204" if gone_page == "item-not-found" else gone_page
+
+    _data, status, attempts, asked = _request_scan(monkeypatch, [page], oembed_says_gone=True)
+
+    assert (status, attempts) == (scraper.STATUS_TIKTOK_UNAVAILABLE, 1)
+    assert asked == ["https://www.tiktok.com/@demo/video/7673695796168084756"]
+    assert _write_over_old_numbers(status) == [None, None]
+
+
+class _OembedResponse:
+    def __init__(self, body):
+        self.body = body
+
+    def read(self):
+        return self.body.encode("utf-8")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+
+@pytest.mark.parametrize("answer, verdict", [
+    ((200, '{"version":"1.0","type":"video","title":"x","author_unique_id":"demo"}'), False),
+    ((400, '{"message":"Something went wrong","code":400}'), True),
+    ((404, ""), True),
+    ((400, "<html>proxy error</html>"), None),
+    ((429, '{"message":"rate limited"}'), None),
+    ((503, ""), None),
+    (TimeoutError("timed out"), None),
+])
+def test_oembed_confirmation_verdicts(monkeypatch, answer, verdict):
+    import io
+    import urllib.error
+
+    from riviu.platforms import tiktok as scraper
+
+    requested = []
+
+    def fake_urlopen(request, **_kwargs):
+        requested.append(request.full_url)
+        if isinstance(answer, Exception):
+            raise answer
+        code, body = answer
+        if code != 200:
+            raise urllib.error.HTTPError(request.full_url, code, "x", {}, io.BytesIO(body.encode("utf-8")))
+        return _OembedResponse(body)
+
+    monkeypatch.setattr(scraper, "urlopen_request", fake_urlopen)
+
+    assert scraper.confirm_tiktok_post_gone("https://www.tiktok.com/@demo/photo/7670401030210833685?_r=1") is verdict
+    # oEmbed rejects every /photo/ URL, so the photo id is asked in the /video/ form.
+    assert requested == [
+        "https://www.tiktok.com/oembed?url=https%3A%2F%2Fwww.tiktok.com%2F%40demo%2Fvideo%2F7670401030210833685"
+    ]
 
 
 def test_note_network_failure_pauses_after_streak(monkeypatch):
-    import scraper
+    from riviu.platforms import tiktok as scraper
 
     scraper.configure_request_concurrency(5)
     sleeps = []
@@ -1492,7 +1716,7 @@ def test_note_network_failure_pauses_after_streak(monkeypatch):
 
 
 def test_progress_payload_includes_hidden_count():
-    from scraper import progress_payload
+    from riviu.platforms.tiktok import progress_payload
 
     payload = progress_payload(10, 5, 3, 1, 2, 1000.0, hidden_count=1)
     assert payload["success"] == 3
@@ -1502,7 +1726,7 @@ def test_progress_payload_includes_hidden_count():
 
 def test_write_result_updates_timestamp_only_on_success():
     import openpyxl
-    from scraper import LAST_UPDATE_HEADER, write_result
+    from riviu.platforms.tiktok import LAST_UPDATE_HEADER, write_result
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -1546,7 +1770,7 @@ def test_write_result_updates_timestamp_only_on_success():
 
 def test_write_result_clears_metrics_for_definitive_no_data_statuses():
     import openpyxl
-    from scraper import LAST_UPDATE_HEADER, STATUS_TIKTOK_NO_STATS, write_result
+    from riviu.platforms.tiktok import LAST_UPDATE_HEADER, STATUS_TIKTOK_NO_STATS, write_result
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -1588,20 +1812,28 @@ def test_write_result_clears_metrics_for_definitive_no_data_statuses():
     item = {"sheet_name": "Tháng 7", "row": 2, "url": "https://www.tiktok.com/@a/video/1"}
     empty = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
 
-    for status in (STATUS_TIKTOK_NO_STATS, "Error: Trang TikTok không khả dụng", "Error: HTTP 404"):
+    for status in (STATUS_TIKTOK_NO_STATS, "Error: Trang TikTok không khả dụng"):
         for column, value in zip(range(3, 8), (100, 10, 2, 3, 4)):
             ws.cell(row=2, column=column).value = value
 
         write_result(contexts, item, empty, "", status)
 
-        assert [ws.cell(row=2, column=column).value for column in range(3, 8)] == [0, 0, 0, 0, 0]
+        # Stale numbers are cleared to blank, not to a fake confirmed 0.
+        assert [ws.cell(row=2, column=column).value for column in range(3, 8)] == [None] * 5
+
+    write_result(
+        contexts, item,
+        {"Views": "100", "Likes": "10", "Comments": "0", "Saves": None, "Shares": "4"},
+        "Kênh A", "Success",
+    )
+    assert [ws.cell(row=2, column=column).value for column in range(3, 8)] == [100, 10, 0, None, 4]
 
     wb.close()
 
 
 def test_write_result_preserves_metrics_for_transient_failure():
     import openpyxl
-    from scraper import LAST_UPDATE_HEADER, STATUS_METRICS_UNREADABLE, write_result
+    from riviu.platforms.tiktok import LAST_UPDATE_HEADER, STATUS_METRICS_UNREADABLE, write_result
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -1632,7 +1864,7 @@ def test_write_result_preserves_metrics_for_transient_failure():
 
 def test_write_result_persists_scan_status_and_resolved_url():
     import openpyxl
-    from scraper import STATUS_METRICS_UNREADABLE, write_result
+    from riviu.platforms.tiktok import STATUS_METRICS_UNREADABLE, write_result
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -1679,9 +1911,36 @@ def test_write_result_persists_scan_status_and_resolved_url():
     wb.close()
 
 
+def test_write_result_never_fetches_channel_profiles(monkeypatch):
+    import openpyxl
+    from riviu.platforms import tiktok as scraper
+
+    calls = []
+    monkeypatch.setattr(scraper, "fetch_tiktok_html", lambda url, **_kw: calls.append(url) or (url, ""))
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Link", "Tên Kênh", "LƯỢT XEM"])
+    ws.append(["https://www.tiktok.com/@demo/video/123", "", None])
+    contexts = {"Data": {"worksheet": ws, "columns": {"channel": 2, "views": 3}}}
+    item = {"sheet_name": "Data", "row": 2, "url": "https://www.tiktok.com/@demo/video/123"}
+
+    scraper.write_result(
+        contexts, item,
+        {"Views": "10", "Likes": "1", "Comments": "0", "Saves": "0", "Shares": "0"},
+        "", "Success",
+        resolved_url=item["url"], channel_cache={},
+    )
+
+    # Runs on the event loop: lookups belong to the workers' executor threads.
+    assert calls == []
+    assert ws["B2"].value == "@demo"
+    wb.close()
+
+
 def test_write_result_preserves_existing_channel_on_failed_scan(monkeypatch):
     import openpyxl
-    import scraper
+    from riviu.platforms import tiktok as scraper
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -1713,7 +1972,7 @@ def test_write_result_preserves_existing_channel_on_failed_scan(monkeypatch):
 
 def test_write_result_does_not_use_failed_redirect_for_channel_lookup(monkeypatch):
     import openpyxl
-    import scraper
+    from riviu.platforms import tiktok as scraper
 
     wb = openpyxl.Workbook()
     ws = wb.active
@@ -1747,7 +2006,7 @@ def test_write_result_does_not_use_failed_redirect_for_channel_lookup(monkeypatc
 def test_run_scraper_does_not_report_completion_when_final_save_fails(tmp_path, monkeypatch):
     import asyncio
     import openpyxl
-    import scraper
+    from riviu.platforms import tiktok as scraper
 
     file_path = tmp_path / "report.xlsx"
     workbook = openpyxl.Workbook()
@@ -1797,3 +2056,110 @@ def test_run_scraper_does_not_report_completion_when_final_save_fails(tmp_path, 
         )
 
     assert history_entries == []
+
+
+def test_detect_columns_matches_exact_headers_without_positional_guesses():
+    import openpyxl
+    from riviu.platforms.tiktok import ensure_columns
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Ngày", "Link", "Tên kênh", "Ghi chú", "Link kênh", "Ngày cập nhật", "Khác", "Khác 2", "Khác 3"])
+    ws.append(["01/07", "https://www.tiktok.com/@a/video/1", "A", "note", "https://www.tiktok.com/@a", "x", 1, 2, 3])
+
+    columns = ensure_columns(ws)
+
+    assert (columns["date"], columns["url"], columns["channel"], columns["last_update"]) == (1, 2, 3, 6)
+    metric_keys = ("views", "likes", "comments", "saves", "shares")
+    # Missing metric columns are appended, never guessed from positions 5-9.
+    assert all(columns[key] > 9 for key in metric_keys)
+    assert [ws.cell(row=1, column=columns[key]).value for key in metric_keys] == [
+        "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ",
+    ]
+    assert ws.cell(row=2, column=4).value == "note"
+    wb.close()
+
+
+def test_detect_columns_content_fallback_skips_channel_profile_urls():
+    import openpyxl
+    from riviu.platforms.tiktok import detect_columns
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    # No header names a link column, so the content scan decides; the profile
+    # column sits left of the post column and must not be chosen.
+    ws.append(["Stt", "Kênh", "Bài đăng", "Rút gọn"])
+    ws.append([1, "https://www.tiktok.com/@kenh", None, None])
+    ws.append([2, "https://www.tiktok.com/@kenh2", "https://www.tiktok.com/@kenh2/video/7673695796168084756", None])
+    assert detect_columns(ws)["url"] == 3
+
+    profiles_only = wb.create_sheet("Profiles")
+    profiles_only.append(["Stt", "Kênh"])
+    profiles_only.append([1, "https://www.tiktok.com/@kenh"])
+    assert detect_columns(profiles_only)["url"] is None
+
+    short_links = wb.create_sheet("Short")
+    short_links.append(["Stt", "Kênh", "Bài"])
+    short_links.append([1, "https://www.tiktok.com/@kenh", "https://vt.tiktok.com/ZSabc123/"])
+    assert detect_columns(short_links)["url"] == 3
+    wb.close()
+
+
+def test_build_result_sheet_keeps_blank_metrics_blank_and_reads_text_numbers():
+    import openpyxl
+    from riviu.platforms.tiktok import build_result_sheet
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"])
+    ws.append(["https://www.tiktok.com/@a/video/1", "A", "1.234", None, 0, "", 5])
+
+    result = wb[build_result_sheet(wb, [{"sheet_name": "Data", "row": 2}], "now")]
+
+    assert [result.cell(row=2, column=column).value for column in range(5, 10)] == [1234, None, 0, None, 5]
+    wb.close()
+
+
+def test_build_result_sheet_failure_removes_partial_tab(monkeypatch):
+    import openpyxl
+    from riviu.platforms import tiktok as scraper
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Link", "LƯỢT XEM"])
+    ws.append(["https://www.tiktok.com/@a/video/1", 10])
+    before = list(wb.sheetnames)
+
+    def broken_write(*_args):
+        raise ValueError("fixture write failure")
+
+    monkeypatch.setattr(scraper, "set_cell_literal", broken_write)
+    with pytest.raises(ValueError):
+        scraper.build_result_sheet(wb, [{"sheet_name": "Data", "row": 2}], "now")
+
+    assert wb.sheetnames == before
+    wb.close()
+
+
+def test_run_scraper_resets_request_backoff_in_every_mode(tmp_path, monkeypatch):
+    import asyncio
+    import time
+    import openpyxl
+    from riviu.platforms import tiktok as scraper
+
+    path = tmp_path / "empty.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.title = "Data"
+    wb.active.append(["Link", "LƯỢT XEM"])
+    wb.save(path)
+    wb.close()
+    # Left over from an earlier run that hit 403s / DNS failures.
+    monkeypatch.setattr(scraper, "_request_block_until", time.time() + 1000)
+    monkeypatch.setattr(scraper, "_network_fail_streak", 2)
+
+    asyncio.run(scraper.run_scraper(str(path), sheet_name="Data", use_request=False))
+
+    assert scraper._request_block_until == 0.0
+    assert scraper._network_fail_streak == 0

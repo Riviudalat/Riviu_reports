@@ -37,7 +37,7 @@ jobs:
         run: python -m pytest -q
 
       - name: Check browser JavaScript syntax
-        run: node --check static/app.js
+        run: node --check riviu/web/static/app.js
 
   prepare-release:
     name: Prepare GitHub release
@@ -131,6 +131,9 @@ jobs:
 
       - name: Build bundled server
         run: python desktop/build_sidecar.py --target ${{ matrix.target }}
+
+      - name: Smoke-test bundled server
+        run: python desktop/smoke_sidecar.py --target ${{ matrix.target }}
 
       - name: Build installers and publish updater artifacts (unsigned)
         if: runner.os != 'macOS' || env.APPLE_CERT_IDENTITY == ''

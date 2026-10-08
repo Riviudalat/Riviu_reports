@@ -132,7 +132,7 @@ echo %UI_OK%[OK]%UI_TEXT% Chromium da san sang.%UI_RESET%
 
 echo.
 echo %UI_ORANGE%KIEM TRA MOI TRUONG%UI_RESET%
-"%VENV_PY%" -c "import fastapi, uvicorn, pandas, openpyxl, playwright, PIL, jinja2, multipart, googleapiclient, google.auth, google_auth_oauthlib, socks"
+"%VENV_PY%" -c "import fastapi, uvicorn, pandas, openpyxl, playwright, PIL, jinja2, multipart, googleapiclient, google.auth, google_auth_oauthlib, socks, riviu"
 if errorlevel 1 (
     echo.
     echo %UI_ERROR%[LOI]%UI_TEXT% Moi truong van con loi import.%UI_RESET%

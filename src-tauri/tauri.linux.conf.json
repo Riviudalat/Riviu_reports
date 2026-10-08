@@ -1,5 +1,8 @@
 {
   "bundle": {
+    "externalBin": [
+      "binaries/riviu-server"
+    ],
     "targets": [
       "appimage",
       "deb",

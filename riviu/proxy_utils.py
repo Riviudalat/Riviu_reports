@@ -7,7 +7,7 @@ import socket
 import threading
 import urllib.error
 import urllib.request
-from urllib.parse import quote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 PROXY_LIST_FILENAME = "proxy_list.txt"
 PROXY_TEST_BUILD = "7"
@@ -39,12 +39,6 @@ _session_proxy_lock = threading.Lock()
 _thread_local = threading.local()
 _opener_cache = {}
 _opener_cache_lock = threading.Lock()
-_ORIGINAL_SOCKET_CLASS = socket.socket
-
-
-def _restore_thread_socket():
-    """Clear legacy thread state without changing process-wide sockets."""
-    _thread_local.socks_key = None
 
 
 def _config_cache_key(config):
@@ -149,6 +143,16 @@ def looks_like_host(value):
     return "." in text and not text.isdigit()
 
 
+def _valid_port(value):
+    if isinstance(value, bool):
+        return None
+    try:
+        port = int(value)
+    except (TypeError, ValueError):
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
 def normalize_proxy_config(raw):
     if not isinstance(raw, dict):
         return None
@@ -162,13 +166,10 @@ def normalize_proxy_config(raw):
         proxy_type = "socks5"
     elif proxy_type not in {"http", "socks5"}:
         proxy_type = "http"
-    try:
-        port = int(raw.get("port") or 0)
-    except (TypeError, ValueError):
+    port = _valid_port(raw.get("port"))
+    socks_port = _valid_port(raw.get("socks_port") or raw.get("socksPort") or port)
+    if port is None or socks_port is None:
         return None
-    if port <= 0:
-        return None
-    socks_port = int(raw.get("socks_port") or raw.get("socksPort") or port)
     if username and not password:
         return None
     return {
@@ -197,10 +198,15 @@ def parse_proxy_line(line):
         parsed = urlparse(text)
         scheme = (parsed.scheme or "http").lower()
         proxy_type = "socks5" if scheme.startswith("socks") else "http"
+        try:
+            port = parsed.port
+        except ValueError:  # Out-of-range or non-numeric URL port.
+            return None
         host = parsed.hostname or ""
-        port = parsed.port
         if not host or not port:
             return None
+        # URL userinfo is percent-encoded; store raw credentials so each
+        # transport encodes them exactly once.
         return normalize_proxy_config(
             {
                 "enabled": True,
@@ -208,8 +214,8 @@ def parse_proxy_line(line):
                 "host": host,
                 "port": port,
                 "socks_port": port,
-                "username": parsed.username or "",
-                "password": parsed.password or "",
+                "username": unquote(parsed.username or ""),
+                "password": unquote(parsed.password or ""),
             }
         )
 
@@ -333,16 +339,6 @@ def proxy_label(config):
     return f"{config['type'].upper()} {auth}{config['host']}:{port}"
 
 
-def proxy_status(base_dir):
-    text = load_proxy_list_text(base_dir)
-    configs = parse_proxy_text(text)
-    return {
-        "configured": bool(configs),
-        "count": len(configs),
-        "text": text,
-    }
-
-
 def build_http_proxy_url(config):
     if config.get("username"):
         user = quote(config["username"], safe="")
@@ -371,15 +367,10 @@ def set_session_proxies(configs):
         ]
     with _opener_cache_lock:
         _opener_cache.clear()
-    _restore_thread_socket()
     _thread_local.proxy_key = None
     _thread_local.proxy_config = None
     _thread_local.worker_index = None
     _thread_local.proxy_rotation = 0
-
-
-def set_session_proxy(config):
-    set_session_proxies([config] if config else [])
 
 
 def get_session_proxies():
@@ -434,7 +425,6 @@ def release_thread_proxy():
     with _session_proxy_lock:
         pool = list(_session_proxies)
     if worker_index is None or not pool:
-        _restore_thread_socket()
         _thread_local.proxy_key = None
         _thread_local.proxy_config = None
         return None
@@ -448,9 +438,9 @@ def release_thread_proxy():
 
 class SessionRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, message, headers, newurl):
-        from threads_session import allowed_session_url, SessionError
+        from riviu.platforms.threads_session import allowed_session_url, SessionError
         if not allowed_session_url(newurl):
-            raise SessionError("Chuyển hướng phiên Threads sang địa chỉ không được phép.")
+            raise SessionError("redirect")
         return super().redirect_request(request, fp, code, message, headers, newurl)
 
 
@@ -465,33 +455,29 @@ class ValidatedRedirectHandler(urllib.request.HTTPRedirectHandler):
 
 
 def urlopen_with_config(request, config, timeout=30, cookiejar=None, redirect_validator=None):
+    # urllib runs only the first handler's redirect_request, so a validator and
+    # the cookie-session guard can never both be enforced on one opener.
+    if redirect_validator is not None and cookiejar is not None:
+        raise ValueError("redirect_validator và cookiejar không dùng chung một request.")
+    handlers = ()
     if redirect_validator is not None:
         if not redirect_validator(request.full_url):
             raise ValueError("URL không thuộc nền tảng được phép.")
-        handlers = [ValidatedRedirectHandler(redirect_validator)]
-        if cookiejar is not None:
-            handlers.extend([urllib.request.HTTPCookieProcessor(cookiejar), SessionRedirectHandler()])
-        if config and config.get("enabled") and config.get("type") == "socks5":
-            return _socks_urlopen(request, config, timeout, extra_handlers=handlers)
-        routes = {"http": build_http_proxy_url(config), "https": build_http_proxy_url(config)} if config and config.get("enabled") else {}
-        return urllib.request.build_opener(urllib.request.ProxyHandler(routes), *handlers).open(request, timeout=timeout)
-    if cookiejar is not None:
-        from threads_session import allowed_session_url, SessionError
+        handlers = (ValidatedRedirectHandler(redirect_validator),)
+    elif cookiejar is not None:
+        from riviu.platforms.threads_session import allowed_session_url, SessionError
         if not allowed_session_url(request.full_url):
-            raise SessionError("Phiên Threads chỉ được gửi tới HTTPS Threads.")
+            raise SessionError("unknown")
         handlers = (urllib.request.HTTPCookieProcessor(cookiejar), SessionRedirectHandler())
-        if config and config.get("enabled") and config.get("type") == "socks5":
-            return _socks_urlopen(request, config, timeout, extra_handlers=handlers)
-        routes = {"http": build_http_proxy_url(config), "https": build_http_proxy_url(config)} if config and config.get("enabled") else {}
-        opener = urllib.request.build_opener(urllib.request.ProxyHandler(routes), *handlers)
-        return opener.open(request, timeout=timeout)
-    if not config or not config.get("enabled"):
-        return _direct_opener().open(request, timeout=timeout)
-
-    if config.get("type") == "socks5":
-        return _socks_urlopen(request, config, timeout)
-
-    return _http_proxy_opener(config).open(request, timeout=timeout)
+    route = config if config and config.get("enabled") else None
+    if route and route.get("type") == "socks5":
+        return _socks_urlopen(request, route, timeout, extra_handlers=handlers)
+    if handlers:
+        # Handler state (cookies, validators) is per request: never cache this opener.
+        proxies = {"http": build_http_proxy_url(route), "https": build_http_proxy_url(route)} if route else {}
+        return urllib.request.build_opener(urllib.request.ProxyHandler(proxies), *handlers).open(request, timeout=timeout)
+    opener = _http_proxy_opener(route) if route else _direct_opener()
+    return opener.open(request, timeout=timeout)
 
 
 def urlopen_request(request, timeout=30, redirect_validator=None):

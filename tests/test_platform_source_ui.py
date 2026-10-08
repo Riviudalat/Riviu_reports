@@ -1,5 +1,66 @@
 """Independent platform source rows and explicit workbook request contracts."""
-from test_ui_review_fixes import run_js
+import json
+import re
+
+import pytest
+
+from test_ui_review_fixes import ROOT, run_js
+
+
+FAKE_PLATFORM = """
+function withFakePlatform(entries) {
+    return Object.freeze({...entries, fakegram: Object.freeze({...entries.threads, key: 'fakegram', label: 'Fakegram',
+        icon: '/static/platform-icons/fakegram.svg',
+        dom: Object.freeze({button: 'platformFakegram', sourceLabel: 'sourceFileFakegram', url: 'fakegramUrlInput',
+            sync: 'fakegramSyncBtn', sheet: 'fakegramSheetSelect', push: 'fakegramPushBtn'})})});
+}
+"""
+
+
+def test_source_rows_are_rendered_from_the_platform_registry():
+    # A registry-only third entry must get its own wired source row; index.html is untouched.
+    from playwright.sync_api import sync_playwright
+
+    markup = (ROOT / "riviu" / "web" / "templates" / "index.html").read_text(encoding="utf-8")
+    markup = re.sub(r"<script\b[^>]*>.*?</script>", "", markup, flags=re.DOTALL)
+    assert "data-source-platform" not in markup
+    script = (ROOT / "riviu" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+    assert script.count("const PLATFORMS = Object.freeze({") == 1
+    script = FAKE_PLATFORM + script.replace("const PLATFORMS = Object.freeze({", "const PLATFORMS = withFakePlatform({")
+    with sync_playwright() as playwright:
+        browser = playwright.chromium.launch(headless=True)
+        try:
+            page = browser.new_page()
+            page.route("**/*", lambda route: route.abort())
+            page.set_content(markup)
+            page.evaluate("() => { window.WebSocket = class {static OPEN=1; constructor(){this.readyState=1;} send(){}}; }")
+            page.add_script_tag(content=script)
+            rows = page.evaluate("""() => [...document.querySelectorAll('#platformSourceRows > .platform-source-row')].map(row => {
+                const dom = PLATFORMS[row.dataset.sourcePlatform].dom;
+                const controls = sourceControls(row.dataset.sourcePlatform);
+                const owned = Object.entries(dom).filter(([role]) => role !== 'button')
+                    .every(([, id]) => document.querySelectorAll('#' + id).length === 1 && row.querySelector('#' + id));
+                return {platform: row.dataset.sourcePlatform, owned,
+                    controlsInRow: Object.values(controls).every(node => node && row.contains(node)),
+                    name: row.querySelector('.platform-source-name').textContent,
+                    icon: row.querySelector('.platform-brand-icon').getAttribute('src'),
+                    placeholder: controls.url.placeholder, sheetLabel: controls.sheet.getAttribute('aria-label'),
+                    sync: controls.sync.getAttribute('onclick'), push: controls.push.getAttribute('onclick'),
+                    pushDisabled: controls.push.disabled, file: controls.label.textContent};
+            })""")
+            assert [row["platform"] for row in rows] == ["tiktok", "threads", "fakegram"]
+            assert all(row["owned"] and row["controlsInRow"] for row in rows)
+            assert rows[2] == {"platform": "fakegram", "owned": True, "controlsInRow": True, "name": "Fakegram",
+                               "icon": "/static/platform-icons/fakegram.svg", "placeholder": "Link Google Sheet Fakegram",
+                               "sheetLabel": "Sheet Fakegram", "sync": "syncGoogleSheet('fakegram')",
+                               "push": "pushCurrentSheetToGoogle(event, 'fakegram')", "pushDisabled": True,
+                               "file": "Chưa chọn file"}
+            # The startup listeners found the generated row: typing edits only that platform's source.
+            page.fill("#fakegramUrlInput", "https://docs.google.com/spreadsheets/d/F/edit")
+            sources = page.evaluate("() => [platformSources.fakegram.url, platformSources.threads.url, platformSources.tiktok.url]")
+            assert sources == ["https://docs.google.com/spreadsheets/d/F/edit", "", ""]
+        finally:
+            browser.close()
 
 
 def test_platform_switch_restores_independent_sources_after_ack():
@@ -78,3 +139,35 @@ def test_local_workbook_source_clears_old_google_target():
       setGoogleSheetUrlField(''); assert.equal(el('threadsGoogleSheetUrlInput').value,'');
       assert.equal(platformSources.threads.url,'');
     """)
+
+
+@pytest.mark.parametrize("known_sheets,listed_sheets", [
+    (["B", "Keep"], None),            # sheet list already known
+    ([], ["B", "Keep"]),              # learned from /list-files before selecting
+    ([], None),                       # unknown: server rejects, retry without sheet names
+])
+def test_stale_saved_sheet_never_blocks_switching_platform(known_sheets, listed_sheets):
+    # Saved display sheet 'Gone' was deleted from the workbook; /select-file rejects it with 400.
+    run_js("""(async()=>{
+      sourcesInitialized=true; activePlatform='tiktok'; currentFileId='A.xlsx';
+      const listed=%s;
+      Object.assign(platformSources.threads,{fileId:'B.xlsx',sheets:%s,displaySheet:'Gone',scanSheet:listed||%s.length?'Keep':'Gone',pushSheet:''});
+      const bodies=[];
+      fetch=async(url,options)=>{
+        if(url.startsWith('/list-files')) return listed
+          ? {ok:true,json:async()=>({current:'B.xlsx',currentLabel:'B',sheets:listed})}
+          : {ok:false,status:500,json:async()=>({error:'offline'})};
+        if(url!=='/select-file') return {ok:true,json:async()=>({})};
+        const body=JSON.parse(options.body); bodies.push(body);
+        if([body.sheet_name,body.scan_sheet].some(sheet=>sheet&&!['B','Keep'].includes(sheet)))
+          return {ok:false,status:400,json:async()=>({error:'Sheet không tồn tại'})};
+        return {ok:true,status:200,json:async()=>({success:true,sheet:body.sheet_name||'B',scanSheet:body.scan_sheet||'B'})};
+      };
+      await setPlatform('threads');
+      assert.equal(activePlatform,'threads'); assert.equal(currentFileId,'B.xlsx');
+      assert.equal(platformSources.threads.fileId,'B.xlsx');
+      assert.ok(!bodies.at(-1).sheet_name);
+      if(platformSources.threads.sheets.length){
+        assert.equal(bodies.length,1); assert.equal(bodies[0].scan_sheet,'Keep');
+      }
+    })()""" % (json.dumps(listed_sheets), json.dumps(known_sheets), json.dumps(known_sheets)))

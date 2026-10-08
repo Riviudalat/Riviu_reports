@@ -5,7 +5,7 @@ import json
 import pytest
 from playwright.async_api import async_playwright
 
-import threads_scraper as threads
+from riviu.platforms import threads
 from test_threads_transport import URL, html_fixture
 
 

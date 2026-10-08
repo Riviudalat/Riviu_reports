@@ -52,7 +52,12 @@ _MESSAGES = {
     "too_large": "JSON cookie vượt giới hạn dung lượng.",
     "missing_session": "Không có cookie sessionid Threads dùng được.",
     "stale": "Phiên cookie đã thay đổi. Tải lại trạng thái trước khi quét.",
+    "redirect": "Threads chuyển hướng phiên tới địa chỉ không được phép.",
+    "proxy_unsupported": ("Chromium không hỗ trợ proxy SOCKS5 có tài khoản/mật khẩu nên không kiểm tra được cookie Threads "
+                          "qua proxy này. Đổi sang proxy HTTP hoặc tắt cookie Threads."),
 }
+# Route/navigation problems say nothing about whether the saved cookie still works.
+_NOT_COOKIE_EVIDENCE = frozenset({"redirect", "proxy_unsupported"})
 
 
 class SessionError(ValueError):
@@ -331,7 +336,14 @@ class SecureStore:
             raise SessionError("storage_unavailable") from None
 
 
+def chromium_proxy_unsupported(proxy_config) -> bool:
+    """Chromium cannot authenticate to SOCKS5; never drop credentials to try anyway."""
+    return bool(isinstance(proxy_config, dict) and proxy_config.get("type") == "socks5" and proxy_config.get("username"))
+
+
 class _JSONScripts(HTMLParser):
+    """Collect raw <script type="application/json"> bodies, never captions or HTML text."""
+
     def __init__(self):
         super().__init__(convert_charrefs=False)
         self.scripts = []
@@ -351,6 +363,23 @@ class _JSONScripts(HTMLParser):
             self._parts = None
 
 
+def json_script_documents(content: str) -> list:
+    """Parse a page's JSON data scripts once; undecodable scripts are skipped.
+
+    Shared by session evidence and Threads metric extraction so one snapshot is
+    tokenized a single time.
+    """
+    parser = _JSONScripts()
+    parser.feed(content)
+    documents = []
+    for script in parser.scripts:
+        try:
+            documents.append(json.loads(script))
+        except (ValueError, RecursionError):
+            continue
+    return documents
+
+
 def _account_id(value) -> bool:
     if isinstance(value, bool):
         return False
@@ -359,8 +388,11 @@ def _account_id(value) -> bool:
     return isinstance(value, str) and bool(re.fullmatch(r"[0-9]+", value)) and any(char != "0" for char in value)
 
 
-def auth_evidence(content: str, final_url: str) -> str:
-    """Classify typed root viewer evidence, never arbitrary isLoggedIn/HTTP 200."""
+def auth_evidence(content: str, final_url: str, documents: list | None = None) -> str:
+    """Classify typed root viewer evidence, never arbitrary isLoggedIn/HTTP 200.
+
+    documents: json_script_documents(content), when the caller already parsed it.
+    """
     if not allowed_session_url(final_url):
         return "unknown"
     path = urlsplit(final_url).path.lower()
@@ -370,18 +402,14 @@ def auth_evidence(content: str, final_url: str) -> str:
         return "invalid"
     if not isinstance(content, str) or len(content) > 8 * 1024 * 1024:
         return "unknown"
-    parser = _JSONScripts()
-    try:
-        parser.feed(content)
-    except Exception:
-        return "unknown"
+    if documents is None:
+        try:
+            documents = json_script_documents(content)
+        except Exception:
+            return "unknown"
     evidence = set()
     identities = set()
-    for script in parser.scripts:
-        try:
-            document = json.loads(script)
-        except (ValueError, RecursionError):
-            continue
+    for document in documents:
         if not isinstance(document, dict):
             continue
         # Only document boot tables are authoritative. Do not recursively search
@@ -656,7 +684,9 @@ async def verify_cookies(cookies, proxy_config=None) -> dict:
     try:
         normalized = normalize_cookies(cookies)
     except SessionError as error:
-        return _check_result("expired" if error.state == "expired" else "invalid", route)
+        return _check_result(error.state, route)
+    if chromium_proxy_unsupported(proxy_config):
+        return _check_result("proxy_unsupported", route)
 
     async def check():
         playwright = browser = context = None
@@ -665,7 +695,7 @@ async def verify_cookies(cookies, proxy_config=None) -> dict:
             launch_options = {"headless": True}
             context_options = {"service_workers": "block"}
             if proxy_config is not None:
-                from proxy_utils import playwright_proxy_settings
+                from riviu.proxy_utils import playwright_proxy_settings
                 if not isinstance(proxy_config, dict) or not proxy_config.get("enabled", True):
                     return "unknown"
                 proxy = playwright_proxy_settings(proxy_config)
@@ -720,12 +750,13 @@ class ThreadsSession:
         with self._state_lock:
             if self._loaded:
                 return
-            self._loaded = True
             try:
                 cookies = self.store.load()
                 self._cookies = _normalize(cookies, allow_expired=True) if cookies is not None else None
                 self._state = "expired" if self._cookies and _expired(self._cookies) else "unchecked" if self._cookies else "none"
+                self._loaded = True
             except Exception:
+                # Stay unloaded: a briefly locked keychain is retried on next access.
                 self._state = "storage_unavailable"
                 self._cookies = None
 
@@ -756,6 +787,7 @@ class ThreadsSession:
             except Exception:
                 raise SessionError("storage_unavailable") from None
             self._cookies = copy.deepcopy(cookies)
+            self._loaded = True
             self._generation = uuid.uuid4().hex
             self._state = "valid"
             self._checked_at = result["checkedAt"]
@@ -767,8 +799,7 @@ class ThreadsSession:
             try:
                 cookies = normalize_cookies(payload)
             except SessionError as error:
-                state = "expired" if error.state == "expired" else "invalid"
-                return {"success": False, "status": self.status(), "check": _check_result(state)}
+                return {"success": False, "status": self.status(), "check": _check_result(error.state)}
             result = await verify_cookies(cookies)
             if result["state"] != "valid":
                 return {"success": False, "status": self.status(), "check": result}
@@ -794,8 +825,7 @@ class ThreadsSession:
         try:
             cookies = self.snapshot(generation)
         except SessionError as error:
-            state = "expired" if error.state == "expired" else "invalid"
-            return {"success": False, "status": self.status(), "check": _check_result(state)}
+            return {"success": False, "status": self.status(), "check": _check_result(error.state)}
         result = await verify_cookies(cookies)
         with self._state_lock:
             if generation != self._generation or sequence != self._verify_sequence:
@@ -808,7 +838,7 @@ class ThreadsSession:
         """Record scan auth failure without removing or replacing saved cookies."""
         with self._state_lock:
             self._load()
-            if generation != self._generation or self._cookies is None:
+            if generation != self._generation or self._cookies is None or state in _NOT_COOKIE_EVIDENCE:
                 return self.status()
             self._state = state if state in {"invalid", "checkpoint", "unknown"} else "unknown"
             self._checked_at = _timestamp()
@@ -825,6 +855,7 @@ class ThreadsSession:
             except Exception:
                 raise SessionError("storage_unavailable") from None
             self._cookies = None
+            self._loaded = True
             self._generation = uuid.uuid4().hex
             self._state = "none"
             self._checked_at = None

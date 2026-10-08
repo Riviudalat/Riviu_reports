@@ -1,6 +1,6 @@
 import openpyxl
 
-from scraper import _compute_session_totals, collect_rows
+from riviu.platforms.tiktok import _compute_session_totals, collect_rows
 
 
 def _build_sample_workbook(path):

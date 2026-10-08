@@ -1,9 +1,14 @@
 import json
+from http.cookiejar import CookieJar
 from unittest.mock import patch
 
 import urllib.request
 
-from proxy_utils import (
+import pytest
+
+from riviu import proxy_utils
+from riviu.platforms import threads_session
+from riviu.proxy_utils import (
     assign_worker_proxy,
     build_http_proxy_url,
     normalize_proxy_config,
@@ -11,11 +16,9 @@ from proxy_utils import (
     parse_proxy_text,
     pick_session_proxy,
     playwright_proxy_settings,
-    proxy_status,
     release_thread_proxy,
     resolve_proxy_configs,
     set_session_proxies,
-    set_session_proxy,
 )
 
 
@@ -120,14 +123,8 @@ def test_resolve_proxy_configs_ignores_legacy_json_file(tmp_path):
     assert resolve_proxy_configs(str(tmp_path), "") == []
 
 
-def test_proxy_status_not_configured(tmp_path):
-    status = proxy_status(str(tmp_path))
-    assert status["configured"] is False
-    assert status["count"] == 0
-
-
 def test_proxy_display_name_uses_region():
-    from proxy_utils import proxy_display_name
+    from riviu.proxy_utils import proxy_display_name
 
     config = normalize_proxy_config({
         "host": "us.cliproxy.io",
@@ -139,7 +136,7 @@ def test_proxy_display_name_uses_region():
 
 
 def test_tiktok_html_looks_valid():
-    from proxy_utils import tiktok_html_looks_valid
+    from riviu.proxy_utils import tiktok_html_looks_valid
 
     assert tiktok_html_looks_valid("<html>" + ("x" * 600) + "playCount</html>") is True
     assert tiktok_html_looks_valid("<html>" + ("x" * 600) + "pumbaa-rule</html>") is False
@@ -225,12 +222,12 @@ def test_set_session_proxy_used_by_urlopen_request():
         "username": "user49472",
         "password": "secret",
     })
-    set_session_proxy(config)
+    set_session_proxies([config])
     try:
-        with patch("proxy_utils.urllib.request.build_opener") as build_opener:
+        with patch("riviu.proxy_utils.urllib.request.build_opener") as build_opener:
             build_opener.return_value.open.side_effect = IOError("stop")
             try:
-                from proxy_utils import urlopen_request
+                from riviu.proxy_utils import urlopen_request
 
                 req = urllib.request.Request("https://example.com")
                 urlopen_request(req, timeout=1)
@@ -240,39 +237,43 @@ def test_set_session_proxy_used_by_urlopen_request():
             handler = build_opener.call_args[0][0]
             assert isinstance(handler, urllib.request.ProxyHandler)
     finally:
-        set_session_proxy(None)
-
-
-def test_proxy_cleanup_preserves_external_socket_implementation():
-    import proxy_utils
-    import socket
-
-    class FakeSocksSocket:
-        pass
-
-    socket.socket = FakeSocksSocket
-    proxy_utils._thread_local.socks_key = ("socks5", "1.1.1.1", 1080)
-    try:
-        proxy_utils._restore_thread_socket()
-        assert socket.socket is FakeSocksSocket
-        assert getattr(proxy_utils._thread_local, "socks_key", None) is None
-    finally:
-        socket.socket = proxy_utils._ORIGINAL_SOCKET_CLASS
-        proxy_utils._thread_local.socks_key = None
-
-
-def test_set_session_proxies_preserves_external_socket_implementation():
-    import proxy_utils
-    import socket
-
-    class FakeSocksSocket:
-        pass
-
-    socket.socket = FakeSocksSocket
-    proxy_utils._thread_local.socks_key = ("socks5", "1.1.1.1", 1080)
-    try:
         set_session_proxies([])
-        assert socket.socket is FakeSocksSocket
-    finally:
-        socket.socket = proxy_utils._ORIGINAL_SOCKET_CLASS
-        proxy_utils._thread_local.socks_key = None
+
+
+def test_url_form_credentials_are_decoded_once():
+    config = parse_proxy_line("http://us%3Aer:p%40ss@proxy.test:9000")
+    assert (config["username"], config["password"]) == ("us:er", "p@ss")
+    # Each transport encodes exactly once: no %2540, no literal %40 sent to Chromium.
+    assert build_http_proxy_url(config) == "http://us%3Aer:p%40ss@proxy.test:9000"
+    assert playwright_proxy_settings(config)["password"] == "p@ss"
+
+
+@pytest.mark.parametrize("line", [
+    '{"host": "1.2.3.4", "port": 8080, "socks_port": "abc"}',
+    "http://proxy.test:99999",
+    "socks5://proxy.test:0x50",
+    "1.2.3.4:99999",
+    "1.2.3.4:0",
+    "user:pass@1.2.3.4:70000",
+    "1.2.3.4:65536:user:pass",
+])
+def test_invalid_ports_are_rejected_lines_not_errors(line):
+    assert parse_proxy_line(line) is None
+    assert parse_proxy_text(line + "\n9.9.9.9:65535") == [parse_proxy_line("9.9.9.9:65535")]
+
+
+def test_blocked_session_redirect_has_a_redirect_state():
+    guard = proxy_utils.SessionRedirectHandler()
+    with pytest.raises(threads_session.SessionError) as caught:
+        guard.redirect_request(urllib.request.Request("https://www.threads.com/@a/post/B"), None, 302, "Found", {}, "https://example.com/")
+    assert caught.value.state == "redirect"
+
+
+def test_cookie_session_and_redirect_validator_are_exclusive(monkeypatch):
+    def network(*_args, **_kwargs):
+        raise AssertionError("no opener may be built")
+    monkeypatch.setattr(urllib.request, "build_opener", network)
+    request = urllib.request.Request("https://www.threads.com/@a/post/B")
+    # urllib runs only one redirect_request, so one of the two guards would be skipped.
+    with pytest.raises(ValueError, match="redirect_validator"):
+        proxy_utils.urlopen_with_config(request, None, cookiejar=CookieJar(), redirect_validator=lambda _url: True)

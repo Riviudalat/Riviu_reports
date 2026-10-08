@@ -1,26 +1,30 @@
+import ast
 import io
 import asyncio
+import json
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import patch
 
+import pytest
+
 from openpyxl import load_workbook
 
-from app import build_google_push_rows, build_partner_report, spreadsheet_date_text
-from workbook_utils import SINGLE_LINK_FILL_COLOR, VIDEO_LINK_FILL_COLOR, is_failed_channel_name, metric_number
+from riviu.reports import build_google_push_rows, build_partner_report, spreadsheet_date_text
+from riviu.workbook_utils import SINGLE_LINK_FILL_COLOR, VIDEO_LINK_FILL_COLOR, is_failed_channel_name, metric_number
 
 
 def test_preview_javascript_preserves_numeric_zero_values():
-    source = (Path(__file__).parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    source = (Path(__file__).parents[1] / "riviu" / "web" / "static" / "app.js").read_text(encoding="utf-8")
 
     assert "let val = row[column] ?? '';" in source
 
 
 def test_duplicate_links_panel_is_wired_to_websocket_and_new_scan_reset():
     root = Path(__file__).parents[1]
-    source = (root / "static" / "app.js").read_text(encoding="utf-8")
-    template = (root / "templates" / "index.html").read_text(encoding="utf-8")
+    source = (root / "riviu" / "web" / "static" / "app.js").read_text(encoding="utf-8")
+    template = (root / "riviu" / "web" / "templates" / "index.html").read_text(encoding="utf-8")
 
     assert "message.type === 'duplicates'" in source
     assert "function renderDuplicateLinks" in source
@@ -32,7 +36,7 @@ def test_duplicate_links_panel_is_wired_to_websocket_and_new_scan_reset():
 
 def test_compact_workspace_keeps_global_workflows_and_unique_controls():
     root = Path(__file__).parents[1]
-    template = (root / "templates" / "index.html").read_text(encoding="utf-8")
+    template = (root / "riviu" / "web" / "templates" / "index.html").read_text(encoding="utf-8")
 
     assert 'class="compact-app"' in template
     assert 'id="sourceDrawer"' in template
@@ -46,7 +50,6 @@ def test_compact_workspace_keeps_global_workflows_and_unique_controls():
         "scrapeModeSelect",
         "proxyUseCheckbox",
         "scanSheetSelect",
-        "googleSheetUrlInput",
         "excelFileSelect",
         "reportModal",
         "historyModal",
@@ -56,7 +59,7 @@ def test_compact_workspace_keeps_global_workflows_and_unique_controls():
 
 
 def test_compact_workspace_javascript_switches_tabs_and_source_drawer():
-    source = (Path(__file__).parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    source = (Path(__file__).parents[1] / "riviu" / "web" / "static" / "app.js").read_text(encoding="utf-8")
 
     assert "function setWorkspaceTab" in source
     assert "function openSourceDrawer" in source
@@ -66,7 +69,7 @@ def test_compact_workspace_javascript_switches_tabs_and_source_drawer():
 
 
 def test_preview_counter_does_not_break_websocket_dispatch():
-    source = (Path(__file__).parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    source = (Path(__file__).parents[1] / "riviu" / "web" / "static" / "app.js").read_text(encoding="utf-8")
     preview_source = source[source.index("async function loadPreview"):source.index("async function renderSummaryDashboard")]
     websocket_source = source[source.index("function connectWS"):source.index("function startScraping")]
 
@@ -79,7 +82,7 @@ def test_preview_counter_does_not_break_websocket_dispatch():
 
 
 def test_desktop_updater_only_activates_inside_tauri():
-    source = (Path(__file__).parents[1] / "static" / "app.js").read_text(encoding="utf-8")
+    source = (Path(__file__).parents[1] / "riviu" / "web" / "static" / "app.js").read_text(encoding="utf-8")
 
     assert "function desktopUpdaterInvoke" in source
     assert "window.__TAURI__?.core?.invoke" in source
@@ -88,29 +91,155 @@ def test_desktop_updater_only_activates_inside_tauri():
     assert "window.confirm(`Riviu Reports ${version}" not in source
 
 
-def test_desktop_bundle_keeps_resources_separate_from_user_data_and_release_ci():
+def test_desktop_bundle_keeps_resources_separate_from_user_data_and_release_ci(monkeypatch, tmp_path):
+    import sys
+    from riviu import paths
+
     root = Path(__file__).parents[1]
-    app_source = (root / "app.py").read_text(encoding="utf-8")
+    # Existing source installs keep data/ and the OAuth/proxy/history files at the repository root.
+    monkeypatch.delenv("RIVIU_DATA_DIR", raising=False)
+    assert Path(paths.data_dir()) == root
+    assert Path(paths.TEMPLATES_DIR, "index.html").is_file()
+    assert Path(paths.STATIC_DIR, "app.js").is_file()
+    assert Path(paths.LOGO_PATH).is_file()
+    assert Path(paths.PLATFORM_ICONS_DIR, "tiktok.png").is_file()
+    monkeypatch.setenv("RIVIU_DATA_DIR", str(tmp_path))
+    assert paths.data_dir() == str(tmp_path)
+    # Frozen: resources (and the fallback data dir) come from the PyInstaller bundle root.
+    monkeypatch.delenv("RIVIU_DATA_DIR")
+    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "bundle"), raising=False)
+    assert paths.resource_root() == str(tmp_path / "bundle")
+
     sidecar_source = (root / "desktop" / "build_sidecar.py").read_text(encoding="utf-8")
-    sidecar_entrypoint = (root / "desktop_server.py").read_text(encoding="utf-8")
+    sidecar_entrypoint = (root / "riviu" / "desktop_server.py").read_text(encoding="utf-8")
     config = (root / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8")
     workflow = (root / ".github" / "workflows" / "desktop-release.yml").read_text(encoding="utf-8")
 
-    assert 'getattr(sys, "_MEIPASS"' in app_source
-    assert 'os.environ.get("RIVIU_DATA_DIR", APP_RESOURCE_DIR)' in app_source
-    assert '"templates", "templates"' in sidecar_source
-    assert '"static", "static"' in sidecar_source
+    from desktop import build_sidecar
+
+    # The bundle keeps riviu/web at the path riviu/paths.py resolves under sys._MEIPASS.
+    assert Path(paths.WEB_DIR).relative_to(paths.RESOURCE_ROOT).as_posix() == build_sidecar.WEB_ASSETS_TARGET
+    assert "add_data(ROOT / WEB_ASSETS_TARGET, WEB_ASSETS_TARGET)" in sidecar_source
     assert '"/_desktop/shutdown"' in sidecar_entrypoint
     assert 'PLAYWRIGHT_BROWSERS_PATH' in sidecar_source
     assert 'PLAYWRIGHT_BROWSERS_PATH' in sidecar_entrypoint
     assert '"--additional-hooks-dir"' in sidecar_source
     assert (root / "desktop" / "pyinstaller-hooks" / "hook-playwright.async_api.py").is_file()
-    assert '"externalBin"' in config
+    # Windows bundles the one-folder server as resources that lib.rs spawns from
+    # the resource dir; macOS and Linux keep the one-file externalBin sidecar.
+    platform_bundles = {
+        name: json.loads((root / "src-tauri" / f"tauri.{name}.conf.json").read_text(encoding="utf-8"))["bundle"]
+        for name in ("windows", "macos", "linux")
+    }
+    lib_source = (root / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
+    assert platform_bundles["windows"]["resources"] == {"binaries/riviu-server/": "riviu-server/"}
+    assert "externalBin" not in platform_bundles["windows"] and '"externalBin"' not in config
+    assert 'const SERVER_RESOURCE_DIR: &str = "riviu-server";' in lib_source
+    for name in ("macos", "linux"):
+        assert platform_bundles[name]["externalBin"] == ["binaries/riviu-server"]
     assert '"createUpdaterArtifacts": true' in config
     assert "windows-2022" in workflow
     assert "macos-15-intel" in workflow
     assert "macos-14" in workflow
     assert "TAURI_SIGNING_PRIVATE_KEY" in workflow
+
+
+def test_sidecar_bundles_only_the_headless_shell_browser():
+    from desktop import bundle_contents as bundle
+
+    dry_run = (
+        "Chrome Headless Shell 147.0.7727.15 (playwright chromium-headless-shell v1217)\n"
+        r"  Install location:    C:\venv\Lib\site-packages\playwright\driver\package\.local-browsers\chromium_headless_shell-1217" "\n"
+        "  Download url:        https://cdn.playwright.dev/builds/cft/147.0.7727.15/win64/chrome-headless-shell-win64.zip\n"
+        "\n"
+        "FFmpeg (playwright ffmpeg v1011)\n"
+        "  Install location:    /venv/lib/python3.12/site-packages/playwright/driver/package/.local-browsers/ffmpeg-1011\n"
+        "\n"
+        "Winldd (playwright winldd v1007)\n"
+        r"  Install location:    C:\venv\Lib\site-packages\playwright\driver\package\.local-browsers\winldd-1007" "\n"
+    )
+    browsers = bundle.browser_dirs_from_install_dry_run(dry_run)
+    assert browsers == ["chromium_headless_shell-1217", "winldd-1007"]
+
+    package = r"C:\venv\Lib\site-packages\playwright\driver\package"
+    headless_shell = rf"{package}\.local-browsers\chromium_headless_shell-1217\chrome-headless-shell-win64\chrome-headless-shell.exe"
+    winldd = f"{package}/.local-browsers/winldd-1007/PrintDeps.exe"
+    driver_file = f"{package}/lib/server/registry/index.js"
+    sources = [
+        rf"{package}\.local-browsers\chromium-1217\chrome-win64\chrome.exe",  # stale full Chromium
+        headless_shell,
+        f"{package}/.local-browsers/ffmpeg-1011/ffmpeg-win64.exe",
+        f"{package}/.local-browsers/.links/0123abcd",
+        winldd,
+        driver_file,
+    ]
+    assert [source for source in sources if bundle.keep_playwright_data(source, browsers)] == [
+        headless_shell, winldd, driver_file,
+    ]
+    with pytest.raises(RuntimeError):
+        bundle.browser_dirs_from_install_dry_run(dry_run.replace("chromium_headless_shell-1217", "chromium-1217"))
+
+
+def test_production_browser_launches_are_headless_chromium_only():
+    """The desktop bundle ships only chromium-headless-shell, which Playwright uses
+    for headless Chromium launches without a channel. Anything else would fail in
+    the installed app with a missing-executable error."""
+    root = Path(__file__).parents[1]
+    launches = 0
+    for path in sorted((root / "riviu").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute):
+                assert node.attr not in {"firefox", "webkit", "launch_persistent_context", "connect_over_cdp"}, path.name
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "launch"
+                    and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "chromium"):
+                continue
+            launches += 1
+            for keyword in node.keywords:
+                if keyword.arg is None:
+                    options = keyword.value.id
+                    literals = [
+                        assignment.value for assignment in ast.walk(tree)
+                        if isinstance(assignment, ast.Assign) and isinstance(assignment.value, ast.Dict)
+                        and any(isinstance(target, ast.Name) and target.id == options for target in assignment.targets)
+                    ]
+                    stored_keys = [
+                        target.slice.value for assignment in ast.walk(tree) if isinstance(assignment, ast.Assign)
+                        for target in assignment.targets
+                        if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id == options
+                    ]
+                    assert literals and "headless" not in stored_keys and "channel" not in stored_keys, path.name
+                    for literal in literals:
+                        entries = {key.value: value for key, value in zip(literal.keys, literal.values)}
+                        assert "channel" not in entries and getattr(entries.get("headless"), "value", None) is True, path.name
+                else:
+                    assert keyword.arg != "channel", path.name
+                    if keyword.arg == "headless":
+                        assert isinstance(keyword.value, ast.Constant) and keyword.value.value is True, path.name
+    assert launches == 3
+
+
+def test_bundled_google_discovery_documents_cover_every_api_the_app_builds():
+    import googleapiclient
+    from desktop.bundle_contents import GOOGLE_DISCOVERY_DOCS
+
+    root = Path(__file__).parents[1]
+    built = set()
+    for path in sorted((root / "riviu").rglob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        builders = {
+            alias.asname or alias.name for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "googleapiclient.discovery"
+            for alias in node.names if alias.name == "build"
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in builders:
+                api, version = (argument.value for argument in node.args[:2])
+                assert not any(keyword.arg in {"discoveryServiceUrl", "static_discovery"} for keyword in node.keywords)
+                built.add(f"{api}.{version}")
+    assert built and built <= set(GOOGLE_DISCOVERY_DOCS)
+    documents = Path(googleapiclient.__file__).parent / "discovery_cache" / "documents"
+    assert all((documents / f"{name}.json").is_file() for name in GOOGLE_DISCOVERY_DOCS)
 
 
 def test_template_has_no_duplicate_ids():
@@ -124,7 +253,7 @@ def test_template_has_no_duplicate_ids():
             if values.get("id"):
                 self.ids.append(values["id"])
 
-    template = (Path(__file__).parents[1] / "templates" / "index.html").read_text(encoding="utf-8")
+    template = (Path(__file__).parents[1] / "riviu" / "web" / "templates" / "index.html").read_text(encoding="utf-8")
     parser = IdCollector()
     parser.feed(template)
 
@@ -133,7 +262,7 @@ def test_template_has_no_duplicate_ids():
 
 
 def test_broadcast_duplicates_uses_expected_websocket_envelope():
-    from app import ConnectionManager
+    from riviu.app import ConnectionManager
 
     class FakeConnection:
         def __init__(self):
@@ -157,7 +286,7 @@ def test_broadcast_duplicates_uses_expected_websocket_envelope():
 
 
 def test_validate_proxy_start_blocks_empty(tmp_path):
-    from app import validate_proxy_start
+    from riviu.app import validate_proxy_start
 
     msg = validate_proxy_start(True, "", str(tmp_path))
     assert msg is not None
@@ -165,7 +294,7 @@ def test_validate_proxy_start_blocks_empty(tmp_path):
 
 
 def test_validate_proxy_start_allows_disabled(tmp_path):
-    from app import validate_proxy_start
+    from riviu.app import validate_proxy_start
 
     assert validate_proxy_start(False, "", str(tmp_path)) is None
 
@@ -221,8 +350,80 @@ def test_build_partner_report_filters_by_min_views():
 
 
 def test_export_date_keeps_vietnamese_day_month_year_order():
-    assert spreadsheet_date_text("02/06/2026") == "'02/06/2026"
-    assert spreadsheet_date_text("02-06-2026") == "'02/06/2026"
+    # Pushed with valueInputOption=RAW, which stores text as-is: an apostrophe prefix would be visible.
+    assert spreadsheet_date_text("02/06/2026") == "02/06/2026"
+    assert spreadsheet_date_text("02-06-2026") == "02/06/2026"
+
+
+def unknown_metric_row(**overrides):
+    return {
+        "NGÀY AIR": "", "TÊN KÊNH": "Channel A", "LINK AIR": "https://www.tiktok.com/@a/video/1",
+        "LƯỢT XEM": 200, "TIM": "", "BÌNH LUẬN": None, "LƯỢT LƯU": "", "CHIA SẺ": "1.234",
+        "Cập nhật lần cuối": "05/10/2026-09:30", "partners": ["Partner A"], **overrides,
+    }
+
+
+def test_tiktok_exports_keep_unknown_metrics_blank():
+    report = load_workbook(io.BytesIO(build_partner_report("Partner A", [unknown_metric_row()], apply_min_views=False))).active
+    assert [report.cell(row=4, column=column).value for column in range(4, 9)] == [200, None, None, None, 1234]
+    total = [report.cell(row=5, column=column).value for column in range(4, 9)]
+    assert total == [200, None, None, None, 1234]
+
+    pushed = build_google_push_rows([unknown_metric_row()])
+    assert pushed[1][4:9] == [200, "", "", "", 1234]
+
+
+def test_google_push_uses_each_rows_last_update_and_platform_columns():
+    values = build_google_push_rows([unknown_metric_row(), unknown_metric_row(**{"Cập nhật lần cuối": ""})])
+    update_column = values[0].index("Cập nhật lần cuối")
+    assert [row[update_column] for row in values[1:3]] == ["05/10/2026-09:30", ""]
+
+    threads_row = unknown_metric_row(**{"LINK AIR": "https://www.threads.com/@a/post/ABC", "REPOST": 2})
+    threads = build_google_push_rows([threads_row, {**threads_row, "TIM": 5}], platform="threads")
+    # Same columns as TikTok with REPOST in the fourth metric slot and no status column.
+    assert threads[0] == ["Stt", "Ngày", "Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "REPOST", "CHIA SẺ", "Đối tác", "Cập nhật lần cuối"]
+    # Totals sum the known values like TikTok; only a column with nothing known stays blank.
+    assert threads[-1][5] == "=SUM(F2:F3)" and threads[-1][6] == ""
+
+
+def test_threads_partner_export_matches_tiktok_report_contract(tmp_path):
+    from openpyxl import Workbook
+    from riviu.reports import build_export_payload
+
+    path = tmp_path / "threads.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["Ngày", "Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "REPOST", "CHIA SẺ", "Đối tác"])
+    sheet.append(["14/9/2026", "https://www.threads.com/@miri_viu/post/AAA", "", 500, 3, 1, "", 2, "Cafe A"])
+    sheet.append(["14/9/2026", "https://www.threads.com/@cafe/post/BBB", "Cafe B", 200, 1, 0, 4, "", "Cafe A"])
+    sheet.append(["14/9/2026", "https://www.threads.com/@zero/post/CCC", "zero", 0, 0, 0, 0, 0, "Cafe A"])
+    sheet.append(["14/9/2026", "https://www.threads.com/@unknown/post/DDD", "unknown", "", "", "", "", "", "Cafe A"])
+    sheet.append(["14/9/2026", "https://www.threads.com/share/EEE", "", 900, 1, 1, 1, 1, "Cafe A"])
+    book.save(path)
+
+    def report(apply_min_views):
+        payload = build_export_payload(path, ["Cafe A"], apply_min_views, 100, "Data", "threads")
+        return load_workbook(io.BytesIO(payload["content"])).active
+
+    sheet = report(True)
+    assert [cell.value for cell in sheet[3]] == ["NGÀY AIR", "TÊN KÊNH", "LINK AIR", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "REPOST", "CHIA SẺ"]
+    # 0/unknown views and the unreadable channel (share link, no username) are not reported.
+    assert [sheet.cell(row=row, column=2).value for row in (4, 5)] == ["@miri_viu", "Cafe B"]
+    assert sheet["A6"].value == "TỔNG"
+    # Totals sum the known values; REPOST and CHIA SẺ each have one unknown row.
+    assert [sheet.cell(row=6, column=column).value for column in range(4, 9)] == [700, 4, 1, 4, 2]
+    assert "A2:G2" in {str(merge) for merge in sheet.merged_cells.ranges}
+
+    # The same toggle as TikTok: with the threshold off, zero/unknown-view rows are reported too.
+    assert report(False)["A8"].value == "TỔNG"
+
+
+def test_backend_platform_tables_cover_every_registered_platform():
+    from riviu import app
+    from riviu.workbook_utils import PLATFORMS
+
+    assert set(app.SCAN_RUNNERS) == set(app.PROXY_VALIDATORS) == set(PLATFORMS)
 
 
 def test_build_partner_report_total_row_has_numeric_sums():
@@ -493,7 +694,7 @@ def test_build_partner_report_works_when_logo_image_unavailable():
             "CHIA SẺ": 4,
         }
     ]
-    with patch("app.ExcelImage", side_effect=ImportError("You must install Pillow to fetch image objects")):
+    with patch("riviu.reports.ExcelImage", side_effect=ImportError("You must install Pillow to fetch image objects")):
         report_bytes = build_partner_report("Partner", rows, apply_min_views=False)
     assert isinstance(report_bytes, bytes)
     assert len(report_bytes) > 0
@@ -501,7 +702,7 @@ def test_build_partner_report_works_when_logo_image_unavailable():
 
 def test_build_export_payload_filename_includes_sheet_and_timestamp(tmp_path):
     import openpyxl
-    from app import build_export_payload
+    from riviu.reports import build_export_payload
 
     file_path = tmp_path / "report.xlsx"
     wb = openpyxl.Workbook()
@@ -512,7 +713,7 @@ def test_build_export_payload_filename_includes_sheet_and_timestamp(tmp_path):
     wb.save(file_path)
     wb.close()
 
-    with patch("app.format_filename_datetime", return_value="09-07-2026-13-47"):
+    with patch("riviu.reports.format_filename_datetime", return_value="09-07-2026-13-47"):
         payload = build_export_payload(
             str(file_path),
             ["1/2 Circle Coffee"],
@@ -522,3 +723,62 @@ def test_build_export_payload_filename_includes_sheet_and_timestamp(tmp_path):
         )
 
     assert payload["filename"] == "1-2 Circle Coffee Tháng 7 09-07-2026-13-47.xlsx"
+
+
+def test_export_matches_partner_names_like_the_partner_list(tmp_path):
+    import openpyxl
+    from riviu.reports import build_export_payload
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(["LINK AIR", "TÊN KÊNH", "Đối tác", "LƯỢT XEM"])
+    sheet.append(["https://www.tiktok.com/@a/video/1", "Channel A", "Tầm Bóp Lẩu Nướng", 500])
+    path = tmp_path / "report.xlsx"
+    workbook.save(path)
+    payload = build_export_payload(str(path), ["tầm bóp lẩu nướng"], False, 100, "Data")
+    assert payload["filename"].startswith("Tầm Bóp Lẩu Nướng")
+
+
+def test_multi_partner_export_parses_the_sheet_once(tmp_path, monkeypatch):
+    import zipfile
+
+    import openpyxl
+    import pandas as pd
+    from riviu.reports import build_export_payload
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(["LINK AIR", "TÊN KÊNH", "Đối tác", "Đối tác 2", "LƯỢT XEM"])
+    sheet.append(["https://www.tiktok.com/@a/video/1", "Kênh A", "Partner A", "", 500])
+    sheet.append(["https://www.tiktok.com/@b/video/2", "Kênh B", "Partner A", "Partner B", 600])
+    sheet.append(["https://www.tiktok.com/@c/video/3", "Kênh C", "Partner C", "", 700])
+    path = tmp_path / "report.xlsx"
+    workbook.save(path)
+
+    parses = []
+    original_parse = pd.ExcelFile.parse
+
+    def counting_parse(self, sheet_name=0, *args, **kwargs):
+        parses.append(sheet_name)
+        return original_parse(self, sheet_name, *args, **kwargs)
+
+    monkeypatch.setattr(pd.ExcelFile, "parse", counting_parse)
+    payload = build_export_payload(str(path), ["Partner A", "Partner B", "Partner C"], False, 0, "Data")
+
+    # Partner discovery and all three reports share one parse instead of one per partner.
+    assert parses == ["Data"]
+    links = {}
+    with zipfile.ZipFile(io.BytesIO(payload["content"])) as archive:
+        for name in archive.namelist():
+            report = load_workbook(io.BytesIO(archive.read(name)))
+            links[name.split(" Data ")[0]] = [
+                row[0] for row in report.active.iter_rows(min_row=4, min_col=3, max_col=3, values_only=True)
+            ]
+    # Each report keeps its partner's rows in sheet order, then the TỔNG row.
+    assert links == {
+        "Partner A": ["https://www.tiktok.com/@a/video/1", "https://www.tiktok.com/@b/video/2", None],
+        "Partner B": ["https://www.tiktok.com/@b/video/2", None],
+        "Partner C": ["https://www.tiktok.com/@c/video/3", None],
+    }

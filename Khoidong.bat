@@ -55,7 +55,7 @@ call .venv\Scripts\activate.bat
 set "VENV_PY=%~dp0.venv\Scripts\python.exe"
 
 echo %UI_OK%[OK]%UI_TEXT% Da ket noi moi truong ao.%UI_RESET%
-"%VENV_PY%" -c "from proxy_utils import PROXY_TEST_BUILD; print('[OK] Proxy test build:', PROXY_TEST_BUILD)"
+"%VENV_PY%" -c "from riviu.proxy_utils import PROXY_TEST_BUILD; print('[OK] Proxy test build:', PROXY_TEST_BUILD)"
 echo %UI_ORANGE%[2/4] KIEM TRA THU VIEN%UI_RESET%
 echo.
 
@@ -128,8 +128,8 @@ echo.
 :: Open browser
 start "" cmd /c "timeout /t 2 /nobreak >nul && start http://localhost:1231"
 
-:: Start application
-"%VENV_PY%" app.py
+:: Start application (package riviu)
+"%VENV_PY%" -m riviu
 
 echo.
 echo %UI_ORANGE%========================================================================%UI_RESET%

@@ -5,16 +5,20 @@ from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import socket
+import subprocess
+import sys
 import threading
+import time
 import urllib.request
+from types import SimpleNamespace
 
 import openpyxl
 import pytest
 from playwright.async_api import async_playwright
 
-import proxy_utils
-import scraper
-import threads_scraper
+from riviu import proxy_utils
+from riviu.platforms import tiktok as scraper
+from riviu.platforms import threads as threads_scraper
 
 
 THREADS_URL = "https://www.threads.com/@miri_viu/post/DdRIHGWCURV"
@@ -161,11 +165,18 @@ class _CancelAfterResultLog(_CancelAfterData):
 @pytest.mark.parametrize("manager_type", [_CancelAfterData, _CancelAfterResultLog])
 def test_tiktok_cancel_saves_results_already_sent_to_ui(tmp_path, monkeypatch, manager_type):
     path = _scan_fixture(tmp_path, monkeypatch)
+    book = openpyxl.load_workbook(path)
+    book.active.append(["TỔNG", None, "=SUM(C2:C2)"])
+    book.save(path)
+    book.close()
     manager = manager_type()
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(scraper.run_scraper(path, manager, worker_count=1, retries=0, sheet_name="Data"))
     saved = openpyxl.load_workbook(path)
     assert saved.active["C2"].value == 999
+    # The cancel save must not drop the TỔNG row the scan removed in memory.
+    assert saved.active["A3"].value == "TỔNG"
+    assert saved.active["C3"].value == "=SUM(C2:C2)"
     saved.close()
     assert not any(status.get("done") for status in manager.statuses)
 
@@ -184,6 +195,33 @@ def test_tiktok_cancel_save_failure_surfaces_and_keeps_original(tmp_path, monkey
     assert path.read_bytes() == original
     assert not list(tmp_path.glob("*.tmp"))
     assert not any(status.get("done") for status in manager.statuses)
+
+
+def test_request_scrapes_use_a_per_run_pool_that_is_shut_down(tmp_path, monkeypatch):
+    path = _scan_fixture(tmp_path, monkeypatch)
+    threads = []
+    pools = []
+
+    class TrackedPool(ThreadPoolExecutor):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            pools.append(self)
+
+    def scrape(*_args, **_kwargs):
+        threads.append(threading.current_thread().name)
+        return (
+            {"Views": "999", "Likes": "10", "Comments": "1", "Saves": "2", "Shares": "3"},
+            "Demo", "Success", 1, "https://www.tiktok.com/@demo/video/123",
+        )
+
+    monkeypatch.setattr(scraper, "ThreadPoolExecutor", TrackedPool, raising=False)
+    monkeypatch.setattr(scraper, "_run_request_scrape", scrape)
+    monkeypatch.setattr(scraper, "append_scrape_history", lambda *_a: None)
+    asyncio.run(scraper.run_scraper(path, worker_count=1, retries=0, sheet_name="Data"))
+
+    # Not the loop's shared default executor, which also runs workbook saves.
+    assert threads and all(name.startswith("riviu-tiktok") for name in threads)
+    assert len(pools) == 1 and pools[0]._max_workers == 1 and pools[0]._shutdown
 
 
 def test_atomic_save_finishes_before_cancellation_returns(tmp_path, monkeypatch):
@@ -367,6 +405,224 @@ def test_threads_cancellation_joins_autosave_before_cleanup_save(tmp_path, monke
     saved.close()
 
 
+def _needs_browser_fallback(monkeypatch):
+    """Request fails retryably, so the link goes to a (fake) browser worker that succeeds."""
+    monkeypatch.setattr(scraper, "_run_request_scrape", lambda *_a, **_kw: (
+        scraper.empty_metrics(), "", "Error: HTTP 500", 1, "",
+    ))
+
+    class Context:
+        async def new_page(self):
+            return object()
+
+        async def close(self):
+            pass
+
+    async def make_context(browser, proxy_configs=None):
+        assert browser is not None
+        return Context()
+
+    async def browser_scrape(_page, url, _retries, channel_cache=None):
+        return {"Views": "999", "Likes": "10", "Comments": "1", "Saves": "2", "Shares": "3"}, "Demo", "Success", 1, url
+
+    monkeypatch.setattr(scraper, "make_browser_context", make_context)
+    monkeypatch.setattr(scraper, "scrape_with_retries", browser_scrape)
+    # Skip the polite pause between browser links.
+    monkeypatch.setattr(scraper.random, "uniform", lambda _low, _high: 0)
+
+
+class _SlowExitPlaywright:
+    """Chromium whose exit outlasts the scan, as seen live on a busy Windows host.
+
+    A graceful browser.close() takes SLOW_EXIT seconds unless stopping the driver
+    force-kills Chromium first, and the killed process then keeps the driver stop
+    waiting up to SLOW_EXIT more.
+    """
+
+    SLOW_EXIT = 5.0
+
+    def __init__(self):
+        self.events = []
+        self.killed = asyncio.Event()
+        self.exited = asyncio.Event()
+        fake = self
+
+        class Browser:
+            contexts = []
+
+            async def close(self):
+                fake.events.append("close")
+                try:
+                    await asyncio.wait_for(fake.killed.wait(), fake.SLOW_EXIT)
+                except asyncio.TimeoutError:
+                    return
+                raise RuntimeError("fixture: target closed")
+
+        class Chromium:
+            async def launch(self, **_kwargs):
+                return Browser()
+
+        self.chromium = Chromium()
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        # Closing the driver's stdin makes it force-kill every browser.
+        self.events.append("stop")
+        self.killed.set()
+        try:
+            await asyncio.wait_for(self.exited.wait(), self.SLOW_EXIT)
+        except asyncio.TimeoutError:
+            pass
+
+
+class _LastResultClock:
+    """Manager stub that only notes when the last result reached the UI."""
+
+    last_result = None
+
+    async def broadcast_data(self, _data):
+        self.last_result = time.monotonic()
+
+    def __getattr__(self, _name):
+        async def ignore(*_args, **_kwargs):
+            pass
+        return ignore
+
+
+@pytest.mark.parametrize("platform, bound", [("tiktok", 2.5), ("threads", 1.5)])
+def test_finished_scan_does_not_wait_for_slow_chromium_exit(tmp_path, monkeypatch, platform, bound):
+    # Default bounds. The live Threads profile reported done 5.5 s after the last
+    # result: 3 s browser close + 2 s driver stop.
+    fake = _SlowExitPlaywright()
+    clock = _LastResultClock()
+    if platform == "tiktok":
+        path = _scan_fixture(tmp_path, monkeypatch)
+        # Hybrid starts Chromium only for a fallback, so make this link need one.
+        _needs_browser_fallback(monkeypatch)
+        monkeypatch.setattr(scraper, "async_playwright", fake)
+        scan = lambda: scraper.run_scraper(path, clock, worker_count=1, retries=0, sheet_name="Data",
+                                           use_request=True, browser_fallback=True)
+    else:
+        path = _threads_scan_fixture(tmp_path, monkeypatch)
+        monkeypatch.setattr(threads_scraper, "async_playwright", fake)
+
+        async def browser_result(_browser, _url):
+            return {"channel": "demo", "metrics": {"views": 999, "likes": 1, "comments": 0, "reposts": 0, "shares": 0}, "error": ""}
+
+        monkeypatch.setattr(threads_scraper, "fetch_threads_browser", browser_result)
+        scan = lambda: threads_scraper.run_threads_scraper(path, clock, sheet_name="Data", mode="hybrid")
+
+    async def check():
+        await scan()
+        assert time.monotonic() - clock.last_result < bound
+        # The kill was requested before the scan reported completion.
+        assert fake.events == ["close", "stop"]
+        assert scraper.browser_cleanup_pending()
+        fake.exited.set()
+        for _ in range(100):
+            if not scraper.browser_cleanup_pending():
+                break
+            await asyncio.sleep(0.01)
+        assert not scraper.browser_cleanup_pending()
+
+    asyncio.run(check())
+    saved = openpyxl.load_workbook(path)
+    try:
+        assert saved.active["C2"].value == 999
+    finally:
+        saved.close()
+
+
+def _win_process(pid, access):
+    import ctypes
+    kernel32 = ctypes.WinDLL("kernel32")
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    return kernel32, kernel32.OpenProcess(access, False, pid)
+
+
+def _wait_process_exit(pid, seconds):
+    kernel32, handle = _win_process(pid, 0x00100000)  # SYNCHRONIZE
+    if not handle:
+        return True
+    try:
+        return kernel32.WaitForSingleObject(handle, int(seconds * 1000)) == 0  # WAIT_OBJECT_0
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="direct force-kill of the browser tree is Windows-only")
+def test_browser_that_will_not_exit_is_force_killed_but_its_driver_is_not():
+    # Live: browser.close() outlasted its 3 s bound and Chromium (11 processes,
+    # 1.1 GB) stayed alive ~41 s after done; only the driver stop killed it, via
+    # a taskkill that took 10+ s to start on a busy host.
+    python = getattr(sys, "_base_executable", sys.executable)  # no venv redirector process
+    script = ("import subprocess, time\n"
+              "kids = [subprocess.Popen(['ping', '-n', '120', '127.0.0.1'], stdout=subprocess.DEVNULL) for _ in range(2)]\n"
+              "print(*(kid.pid for kid in kids), flush=True)\n"
+              "time.sleep(120)\n")
+    driver = subprocess.Popen([python, "-c", script], stdout=subprocess.PIPE, text=True)
+    renderers = []
+    try:
+        renderers = [int(pid) for pid in driver.stdout.readline().split()]
+        assert len(renderers) == 2
+
+        class Browser:  # Playwright 1.59 keeps the driver process at this path.
+            contexts = []
+            _impl_obj = SimpleNamespace(_connection=SimpleNamespace(_transport=SimpleNamespace(_proc=driver)))
+
+            async def close(self):
+                await asyncio.sleep(60)  # a graceful exit that does not finish
+
+        async def close():
+            started = time.monotonic()
+            await scraper.close_browser_bounded(Browser())
+            return time.monotonic() - started
+
+        assert asyncio.run(close()) < 1.0
+        assert all(_wait_process_exit(pid, 5) for pid in renderers)
+        assert driver.poll() is None  # the driver stays to stop cleanly
+    finally:
+        driver.kill()
+        for pid in renderers:
+            kernel32, handle = _win_process(pid, 0x0001)  # PROCESS_TERMINATE
+            if handle:
+                kernel32.TerminateProcess(handle, 1)
+                kernel32.CloseHandle(handle)
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="direct force-kill of the browser tree is Windows-only")
+def test_real_chromium_that_will_not_exit_is_disconnected_soon_after_the_grace():
+    async def check():
+        async with scraper.playwright_session(async_playwright) as playwright:
+            browser = await playwright.chromium.launch(headless=True)
+            page = await browser.new_page()
+            await page.set_content("<p>fixture</p>")
+            disconnected = asyncio.Event()
+            browser.on("disconnected", lambda _browser: disconnected.set())
+
+            async def never_exits():
+                await asyncio.sleep(60)
+
+            browser.close = never_exits
+            started = time.monotonic()
+            await scraper.close_browser_bounded(browser)
+            assert time.monotonic() - started < 1.0
+            # Only a kill ends this browser before the driver stops. Process
+            # teardown itself can take seconds on a loaded Windows host.
+            await asyncio.wait_for(disconnected.wait(), 30)
+
+    asyncio.run(check())
+
+
 def test_threads_failed_final_save_still_closes_browser_and_workbook(tmp_path, monkeypatch):
     path = _threads_scan_fixture(tmp_path, monkeypatch)
     original = path.read_bytes()
@@ -406,3 +662,238 @@ def test_threads_failed_final_save_still_closes_browser_and_workbook(tmp_path, m
         asyncio.run(threads_scraper.run_threads_scraper(path, sheet_name="Data", mode="browser"))
     assert path.read_bytes() == original
     assert closed == {"browser": True, "workbook": True}
+
+
+def test_hybrid_does_not_send_confirmed_unavailable_pages_to_the_browser(monkeypatch):
+    import asyncio
+    from riviu.platforms import tiktok as scraper
+
+    statuses = {"https://www.tiktok.com/@a/video/1": scraper.STATUS_TIKTOK_UNAVAILABLE,
+                "https://www.tiktok.com/@a/video/2": scraper.STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED,
+                "https://www.tiktok.com/@a/video/3": "Error: HTTP 404",
+                "https://www.tiktok.com/@a/video/4": "Error: Không đọc được số liệu"}
+    monkeypatch.setattr(scraper, "_run_request_scrape",
+                        lambda _index, url, **_kwargs: (scraper.empty_metrics(), "", statuses[url], 1, ""))
+
+    async def scenario():
+        scrape_queue, browser_queue, result_queue = asyncio.Queue(), asyncio.Queue(), asyncio.Queue()
+        for url in statuses:
+            scrape_queue.put_nowait({"url": url, "row": 2})
+        scrape_queue.put_nowait(None)
+        await scraper.request_worker_loop(1, scrape_queue, browser_queue, result_queue, retries=1, browser_fallback=True)
+        return [item["url"] for item in browser_queue._queue], [item["url"] for item in result_queue._queue]
+
+    to_browser, finished = asyncio.run(scenario())
+    # Only a deletion confirmed by oEmbed is final in Request mode. A "not found"
+    # page that oEmbed did not confirm may be a transient answer for a live post,
+    # so it gets the browser retry like an unreadable page.
+    assert finished == ["https://www.tiktok.com/@a/video/1"]
+    assert to_browser == ["https://www.tiktok.com/@a/video/2", "https://www.tiktok.com/@a/video/3",
+                          "https://www.tiktok.com/@a/video/4"]
+
+
+def _rows_fixture(tmp_path, count):
+    path = tmp_path / "rows.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"])
+    for index in range(count):
+        sheet.append([f"https://www.tiktok.com/@demo/video/{100 + index}", "Demo", 10, 1, 0, 0, 0])
+    book.save(path)
+    book.close()
+    return path
+
+
+def _success_for_url(_index, url, **_kwargs):
+    return {"Views": "999", "Likes": "10", "Comments": "1", "Saves": "2", "Shares": "3"}, "Demo", "Success", 1, url
+
+
+def test_total_row_placement_does_constant_whole_sheet_scans(monkeypatch):
+    # max_row/max_column walk every cell; one walk per row made TỔNG placement
+    # quadratic (minutes on a 3,674 x 68 workbook, all of it on the event loop).
+    from openpyxl.worksheet.worksheet import Worksheet
+
+    scans = []
+    for name in ("max_row", "max_column"):
+        getter = getattr(Worksheet, name).fget
+
+        def counted(sheet, _getter=getter):
+            scans.append(1)
+            return _getter(sheet)
+
+        monkeypatch.setattr(Worksheet, name, property(counted))
+
+    def scans_for(rows):
+        book = openpyxl.Workbook()
+        sheet = book.active
+        sheet.title = "Data"
+        sheet.append(["Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ", *[f"X{i}" for i in range(30)]])
+        for index in range(rows):
+            sheet.append([f"https://www.tiktok.com/@demo/video/{index + 1}", "Demo", 10, 1, 0, 0, 0])
+        sheet.append(["Ghi chú", "footer"])
+        # Styled but empty rows below the data must not push TỔNG further down.
+        sheet.cell(row=rows + 5, column=3).fill = openpyxl.styles.PatternFill("solid", fgColor="FFFF00")
+        scans.clear()
+        scraper.append_sheet_total_rows(book, sheet_name="Data")
+        assert sheet.cell(row=rows + 3, column=1).value == "TỔNG"
+        assert sheet.cell(row=rows + 3, column=3).value == f"=SUM(C2:C{rows + 1})"
+        return len(scans)
+
+    small, large = scans_for(50), scans_for(400)
+    assert small == large
+    assert large < 100  # the old per-row walk made 400+ here
+
+
+def test_scan_setup_and_finish_keep_the_event_loop_responsive(tmp_path, monkeypatch):
+    path = _rows_fixture(tmp_path, 3)
+    monkeypatch.setattr(scraper, "async_playwright", _NoBrowser)
+    monkeypatch.setattr(scraper, "_run_request_scrape", _success_for_url)
+    clear_totals, rebuild_summary = scraper.clear_existing_total_rows, scraper.rebuild_summary_sheet
+
+    # Stand-ins for a large workbook's slow setup and finish steps.
+    def slow_clear(*args, **kwargs):
+        time.sleep(0.6)
+        return clear_totals(*args, **kwargs)
+
+    def slow_summary(*args, **kwargs):
+        time.sleep(0.6)
+        return rebuild_summary(*args, **kwargs)
+
+    monkeypatch.setattr(scraper, "clear_existing_total_rows", slow_clear)
+    monkeypatch.setattr(scraper, "rebuild_summary_sheet", slow_summary)
+
+    async def check():
+        lags = []
+        scan = asyncio.create_task(scraper.run_scraper(path, worker_count=1, retries=0, sheet_name="Data", base_dir=tmp_path))
+        while not scan.done():
+            started = time.perf_counter()
+            await asyncio.sleep(0.01)
+            lags.append(time.perf_counter() - started)
+        await scan
+        return max(lags)
+
+    assert asyncio.run(check()) < 0.3
+    saved = openpyxl.load_workbook(path)
+    try:
+        assert [saved["Data"].cell(row, 3).value for row in range(2, 5)] == [999] * 3
+        assert saved["Data"]["A5"].value == "TỔNG"
+    finally:
+        saved.close()
+
+
+@pytest.mark.parametrize("links, expected_saves", [(3, 1), (5, 1), (7, 2)])
+def test_completed_scan_writes_the_workbook_once_at_the_end(tmp_path, monkeypatch, links, expected_saves):
+    # links=5: an autosave due on the last result would only repeat the final save.
+    # links=7: the autosave at 5/7 stays for crash safety, then one final save.
+    path = _rows_fixture(tmp_path, links)
+    monkeypatch.setattr(scraper, "async_playwright", _NoBrowser)
+    monkeypatch.setattr(scraper, "_run_request_scrape", _success_for_url)
+    saves = []
+    save = scraper.save_workbook_atomic
+
+    def counted_save(workbook, destination):
+        saves.append(destination)
+        return save(workbook, destination)
+
+    monkeypatch.setattr(scraper, "save_workbook_atomic", counted_save)
+    asyncio.run(scraper.run_scraper(path, worker_count=1, retries=0, save_every=5, sheet_name="Data", base_dir=tmp_path))
+    assert len(saves) == expected_saves
+    saved = openpyxl.load_workbook(path)
+    try:
+        assert [saved["Data"].cell(row, 3).value for row in range(2, links + 2)] == [999] * links
+        assert saved["Data"].cell(links + 2, 1).value == "TỔNG"
+    finally:
+        saved.close()
+
+
+def test_scan_stopped_during_cleanup_after_last_result_still_saves(tmp_path, monkeypatch):
+    path = _rows_fixture(tmp_path, 2)
+    monkeypatch.setattr(scraper, "_run_request_scrape", _success_for_url)
+    stopping = asyncio.Event()
+
+    class StuckStop:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            stopping.set()
+            await asyncio.sleep(5)
+
+    monkeypatch.setattr(scraper, "async_playwright", StuckStop)
+    monkeypatch.setattr(scraper, "PLAYWRIGHT_STOP_TIMEOUT", 5)
+
+    async def check():
+        task = asyncio.create_task(scraper.run_scraper(path, worker_count=1, retries=0, sheet_name="Data", base_dir=tmp_path))
+        await stopping.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(check())
+    saved = openpyxl.load_workbook(path)
+    try:
+        assert [saved["Data"].cell(row, 3).value for row in (2, 3)] == [999, 999]
+        assert saved["Data"]["A4"].value == "TỔNG"
+    finally:
+        saved.close()
+
+
+class _CountingPlaywright:
+    def __init__(self):
+        self.launches = 0
+        fake = self
+
+        class Browser:
+            contexts = []
+
+            async def close(self):
+                pass
+
+        class Chromium:
+            async def launch(self, **_kwargs):
+                fake.launches += 1
+                await asyncio.sleep(0.05)
+                return Browser()
+
+        self.chromium = Chromium()
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+def test_hybrid_without_fallback_never_launches_chromium(tmp_path, monkeypatch):
+    path = _rows_fixture(tmp_path, 4)
+    fake = _CountingPlaywright()
+    monkeypatch.setattr(scraper, "async_playwright", fake)
+    monkeypatch.setattr(scraper, "_run_request_scrape", _success_for_url)
+    asyncio.run(scraper.run_scraper(path, worker_count=4, retries=0, sheet_name="Data", base_dir=tmp_path,
+                                    use_request=True, browser_fallback=True))
+    assert fake.launches == 0
+    saved = openpyxl.load_workbook(path)
+    try:
+        assert [saved["Data"].cell(row, 3).value for row in range(2, 6)] == [999] * 4
+    finally:
+        saved.close()
+
+
+def test_hybrid_fallback_workers_share_one_lazily_launched_chromium(tmp_path, monkeypatch):
+    path = _rows_fixture(tmp_path, 4)
+    fake = _CountingPlaywright()
+    monkeypatch.setattr(scraper, "async_playwright", fake)
+    _needs_browser_fallback(monkeypatch)
+    asyncio.run(scraper.run_scraper(path, worker_count=4, retries=0, sheet_name="Data", base_dir=tmp_path,
+                                    use_request=True, browser_fallback=True))
+    # Four fallback links reach three browser workers; they start one Chromium together.
+    assert fake.launches == 1
+    saved = openpyxl.load_workbook(path)
+    try:
+        assert [saved["Data"].cell(row, 3).value for row in range(2, 6)] == [999] * 4
+    finally:
+        saved.close()

@@ -10,7 +10,7 @@ import urllib.request
 from pathlib import Path
 
 import pytest
-import threads_session as session
+from riviu.platforms import threads_session as session
 
 SECRET = "synthetic-session-test-only"
 
@@ -246,6 +246,53 @@ def test_unavailable_store_no_secret_exception(tmp_path):
     with pytest.raises(session.SessionError) as caught:
         controller.snapshot()
     assert SECRET not in str(caught.value)
+
+
+def test_briefly_locked_store_is_retried(tmp_path):
+    vault = Vault([cookie()])
+    vault.fail = True
+    controller = session.ThreadsSession(tmp_path, vault)
+    assert controller.status()["state"] == "storage_unavailable"
+    vault.fail = False  # Keychain unlocked: no restart needed.
+    status = controller.status()
+    assert status["state"] == "unchecked" and status["configured"]
+    assert controller.snapshot()[0]["value"] == SECRET
+
+
+@pytest.mark.parametrize("payload,state", [([cookie(name="csrftoken")], "missing_session"), ([{"domain": 1}], "bad_import"),
+                                           ("x" * (session.MAX_IMPORT_BYTES + 1), "too_large")],
+                         ids=["missing_session", "bad_import", "too_large"])
+def test_import_reports_the_actual_rejection(tmp_path, payload, state):
+    controller = session.ThreadsSession(tmp_path, Vault())
+    result = run(controller.import_cookie(payload))
+    assert not result["success"] and result["check"]["state"] == state
+    assert result["check"]["message"] == session._MESSAGES[state]
+
+
+@pytest.mark.parametrize("stored,state", [(None, "none"), ("unavailable", "storage_unavailable")])
+def test_verify_reports_missing_or_unavailable_store(tmp_path, monkeypatch, stored, state):
+    vault = Vault([cookie()] if stored else None)
+    vault.fail = stored == "unavailable"
+    controller = session.ThreadsSession(tmp_path, vault)
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("nothing to verify")
+    monkeypatch.setattr(session, "verify_cookies", forbidden)
+    result = run(controller.verify())
+    assert not result["success"] and result["check"]["state"] == state
+
+
+def test_socks5_auth_route_is_reported_without_browser_or_cookie_blame(tmp_path, monkeypatch):
+    def forbidden():
+        raise AssertionError("Chromium cannot authenticate SOCKS5")
+    monkeypatch.setattr(session, "_playwright_factory", forbidden)
+    proxy = {"enabled": True, "type": "socks5", "host": "proxy.invalid", "port": 1080, "socks_port": 1080,
+             "username": "synthetic-user", "password": "synthetic-password"}
+    result = run(session.verify_cookies([cookie()], proxy))
+    assert result["state"] == "proxy_unsupported" and "synthetic" not in json.dumps(result)
+    controller = session.ThreadsSession(tmp_path, Vault([cookie()]))
+    before = controller.status()
+    # A route the browser cannot use says nothing about the saved cookie.
+    assert controller.invalidate(before["generation"], "proxy_unsupported") == before
 
 
 def fake_result(state):
@@ -570,23 +617,62 @@ def test_non_windows_rejects_non_native_or_unavailable_backend(tmp_path, monkeyp
         session.SecureStore(tmp_path).load()
 
 
-@pytest.mark.parametrize("platform,expected", [("win32", None), ("darwin", "keyring.backends.macOS"),
-                                               ("linux", "keyring.backends.SecretService")])
-def test_sidecar_native_backend_collection_without_build(tmp_path, monkeypatch, platform, expected):
+SIDECAR_DRY_RUN = (
+    "Chrome Headless Shell 147.0.7727.15 (playwright chromium-headless-shell v1217)\n"
+    "  Install location:    /pkg/playwright/driver/package/.local-browsers/chromium_headless_shell-1217\n"
+    "FFmpeg (playwright ffmpeg v1011)\n"
+    "  Install location:    /pkg/playwright/driver/package/.local-browsers/ffmpeg-1011\n"
+)
+SIDECAR_BROWSER_FILE = "playwright/driver/package/.local-browsers/{}/chrome-headless-shell.exe"
+
+
+def fake_sidecar_build(tmp_path, monkeypatch, platform, bundled_browsers=("chromium_headless_shell-1217",)):
+    """Run build_sidecar.main() with synthetic Playwright and PyInstaller runs."""
+    import subprocess
     from desktop import build_sidecar
     calls = []
     monkeypatch.setattr(build_sidecar, "ROOT", tmp_path)
     monkeypatch.setattr(build_sidecar.sys, "platform", platform)
     monkeypatch.setattr(build_sidecar.sys, "argv", ["build_sidecar.py", "--target", "synthetic-target"])
+    extension = ".exe" if platform == "win32" else ""
+    browser_files = [SIDECAR_BROWSER_FILE.format(name) for name in bundled_browsers]
     def subprocess_run(command, **kwargs):
-        calls.append(command)
+        calls.append((command, kwargs["env"]))
+        if "--dry-run" in command:
+            return subprocess.CompletedProcess(command, 0, stdout=SIDECAR_DRY_RUN, stderr="")
         if "PyInstaller" in command:
             destination = Path(command[command.index("--distpath") + 1])
-            extension = ".exe" if platform == "win32" else ""
+            if "--onedir" in command:
+                destination = destination / build_sidecar.SIDECAR_NAME
+                (destination / "_internal").mkdir(parents=True)
+                (destination / "_internal" / "python312.dll").write_bytes(b"synthetic-runtime")
+                for name in browser_files:
+                    (destination / "_internal" / name).parent.mkdir(parents=True, exist_ok=True)
+                    (destination / "_internal" / name).write_bytes(b"synthetic-browser")
             (destination / (build_sidecar.SIDECAR_NAME + extension)).write_bytes(b"synthetic-binary")
+        return subprocess.CompletedProcess(command, 0)
     monkeypatch.setattr(build_sidecar.subprocess, "run", subprocess_run)
+    if platform != "win32":
+        # A synthetic one-file binary has no PyInstaller archive to list.
+        monkeypatch.setattr(build_sidecar, "bundle_paths", lambda built: browser_files)
     build_sidecar.main()
-    command = calls[-1]
+    return calls
+
+
+@pytest.mark.parametrize("platform,expected", [("win32", None), ("darwin", "keyring.backends.macOS"),
+                                               ("linux", "keyring.backends.SecretService")])
+def test_sidecar_native_backend_collection_without_build(tmp_path, monkeypatch, platform, expected):
+    calls = fake_sidecar_build(tmp_path, monkeypatch, platform)
+    command, env = calls[-1]
+    binaries = tmp_path / "src-tauri" / "binaries"
+    if platform == "win32":
+        # Windows ships the one-folder build as Tauri resources (tauri.windows.conf.json).
+        assert "--onedir" in command and "--onefile" not in command
+        assert (binaries / "riviu-server" / "riviu-server.exe").read_bytes() == b"synthetic-binary"
+        assert (binaries / "riviu-server" / "_internal" / "python312.dll").is_file()
+    else:
+        assert "--onefile" in command and "--onedir" not in command
+        assert (binaries / "riviu-server-synthetic-target").read_bytes() == b"synthetic-binary"
     if expected:
         hook = tmp_path / "build" / "desktop-sidecar" / "native-hooks" / "hook-keyring.py"
         text = hook.read_text(encoding="utf-8")
@@ -594,7 +680,22 @@ def test_sidecar_native_backend_collection_without_build(tmp_path, monkeypatch, 
         assert "keyrings.alt" in command and "keyring.backends.chainer" in command
     else:
         assert "keyring" in command and not (tmp_path / "build" / "desktop-sidecar" / "native-hooks").exists()
-    assert len(calls) == 2
+    # Only the headless shell is installed and handed to the Playwright hook; the
+    # video-only FFmpeg download is left out.
+    install = [arguments for arguments, _ in calls if "playwright" in arguments and "--dry-run" not in arguments]
+    assert install == [[sys.executable, "-m", "playwright", "install", "--only-shell", "chromium"]]
+    assert env["PLAYWRIGHT_BROWSERS_PATH"] == "0"
+    assert env["RIVIU_BUNDLED_BROWSERS"] == "chromium_headless_shell-1217"
+    assert len(calls) == 3
+
+
+@pytest.mark.parametrize("platform", ["win32", "linux"])
+def test_sidecar_build_fails_when_a_stale_full_chromium_is_bundled(tmp_path, monkeypatch, platform):
+    stale = ("chromium_headless_shell-1217", "chromium-1217")
+    with pytest.raises(RuntimeError, match="chromium-1217"):
+        fake_sidecar_build(tmp_path, monkeypatch, platform, bundled_browsers=stale)
+    binaries = tmp_path / "src-tauri" / "binaries"
+    assert not (binaries / "riviu-server").exists() and not (binaries / "riviu-server-synthetic-target").exists()
 
 
 def test_non_windows_native_unavailable_fails_closed(tmp_path, monkeypatch):

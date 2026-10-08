@@ -6,21 +6,26 @@ import secrets
 import uvicorn
 from fastapi import HTTPException, Request
 
-import app as app_state
-from app import app
+from riviu import app as app_state
+from riviu.platforms import tiktok as scraper
+from riviu.app import app
 
 
 def register_desktop_routes(server, shutdown_token: str) -> None:
     def require_desktop_token(request: Request) -> None:
-        supplied = request.headers.get("x-riviu-shutdown", "")
-        if not shutdown_token or not secrets.compare_digest(supplied, shutdown_token):
+        # Compare bytes: str compare_digest raises TypeError (HTTP 500) on
+        # non-ASCII header values instead of rejecting them with 403.
+        supplied = request.headers.get("x-riviu-shutdown", "").encode("utf-8")
+        if not shutdown_token or not secrets.compare_digest(supplied, shutdown_token.encode("utf-8")):
             raise HTTPException(status_code=403)
 
     @app.post("/_desktop/prepare-update", include_in_schema=False)
     async def prepare_update(request: Request):
         require_desktop_token(request)
         # No await between checking the single-process state and acquiring the gate.
-        if app_state.scan_running() or app_state.SOURCE_BUSY or app_state.DESKTOP_UPDATE_PENDING:
+        # A finished scan's force-killed Chromium may still be exiting and lock bundled files.
+        if (app_state.scan_running() or app_state.SOURCE_BUSY or app_state.DESKTOP_UPDATE_PENDING
+                or scraper.browser_cleanup_pending()):
             raise HTTPException(status_code=409, detail="Scan or file operation is in progress")
         app_state.DESKTOP_UPDATE_PENDING = True
         return {"ready": True}

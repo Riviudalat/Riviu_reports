@@ -62,9 +62,9 @@ def test_stale_status_cannot_replace_import_result():
 
 @pytest.mark.parametrize("width", [1440, 1180, 1024, 960, 760, 390])
 def test_cookie_modal_real_dom_offline_responsive(width, tmp_path):
-    html = (ROOT / "templates/index.html").read_text(encoding="utf-8").replace("{{ asset_version }}", "fixture")
-    css = (ROOT / "static/styles.css").read_text(encoding="utf-8")
-    js = (ROOT / "static/app.js").read_text(encoding="utf-8")
+    html = (ROOT / "riviu/web/templates/index.html").read_text(encoding="utf-8").replace("{{ asset_version }}", "fixture")
+    css = (ROOT / "riviu/web/static/styles.css").read_text(encoding="utf-8")
+    js = (ROOT / "riviu/web/static/app.js").read_text(encoding="utf-8")
     state = {"configured": True, "state": "valid", "count": 8, "generation": "fixture", "checkedAt": "01/10/2026 12:00", "message": "Phiên fixture đã xác minh."}
     calls = []
     with sync_playwright() as p:
@@ -80,7 +80,7 @@ def test_cookie_modal_real_dom_offline_responsive(width, tmp_path):
                     if path == "/static/styles.css": return route.fulfill(body=css, content_type="text/css")
                     if path == "/static/app.js": return route.fulfill(body=js, content_type="text/javascript")
                     if path in {"/static/platform-icons/tiktok.svg", "/static/platform-icons/threads.svg"}:
-                        return route.fulfill(body=(ROOT / path.lstrip('/')).read_text(encoding='utf-8'), content_type='image/svg+xml')
+                        return route.fulfill(body=(ROOT / 'riviu' / 'web' / path.lstrip('/')).read_text(encoding='utf-8'), content_type='image/svg+xml')
                     if path.startswith("/threads-session"):
                         calls.append((path, route.request.method))
                         if route.request.method == "DELETE":

@@ -1,32 +1,41 @@
 """Public Threads post checks, kept separate from TikTok's scraper."""
 
 import asyncio
+import contextlib
 import json
 import os
 import re
-import tempfile
 import time
 import urllib.error
 import urllib.request
+from collections import deque
+from decimal import Decimal
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urljoin, urlparse
 
-import proxy_utils
+from riviu import proxy_utils
 import openpyxl
+from riviu.platforms import threads_session
 from playwright.async_api import async_playwright
 
-from workbook_utils import (
+from riviu.platforms.tiktok import close_browser_bounded, finish_pending_task, playwright_session
+from riviu.workbook_utils import (
+    LAST_UPDATE_COLUMN,
     THREADS_SCAN_STATUS_HEADER,
     clean_text,
     format_display_datetime,
     is_threads_link,
-    normalize_header,
     normalize_threads_url,
+    rebuild_summary_sheet,
+    save_workbook_atomic,
+    summary_sheet_title_for_data_sheet,
     workbook_data_sheet_names,
+    worksheet_ensure_column,
     worksheet_find_link_column_index,
     worksheet_partner_column_indexes,
     worksheet_row_partners,
     set_cell_literal,
+    write_json_atomic,
 )
 
 
@@ -45,6 +54,17 @@ HTTP_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
 }
 TERMINAL_ERRORS = {"geo_restricted", "audience", "invalid_post", "redirect", "profile_redirect", "access_denied", "rate_limit", "proxy_auth", "auth_invalid", "auth_checkpoint"}
+THREADS_HOSTS = {"threads.com", "www.threads.com", "threads.net", "www.threads.net"}
+AUTH_FAILURE_MESSAGE = "Phiên Threads không còn hợp lệ; kiểm tra cookie lại."
+BROWSER_POLL_SECONDS = 10
+BROWSER_POLL_INTERVAL = 0.25
+# Metrics whose absence after HTTP justifies a Hybrid browser fallback. Shares
+# are not one: Threads sends reshare_count null to Chromium as well, and the
+# rendered Share button then shows no number (docs/threads-scanning.md).
+CORE_METRICS = ("views", "likes", "comments", "reposts")
+# Hybrid browser fallbacks open at once. Each also takes a route slot, so HTTP
+# keeps the other slots while slow Chromium pages load.
+BROWSER_FALLBACK_LIMIT = 2
 
 
 def resolve_threads_proxies(base_dir, proxy_text="", mode="request"):
@@ -68,40 +88,12 @@ def failure(message, kind):
     return {"channel": "", "metrics": empty_metrics(), "error": message, "error_kind": kind}
 
 
-class _JSONScripts(HTMLParser):
-    """Read data scripts without treating captions or HTML text as JSON."""
-    def __init__(self):
-        super().__init__()
-        self.collecting = False
-        self.parts = []
-        self.documents = []
-
-    def handle_starttag(self, tag, attrs):
-        if tag == "script":
-            self.collecting = dict(attrs).get("type", "").lower() == "application/json"
-            self.parts = []
-
-    def handle_data(self, data):
-        if self.collecting:
-            self.parts.append(data)
-
-    def handle_endtag(self, tag):
-        if tag == "script" and self.collecting:
-            self.collecting = False
-            try:
-                self.documents.append(json.loads("".join(self.parts)))
-            except (ValueError, RecursionError):
-                pass
-
-
 def _count(value):
     return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else None
 
 
-def _embedded_post_metrics(content, identity, *, with_sources=False):
-    parser = _JSONScripts()
-    parser.feed(content)
-    pending = list(parser.documents)
+def _embedded_post_metrics(content, identity, *, with_sources=False, documents=None):
+    pending = list(threads_session.json_script_documents(content) if documents is None else documents)
     views = set()
     posts = []
     view_queries = []
@@ -187,7 +179,8 @@ def parse_action_count(value):
     if not match:
         return None
     scale = {"": 1, "K": 1000, "M": 1000000, "B": 1000000000}[match.group(2).upper()]
-    return int(float(match.group(1)) * scale)
+    # Decimal keeps displayed counts exact: float("32.3") * 1000 == 32299.999...
+    return int(Decimal(match.group(1)) * scale)
 
 
 class _PermalinkHeaderViews(HTMLParser):
@@ -297,11 +290,9 @@ def _permalink_header_views(content, final_url):
     return next(iter(values)) if len(values) == 1 else None
 
 
-def _geo_restricted_route(content, final_url):
-    parser = _JSONScripts()
-    parser.feed(content)
+def _geo_restricted_route(content, final_url, documents=None):
     pending = []
-    for document in parser.documents:
+    for document in threads_session.json_script_documents(content) if documents is None else documents:
         required = document.get("require") if isinstance(document, dict) else None
         if isinstance(required, list):
             pending.extend(module for module in required if isinstance(module, list))
@@ -332,17 +323,28 @@ def _geo_restricted_route(content, final_url):
     return False
 
 
-def parse_threads_http(content, requested_url, final_url):
+def _location_failure(requested_url, final_url):
+    """Classify a URL that is not the requested post; its page numbers are never used."""
     if "invalid_post" in parse_qs(urlparse(final_url).query).get("error", []):
         return failure("Link Threads không khả dụng (invalid_post)", "invalid_post")
     if not same_threads_post(requested_url, final_url):
         parsed = urlparse(final_url)
-        if (parsed.hostname or "").lower() in {"threads.com", "www.threads.com", "threads.net", "www.threads.net"} and re.fullmatch(r"/@[^/]+/?", parsed.path):
+        if (parsed.hostname or "").lower() in THREADS_HOSTS and re.fullmatch(r"/@[^/]+/?", parsed.path):
             return failure("Link bài Threads không khả dụng (có thể bị ẩn hoặc đã xóa)", "profile_redirect")
         return failure("Bài Threads chuyển hướng sang URL khác", "redirect")
-    if _geo_restricted_route(content, final_url):
+    return None
+
+
+def parse_threads_http(content, requested_url, final_url, documents=None):
+    """documents: threads_session.json_script_documents(content), if already parsed."""
+    moved = _location_failure(requested_url, final_url)
+    if moved:
+        return moved
+    if documents is None:
+        documents = threads_session.json_script_documents(content)
+    if _geo_restricted_route(content, final_url, documents):
         return failure("Bài Threads bị giới hạn theo vị trí hiện tại", "geo_restricted")
-    metrics, target, sources = _embedded_post_metrics(content, post_identity(final_url), with_sources=True)
+    metrics, target, sources = _embedded_post_metrics(content, post_identity(final_url), with_sources=True, documents=documents)
     if metrics["views"] is None and sources.get("views") != "view_query_unknown":
         metrics["views"] = _permalink_header_views(content, final_url)
         if metrics["views"] is not None:
@@ -357,6 +359,10 @@ def parse_threads_http(content, requested_url, final_url):
                 and "It can't be seen by certain audiences." in text):
             return failure("Bài Threads giới hạn người xem với phiên hiện tại", "audience")
     return result
+
+
+def missing_core_metrics(result):
+    return any(result["metrics"].get(key) is None for key in CORE_METRICS)
 
 
 def missing_metric_labels(result):
@@ -417,27 +423,46 @@ def merge_results(first, second):
     return merged
 
 
+def _analyze_snapshot(content, requested_url, final_url, *, session=False):
+    """Tokenize one HTML snapshot once; derive session evidence and post metrics from it.
+
+    Returns (auth_state, parsed). auth_state is None without a cookie session;
+    parsed is None when the snapshot positively rejects the session. CPU-bound:
+    browser callers run it through asyncio.to_thread.
+    """
+    try:
+        documents = threads_session.json_script_documents(content)
+    except Exception:
+        if not session:
+            raise
+        return "unknown", None
+    state = threads_session.auth_evidence(content, final_url, documents) if session else None
+    if state in {"invalid", "checkpoint"}:
+        return state, None
+    return state, parse_threads_http(content, requested_url, final_url, documents)
+
+
 def fetch_threads_http(url, timeout=20, proxy_config=None, session_cookies=None):
     request = urllib.request.Request(url, headers=HTTP_HEADERS)
+    session = session_cookies is not None
     try:
-        options = {}
-        if session_cookies is not None:
-            from threads_session import cookie_jar
-            options["cookiejar"] = cookie_jar(session_cookies)
+        options = {"cookiejar": threads_session.cookie_jar(session_cookies)} if session else {}
         with proxy_utils.urlopen_with_config(request, proxy_config, timeout=timeout, **options) as response:
             content = response.read().decode("utf-8", errors="replace")
             final_url = response.geturl()
-            if session_cookies is not None:
-                from threads_session import auth_evidence
-                state = auth_evidence(content, final_url)
-                if state in {"invalid", "checkpoint"}:
-                    return failure("Phiên Threads không còn hợp lệ; kiểm tra cookie lại.", "auth_" + state)
-                if state != "valid":
-                    return failure("HTTP chưa xác minh được phiên đăng nhập Threads.", "auth_unknown")
-            result = parse_threads_http(content, url, final_url)
-            if session_cookies is not None:
+            state, result = _analyze_snapshot(content, url, final_url, session=session)
+            if state in {"invalid", "checkpoint"}:
+                return failure(AUTH_FAILURE_MESSAGE, "auth_" + state)
+            if session and state != "valid":
+                return failure("HTTP chưa xác minh được phiên đăng nhập Threads.", "auth_unknown")
+            if session:
                 result["auth_verified"] = True
             return result
+    except threads_session.SessionError as error:
+        # The cookie redirect guard refused a hop off HTTPS Threads.
+        if error.state == "redirect":
+            return failure("Bài Threads chuyển hướng sang URL khác", "redirect")
+        return failure("Chưa xác minh được phiên Threads; kiểm tra cookie lại.", "auth_unknown")
     except urllib.error.HTTPError as error:
         kind = {403: "access_denied", 429: "rate_limit", 407: "proxy_auth"}.get(error.code, "http")
         return failure(f"HTTP {error.code}", kind)
@@ -447,139 +472,159 @@ def fetch_threads_http(url, timeout=20, proxy_config=None, session_cookies=None)
         return failure("HTTP: không đọc được phản hồi", "http")
 
 
-async def fetch_threads_browser(browser, url, proxy_config=None, session_cookies=None):
-    result = {"channel": "", "metrics": empty_metrics(), "error": ""}
-    page = None
-    context = None
-    navigation = result
-    navigation_guard = None
+# Reads the single rendered card that links to the requested post. Only explicit
+# action/views controls count; captions, replies and recommendations never do.
+EXTRACT_ACTIONS_JS = r"""({username, shortcode}) => {
+    const identity = href => {
+        try {
+            const url = new URL(href, location.href);
+            if (!/^(www\.)?threads\.(com|net)$/i.test(url.hostname)) return null;
+            const match = url.pathname.match(/^\/@([^/]+)\/post\/([^/]+)\/?$/);
+            return match ? [match[1].toLowerCase(), match[2]] : null;
+        } catch { return null; }
+    };
+    const matches = href => {
+        const id = identity(href);
+        return id && id[0] === username && id[1] === shortcode;
+    };
+    const anchors = [...document.querySelectorAll('a[href]')].filter(a => matches(a.href));
+    const roots = new Set();
+    for (const anchor of anchors) {
+        let node = anchor.parentElement;
+        while (node && node !== document.body && node !== document.documentElement) {
+            const postLinks = [...node.querySelectorAll('a[href]')].filter(a => identity(a.href));
+            // Crossing into replies/recommendations makes a container ambiguous.
+            if (postLinks.some(a => !matches(a.href))) break;
+            if (node.querySelector('svg[title="Like"]') && node.querySelector('svg[title="Comment"]')) {
+                roots.add(node);
+                break;
+            }
+            node = node.parentElement;
+        }
+    }
+    // A sticky page title may link to the same post. Prefer its inner
+    // card; multiple disjoint cards remain ambiguous.
+    const cards = [...roots].filter(root => ![...roots].some(other => other !== root && root.contains(other)));
+    if (cards.length !== 1) return null;
+    const root = cards[0];
+    const values = {};
+    for (const [key, title] of Object.entries({likes:'Like', comments:'Comment', reposts:'Repost', shares:'Share'})) {
+        const actions = root.querySelectorAll(`svg[title="${title}"]`);
+        if (actions.length !== 1) continue;
+        const button = actions[0].closest('[role="button"],button');
+        if (button && root.contains(button)) values[key] = button.innerText.trim();
+    }
+    // Only an explicit views control is evidence; never regex caption/body text.
+    const viewControls = [...root.querySelectorAll('[role="button"],button,[aria-label]')]
+        .filter(node => /\bviews?\b/i.test(node.getAttribute('aria-label') || '')
+            || node.querySelector('svg[title="Views"],svg[title="View"]'));
+    const viewCounts = new Set();
+    for (const control of viewControls) {
+        const text = (control.innerText || '').trim();
+        const match = text.match(/^(\d[\d,.]*\s*[KMB]?)\s*(?:views?)?$/i);
+        if (match) viewCounts.add(match[1]);
+    }
+    if (viewCounts.size === 1) values.views = [...viewCounts][0];
+    return values;
+}"""
+
+
+async def _open_browser_page(browser, proxy_config, session_cookies):
+    """Return (owned_context, page, navigation_guard); anonymous direct pages share the browser."""
+    if not proxy_config and session_cookies is None:
+        return None, await browser.new_page(), None
+    options = {"proxy": proxy_utils.playwright_proxy_settings(proxy_config)} if proxy_config else {}
+    if session_cookies is not None:
+        options["service_workers"] = "block"
+    context = await browser.new_context(**options)
     try:
-        if proxy_config or session_cookies is not None:
-            options = {"proxy": proxy_utils.playwright_proxy_settings(proxy_config)} if proxy_config else {}
-            if session_cookies is not None:
-                options["service_workers"] = "block"
-            context = await browser.new_context(**options)
-            if session_cookies is not None:
-                from threads_session import cookies_to_playwright, install_session_navigation_guard
-                await context.add_cookies(cookies_to_playwright(session_cookies))
-                navigation_guard = await install_session_navigation_guard(context)
-            page = await context.new_page()
-        else:
-            page = await browser.new_page()
+        guard = None
         if session_cookies is not None:
-            from threads_session import navigate_session_page
-            response = await navigate_session_page(page, url, navigation_guard, timeout=30000)
+            await context.add_cookies(threads_session.cookies_to_playwright(session_cookies))
+            guard = await threads_session.install_session_navigation_guard(context)
+        return context, await context.new_page(), guard
+    except BaseException:
+        await context.close()
+        raise
+
+
+def _dom_result(identity, extracted):
+    return {"channel": identity[0], "metrics": {**empty_metrics(), **{key: parse_action_count(value) for key, value in extracted.items()}}, "error": ""}
+
+
+async def fetch_threads_browser(browser, url, proxy_config=None, session_cookies=None):
+    session = session_cookies is not None
+    navigation = {"channel": "", "metrics": empty_metrics(), "error": ""}
+    verified = False
+    context = page = None
+    try:
+        context, page, guard = await _open_browser_page(browser, proxy_config, session_cookies)
+        if session:
+            response = await threads_session.navigate_session_page(page, url, guard, timeout=30000)
+            # The guard pins the checked HTTP final URL; page.url may still move client-side.
+            final_url = guard.get("final_url") or page.url
         else:
             response = await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            final_url = page.url
         if response and response.status in (403, 429, 407):
             return failure(f"Browser: HTTP {response.status}", {403: "access_denied", 429: "rate_limit", 407: "proxy_auth"}[response.status])
-        final_url = (navigation_guard.get("final_url") or page.url) if navigation_guard is not None else page.url
-        navigation_content = await response.text() if response else ""
-        if session_cookies is not None:
-            from threads_session import auth_evidence
-            state = auth_evidence(navigation_content, final_url)
-            if state in {"invalid", "checkpoint"}:
-                return failure("Phiên Threads không còn hợp lệ; kiểm tra cookie lại.", "auth_" + state)
-        navigation = (parse_threads_http(navigation_content, url, final_url)
-                      if response and (session_cookies is None or state == "valid") else result)
-        if session_cookies is not None and state == "valid":
-            navigation["auth_verified"] = True
+        if response:
+            state, parsed = await asyncio.to_thread(_analyze_snapshot, await response.text(), url, final_url, session=session)
+        else:
+            state, parsed = (threads_session.auth_evidence("", final_url) if session else None), None
+        if state in {"invalid", "checkpoint"}:
+            return failure(AUTH_FAILURE_MESSAGE, "auth_" + state)
+        verified = state == "valid"
+        if parsed is not None and (not session or verified):
+            navigation = parsed
+            if verified:
+                navigation["auth_verified"] = True
         if navigation.get("error_kind") in TERMINAL_ERRORS:
             return navigation
-        extract_actions = r"""({username, shortcode}) => {
-            const identity = href => {
-                try {
-                    const url = new URL(href, location.href);
-                    if (!/^(www\.)?threads\.(com|net)$/i.test(url.hostname)) return null;
-                    const match = url.pathname.match(/^\/@([^/]+)\/post\/([^/]+)\/?$/);
-                    return match ? [match[1].toLowerCase(), match[2]] : null;
-                } catch { return null; }
-            };
-            const matches = href => {
-                const id = identity(href);
-                return id && id[0] === username && id[1] === shortcode;
-            };
-            const anchors = [...document.querySelectorAll('a[href]')].filter(a => matches(a.href));
-            const roots = new Set();
-            for (const anchor of anchors) {
-                let node = anchor.parentElement;
-                while (node && node !== document.body && node !== document.documentElement) {
-                    const postLinks = [...node.querySelectorAll('a[href]')].filter(a => identity(a.href));
-                    // Crossing into replies/recommendations makes a container ambiguous.
-                    if (postLinks.some(a => !matches(a.href))) break;
-                    if (node.querySelector('svg[title="Like"]') && node.querySelector('svg[title="Comment"]')) {
-                        roots.add(node);
-                        break;
-                    }
-                    node = node.parentElement;
-                }
-            }
-            // A sticky page title may link to the same post. Prefer its inner
-            // card; multiple disjoint cards remain ambiguous.
-            const cards = [...roots].filter(root => ![...roots].some(other => other !== root && root.contains(other)));
-            if (cards.length !== 1) return null;
-            const root = cards[0];
-            const values = {};
-            for (const [key, title] of Object.entries({likes:'Like', comments:'Comment', reposts:'Repost', shares:'Share'})) {
-                const actions = root.querySelectorAll(`svg[title="${title}"]`);
-                if (actions.length !== 1) continue;
-                const button = actions[0].closest('[role="button"],button');
-                if (button && root.contains(button)) values[key] = button.innerText.trim();
-            }
-            // Only an explicit views control is evidence; never regex caption/body text.
-            const viewControls = [...root.querySelectorAll('[role="button"],button,[aria-label]')]
-                .filter(node => /\bviews?\b/i.test(node.getAttribute('aria-label') || '')
-                    || node.querySelector('svg[title="Views"],svg[title="View"]'));
-            const viewCounts = new Set();
-            for (const control of viewControls) {
-                const text = (control.innerText || '').trim();
-                const match = text.match(/^(\d[\d,.]*\s*[KMB]?)\s*(?:views?)?$/i);
-                if (match) viewCounts.add(match[1]);
-            }
-            if (viewCounts.size === 1) values.views = [...viewCounts][0];
-            return values;
-        }"""
-        deadline = time.monotonic() + 10
+
+        deadline = time.monotonic() + BROWSER_POLL_SECONDS
+        previous = None
         while True:
             content = await page.content()
-            final_url = (navigation_guard.get("final_url") or page.url) if navigation_guard is not None else page.url
-            if session_cookies is not None:
-                state = auth_evidence(content, final_url)
+            snapshot_url = page.url
+            if session:
+                # A client-side move (Home, ?error=invalid_post) is never the requested post.
+                moved = _location_failure(final_url, snapshot_url) if snapshot_url != final_url else None
+                if moved:
+                    return moved
+                snapshot_url = final_url
+            if (content, snapshot_url) != previous:
+                # Polls repeat until hydration settles; parse only changed snapshots, off the event loop.
+                previous = (content, snapshot_url)
+                state, embedded = await asyncio.to_thread(_analyze_snapshot, content, url, snapshot_url, session=session)
+                # Once the navigation proved the login, only positive evidence fails it:
+                # React may drop the JSON scripts that carried the viewer.
                 if state in {"invalid", "checkpoint"}:
-                    return failure("Phiên Threads không còn hợp lệ; kiểm tra cookie lại.", "auth_" + state)
-            embedded = (parse_threads_http(content, url, final_url)
-                        if session_cookies is None or state == "valid" else {"channel": "", "metrics": empty_metrics(), "error": ""})
-            if session_cookies is not None and state == "valid":
-                embedded["auth_verified"] = True
-            if embedded.get("error_kind") in TERMINAL_ERRORS:
-                return embedded
-            identity = post_identity(final_url)
-            navigation = merge_results(navigation, embedded)
-            extracted = await page.evaluate(extract_actions, {"username": identity[0], "shortcode": identity[1]})
-            now = time.monotonic()
+                    return failure(AUTH_FAILURE_MESSAGE, "auth_" + state)
+                verified = verified or state == "valid"
+                if embedded is not None and (not session or verified):
+                    if session:
+                        embedded["auth_verified"] = True
+                    if embedded.get("error_kind") in TERMINAL_ERRORS:
+                        return embedded
+                    navigation = merge_results(navigation, embedded)
+            identity = post_identity(snapshot_url)
+            extracted = await page.evaluate(EXTRACT_ACTIONS_JS, {"username": identity[0], "shortcode": identity[1]})
             # Wait for core evidence, including a header that may hydrate later.
-            if extracted is not None and (session_cookies is None or state == "valid"):
-                dom = {"channel": identity[0], "metrics": {key: parse_action_count(value) for key, value in extracted.items()}, "error": ""}
-                navigation = merge_results(navigation, dom)
-            usable = all(navigation["metrics"].get(key) is not None for key in ("views", "likes", "comments", "reposts"))
-            if usable or now >= deadline:
+            if extracted is not None and (not session or verified):
+                navigation = merge_results(navigation, _dom_result(identity, extracted))
+            if not missing_core_metrics(navigation) or time.monotonic() >= deadline:
                 break
-            await asyncio.sleep(0.25)
-        if session_cookies is not None and auth_evidence(content, final_url) != "valid":
+            await asyncio.sleep(BROWSER_POLL_INTERVAL)
+        if session and not verified:
             return failure("Browser chưa xác minh được phiên đăng nhập Threads.", "auth_unknown")
-        if extracted is None:
-            result = failure("Không xác minh được card Threads cần quét", "payload")
-        else:
-            result["channel"] = identity[0]
-            for key, value in extracted.items():
-                result["metrics"][key] = parse_action_count(value)
-        if session_cookies is not None:
+        result = failure("Không xác minh được card Threads cần quét", "payload") if extracted is None else _dom_result(identity, extracted)
+        if session:
             result["auth_verified"] = True
-        merged = merge_results(navigation, result)
         # A verified navigation payload remains valid if React removes its script.
-        return merged
+        return merge_results(navigation, result)
     except Exception:
-        if session_cookies is not None and navigation.get("auth_verified") is not True:
+        if session and not verified:
             return failure("Chưa xác minh được phiên Threads; kiểm tra cookie lại.", "auth_unknown")
         error = failure("Browser: không kết nối hoặc đọc được trang qua proxy" if proxy_config else "Browser: không kết nối hoặc đọc được trang", "transport")
         return merge_results(navigation, error)
@@ -590,45 +635,29 @@ async def fetch_threads_browser(browser, url, proxy_config=None, session_cookies
             await page.close()
 
 
-def column_index(sheet, header):
-    wanted = normalize_header(header)
-    for cell in sheet[1]:
-        if normalize_header(cell.value) == wanted:
-            return cell.column
-    return None
-
-
-def ensure_column(sheet, header, *, hidden=False):
-    index = column_index(sheet, header)
-    if index is None:
-        index = sheet.max_column + 1
-        sheet.cell(row=1, column=index, value=header)
-    if hidden:
-        sheet.column_dimensions[openpyxl.utils.get_column_letter(index)].hidden = True
-    return index
-
-
 def write_threads_result(sheet, row_index, result):
+    # Shared, diacritic-insensitive header matching: never append a duplicate the preview ignores.
     channel = result.get("channel")
-    channel_column = ensure_column(sheet, "Tên Kênh")
+    channel_column = worksheet_ensure_column(sheet, "Tên Kênh")
     if channel:
         set_cell_literal(sheet.cell(row=row_index, column=channel_column), channel)
     for key, header in METRICS.items():
         value = result["metrics"].get(key)
         if value is not None:
-            sheet.cell(row=row_index, column=ensure_column(sheet, header)).value = value
+            sheet.cell(row=row_index, column=worksheet_ensure_column(sheet, header)).value = value
         elif key == "views" and result.get("metricSources", {}).get("views") == "view_query_unknown":
             # Explicit exact-null/conflict invalidates stale display-derived views.
-            sheet.cell(row=row_index, column=ensure_column(sheet, header)).value = None
-    ensure_column(sheet, "REPOST")
+            sheet.cell(row=row_index, column=worksheet_ensure_column(sheet, header)).value = None
+    worksheet_ensure_column(sheet, "REPOST")
     status = result_status(result)
-    sheet.cell(row=row_index, column=ensure_column(sheet, THREADS_SCAN_STATUS_HEADER, hidden=True)).value = status
+    sheet.cell(row=row_index, column=worksheet_ensure_column(sheet, THREADS_SCAN_STATUS_HEADER, hidden=True)).value = status
     if channel or any(value is not None for value in result["metrics"].values()):
-        sheet.cell(row=row_index, column=ensure_column(sheet, "Cập nhật lần cuối")).value = format_display_datetime()
+        sheet.cell(row=row_index, column=worksheet_ensure_column(sheet, LAST_UPDATE_COLUMN)).value = format_display_datetime()
     return status
 
 
-def collect_threads_rows(workbook, sheet_name="", selected_partners=None, invalid_profiles=None):
+def collect_threads_rows(workbook, sheet_name="", selected_partners=None, invalid_links=None):
+    """Collect scannable post rows; Threads-host rows that are not post links go to invalid_links."""
     selected = {clean_text(value).casefold() for value in selected_partners or [] if clean_text(value)}
     names = [sheet_name] if sheet_name else workbook_data_sheet_names(workbook)
     rows = []
@@ -647,37 +676,14 @@ def collect_threads_rows(workbook, sheet_name="", selected_partners=None, invali
                 continue
             if not is_threads_link(url):
                 parsed = urlparse(url)
-                if (invalid_profiles is not None and (parsed.hostname or "").casefold() in {"threads.com", "www.threads.com", "threads.net", "www.threads.net"}
-                        and re.fullmatch(r"/@[^/]+/?", parsed.path)):
-                    invalid_profiles.append({"sheet_name": name, "row": index, "url": url})
+                host = (parsed.hostname or "").casefold()
+                if invalid_links is not None and host in THREADS_HOSTS:
+                    kind = "profile" if re.fullmatch(r"/@[^/]+/?", parsed.path) else "malformed"
+                    # Host + path only: never echo query strings or userinfo into logs.
+                    invalid_links.append({"sheet_name": name, "row": index, "kind": kind, "display": f"{host}{parsed.path}"})
                 continue
             rows.append({"sheet_name": name, "row": index, "url": url, "partners": partners})
     return rows
-
-
-def save_workbook_atomic(workbook, path):
-    with tempfile.NamedTemporaryFile(suffix=".xlsx", dir=os.path.dirname(os.path.abspath(path)), delete=False) as temp:
-        temp_path = temp.name
-    try:
-        workbook.save(temp_path)
-        os.replace(temp_path, path)
-    finally:
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
-
-
-async def finish_owned_task(task):
-    """Do not leave an atomic writer/cleanup running after cancellation."""
-    cancelled = False
-    while not task.done():
-        try:
-            await asyncio.shield(task)
-        except asyncio.CancelledError:
-            cancelled = True
-    result = task.result()
-    if cancelled:
-        raise asyncio.CancelledError()
-    return result
 
 
 def append_threads_diagnostic(base_dir, entry):
@@ -692,19 +698,7 @@ def append_threads_diagnostic(base_dir, entry):
             history = payload["history"]
     except (OSError, ValueError):
         pass
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".json", dir=directory, delete=False) as stream:
-        temp_path = stream.name
-        try:
-            json.dump({"history": [entry, *history[:49]]}, stream, ensure_ascii=False, indent=2)
-        except BaseException:
-            stream.close()
-            os.unlink(temp_path)
-            raise
-    try:
-        os.replace(temp_path, path)
-    finally:
-        if os.path.exists(temp_path):
-            os.unlink(temp_path)
+    write_json_atomic(path, {"history": [entry, *history[:49]]})
 
 
 async def run_threads_scraper(file_path, websocket_manager=None, worker_count=3, selected_partners=None,
@@ -732,7 +726,7 @@ async def run_threads_scraper(file_path, websocket_manager=None, worker_count=3,
         diagnostic["finishedAt"] = format_display_datetime()
         diagnostic["durationSeconds"] = round(time.monotonic() - started, 2)
         try:
-            await finish_owned_task(asyncio.create_task(asyncio.to_thread(
+            await finish_pending_task(asyncio.create_task(asyncio.to_thread(
                 append_threads_diagnostic, base_dir or os.path.dirname(os.path.abspath(file_path)), diagnostic)))
         except Exception:
             # Diagnostic I/O must not replace a scan/save failure or a cancellation.
@@ -743,6 +737,130 @@ async def run_threads_scraper(file_path, websocket_manager=None, worker_count=3,
                     pass
 
 
+async def _preflight_session(session_cookies, proxies, diagnostics):
+    """Verify the cookie on the one route the whole run will use; never fall back to direct."""
+    check = await threads_session.verify_cookies(session_cookies, proxies[0] if proxies else None)
+    if diagnostics is not None:
+        diagnostics["authState"] = check["state"]
+    if check["state"] != "valid":
+        reported = {"expired", "invalid", "checkpoint", "proxy_unsupported"}
+        raise threads_session.SessionError(check["state"] if check["state"] in reported else "unknown")
+
+
+async def _request_once(url, config, session_cookies):
+    options = {"proxy_config": config} if config else {}
+    if session_cookies is not None:
+        options["session_cookies"] = session_cookies
+    return await finish_pending_task(asyncio.create_task(asyncio.to_thread(fetch_threads_http, url, **options)))
+
+
+async def _request_check(url, config, session_cookies):
+    """HTTP with at most one retry for a transport error or missing core metrics."""
+    request_result = await _request_once(url, config, session_cookies)
+    if request_result.get("error_kind") not in TERMINAL_ERRORS:
+        if (missing_core_metrics(request_result) and not request_result.get("error")) or request_result.get("error_kind") == "transport":
+            await asyncio.sleep(0.5)
+            retried = await _request_once(url, config, session_cookies)
+            request_result = merge_results(request_result, retried)
+            if retried.get("error_kind") in TERMINAL_ERRORS:
+                request_result["error_kind"] = retried["error_kind"]
+    return request_result
+
+
+def needs_browser_fallback(request_result):
+    """Hybrid opens Chromium only for a missing core metric; never for shares alone."""
+    return request_result.get("error_kind") not in TERMINAL_ERRORS and missing_core_metrics(request_result)
+
+
+async def _browser_check(url, config, session_cookies, get_browser):
+    """One Chromium load on the URL's own route (never another proxy or direct)."""
+    options = {"proxy_config": config} if config else {}
+    if session_cookies is not None:
+        options["session_cookies"] = session_cookies
+    try:
+        active_browser = await get_browser()
+    except Exception:
+        return failure("Không khởi chạy được Chromium cho Threads", "browser_start")
+    return await fetch_threads_browser(active_browser, url, **options)
+
+
+class _RouteSlots:
+    """Page loads in flight for one scan (HTTP and Chromium share the limit).
+
+    Item tasks queue here in sheet order. A Hybrid browser fallback is served
+    before queued HTTP work so it never waits behind the rest of the sheet; the
+    caller caps fallbacks below the slot count, so HTTP keeps draining.
+    """
+
+    def __init__(self, size):
+        self._free = size
+        self._waiters = {True: deque(), False: deque()}
+
+    @contextlib.asynccontextmanager
+    async def hold(self, *, fallback=False):
+        if self._free and not any(self._waiters.values()):
+            self._free -= 1
+        else:
+            future = asyncio.get_running_loop().create_future()
+            queue = self._waiters[fallback]
+            queue.append(future)
+            try:
+                await future
+            except asyncio.CancelledError:
+                if future in queue:
+                    queue.remove(future)
+                elif not future.cancelled():
+                    self._release()  # Granted, then cancelled before it ran.
+                raise
+        try:
+            yield
+        finally:
+            self._release()
+
+    def _release(self):
+        self._free += 1
+        for queue in (self._waiters[True], self._waiters[False]):
+            while self._free and queue:
+                future = queue.popleft()
+                if not future.done():
+                    self._free -= 1
+                    future.set_result(None)
+
+
+async def _broadcast_result(websocket_manager, item, result, status, source, processed, total):
+    diagnostic = f"; {result['diagnostic']}" if result.get("diagnostic") else ""
+    missing = missing_metric_labels(result)
+    completeness = f"; nguồn chưa trả: {', '.join(missing)}" if status == "Success" and missing else ""
+    await websocket_manager.broadcast_log(f"Threads {processed}/{total} [{source}] {status}{completeness}{diagnostic}: {item['url']}")
+    primary = item["rows"][0]
+    await websocket_manager.broadcast_data({
+        "id": processed, "url": item["url"], "sheetName": primary["sheet_name"],
+        "channelName": result["channel"], "views": result["metrics"]["views"],
+        "likes": result["metrics"]["likes"], "comments": result["metrics"]["comments"],
+        "saves": result["metrics"]["reposts"], "shares": result["metrics"]["shares"],
+        "status": status, "missingMetrics": missing, "metricSources": result.get("metricSources", {}), "worker": source, "singlePartner": len(primary["partners"]) == 1,
+    })
+
+
+async def _rebuild_threads_summary(workbook, sheet_name, selected_partners, websocket_manager):
+    """Refresh the sheet's Threads summary tab (never the TikTok one); failure is only a warning."""
+    try:
+        count = rebuild_summary_sheet(
+            workbook,
+            summary_update_time=format_display_datetime(),
+            selected_partners=selected_partners,
+            data_sheet_name=sheet_name,
+            platform="threads",
+        )
+    except Exception as error:
+        if websocket_manager:
+            await websocket_manager.broadcast_log(f"CẢNH BÁO: Không cập nhật được sheet Tổng kết ({error})")
+        return
+    if websocket_manager:
+        title = summary_sheet_title_for_data_sheet(sheet_name, "threads")
+        await websocket_manager.broadcast_log(f"Đã cập nhật {title} ({count} đối tác).")
+
+
 async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3, selected_partners=None,
                                sheet_name="", mode="hybrid", base_dir="", use_proxy=False, proxy_text="", diagnostics=None,
                                session_cookies=None, proxy_configs=None):
@@ -750,15 +868,11 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
     if use_proxy and not proxies:
         raise ValueError("Bật proxy nhưng chưa có proxy hợp lệ.")
     if session_cookies is not None:
-        from threads_session import verify_cookies, SessionError
-        session_check = await verify_cookies(session_cookies, proxies[0] if proxies else None)
-        if diagnostics is not None:
-            diagnostics["authState"] = session_check["state"]
-        if session_check["state"] != "valid":
-            raise SessionError(session_check["state"] if session_check["state"] in {"expired", "invalid", "checkpoint"} else "unknown")
+        await _preflight_session(session_cookies, proxies, diagnostics)
     workbook = openpyxl.load_workbook(file_path)
-    invalid_profiles = []
-    rows = collect_threads_rows(workbook, sheet_name=sheet_name, selected_partners=selected_partners, invalid_profiles=invalid_profiles)
+    invalid_links = []
+    rows = collect_threads_rows(workbook, sheet_name=sheet_name, selected_partners=selected_partners, invalid_links=invalid_links)
+    skipped_profiles = sum(1 for invalid in invalid_links if invalid["kind"] == "profile")
     buckets = {}
     for row in rows:
         key = post_identity(row["url"]) or ("share", row["url"].casefold())
@@ -767,7 +881,8 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
     total = len(items)
     workers = max(1, min(int(worker_count or 3), 5 if mode != "request" else 10))
     if diagnostics is not None:
-        diagnostics.update(totalUrls=total, totalRows=len(rows), skippedProfiles=len(invalid_profiles), workers=workers,
+        diagnostics.update(totalUrls=total, totalRows=len(rows), skippedProfiles=skipped_profiles,
+                           skippedInvalidLinks=len(invalid_links) - skipped_profiles, workers=workers,
                            proxyCount=len(proxies), proxyTypes=sorted({config["type"] for config in proxies}))
     if websocket_manager:
         duplicates = [
@@ -777,9 +892,15 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
             for index, item in enumerate(items, 1) if len(item["rows"]) > 1
         ]
         await websocket_manager.broadcast_duplicates({"items": duplicates, "duplicateRowCount": len(rows) - total})
-        await websocket_manager.broadcast_log(f"Threads: {len(rows)} dòng, {total} URL; chế độ {mode}, {workers} luồng; {len(proxies)} proxy.")
-        for invalid in invalid_profiles:
-            await websocket_manager.broadcast_log(f"Bỏ qua {invalid['sheet_name']} dòng {invalid['row']}: link hồ sơ Threads, cần link /post/<mã bài>.")
+        skipped = f"; bỏ qua {len(invalid_links)} link Threads không hợp lệ" if invalid_links else ""
+        await websocket_manager.broadcast_log(f"Threads: {len(rows)} dòng, {total} URL{skipped}; chế độ {mode}, {workers} luồng; {len(proxies)} proxy.")
+        for invalid in invalid_links:
+            if invalid["kind"] == "profile":
+                await websocket_manager.broadcast_log(f"Bỏ qua {invalid['sheet_name']} dòng {invalid['row']}: link hồ sơ Threads, cần link /post/<mã bài>.")
+            else:
+                await websocket_manager.broadcast_log(
+                    f"Bỏ qua {invalid['sheet_name']} dòng {invalid['row']}: link Threads sai định dạng ({invalid['display']}), "
+                    "cần dạng threads.com/@tên/post/<mã bài> hoặc threads.com/share/<mã>; sửa link rồi quét lại.")
     if not total:
         if websocket_manager:
             await websocket_manager.broadcast_log("Không tìm thấy link Threads trong sheet hoặc đối tác đã chọn.")
@@ -787,13 +908,15 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
         workbook.close()
         return
 
-    semaphore = asyncio.Semaphore(workers)
+    slots = _RouteSlots(workers)
+    # Hybrid fallbacks never take every slot while HTTP work is queued.
+    fallback_slots = asyncio.Semaphore(max(1, min(BROWSER_FALLBACK_LIMIT, workers - 1)))
     processed = success = hidden = errors = 0
     dirty = False
     completed = False
     started = time.monotonic()
 
-    async with async_playwright() as playwright:
+    async with playwright_session(async_playwright) as playwright:
         browser = None
         browser_lock = asyncio.Lock()
 
@@ -810,47 +933,31 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
             await asyncio.to_thread(save_workbook_atomic, workbook, file_path)
             dirty = False
 
-        async def request_once(url, config):
-            options = {"proxy_config": config} if config else {}
-            if session_cookies is not None:
-                options["session_cookies"] = session_cookies
-            task = asyncio.create_task(asyncio.to_thread(fetch_threads_http, url, **options))
-            return await finish_owned_task(task)
-
         async def check(index, item):
-            async with semaphore:
-                url = item["url"]
-                config = proxies[0 if session_cookies is not None else index % len(proxies)] if proxies else None
-                request_result = await request_once(url, config) if mode != "browser" else None
-                if request_result and request_result.get("error_kind") not in TERMINAL_ERRORS:
-                    missing_core = any(request_result["metrics"].get(key) is None for key in ("views", "likes", "comments", "reposts"))
-                    if (missing_core and not request_result.get("error")) or request_result.get("error_kind") == "transport":
-                        await asyncio.sleep(0.5)
-                        retried = await request_once(url, config)
-                        request_result = merge_results(request_result, retried)
-                        if retried.get("error_kind") in TERMINAL_ERRORS:
-                            request_result["error_kind"] = retried["error_kind"]
-                if mode == "request" or (request_result and (not missing_metric_labels(request_result) or request_result.get("error_kind") in TERMINAL_ERRORS)):
-                    return item, request_result, "Request"
-                options = {"proxy_config": config} if config else {}
-                if session_cookies is not None:
-                    options["session_cookies"] = session_cookies
-                try:
-                    active_browser = await get_browser()
-                except Exception:
-                    browser_result = failure("Không khởi chạy được Chromium cho Threads", "browser_start")
-                else:
-                    browser_result = await fetch_threads_browser(active_browser, url, **options)
-                return item, merge_results(request_result, browser_result) if request_result else browser_result, "Hybrid" if request_result else "Browser"
+            # A cookie session keeps one route for the whole run; anonymous runs round-robin.
+            # HTTP, its retry and any browser fallback of a URL use the same route.
+            config = proxies[0 if session_cookies is not None else index % len(proxies)] if proxies else None
+            if mode == "browser":
+                async with slots.hold():
+                    return item, await _browser_check(item["url"], config, session_cookies, get_browser), "Browser"
+            async with slots.hold():
+                request_result = await _request_check(item["url"], config, session_cookies)
+            if mode == "request" or not needs_browser_fallback(request_result):
+                return item, request_result, "Request"
+            # The HTTP slot is released first: a slow page never holds it.
+            async with fallback_slots, slots.hold(fallback=True):
+                browser_result = await _browser_check(item["url"], config, session_cookies, get_browser)
+            return item, merge_results(request_result, browser_result), "Hybrid"
 
         tasks = [asyncio.create_task(check(index, item)) for index, item in enumerate(items)]
+        closing = None
         try:
             for task in asyncio.as_completed(tasks):
                 item, result, source = await task
                 if session_cookies is not None and result.get("error_kind") in {"auth_invalid", "auth_checkpoint", "auth_unknown"}:
                     if diagnostics is not None:
                         diagnostics["authState"] = result["error_kind"].removeprefix("auth_")
-                    raise SessionError(result["error_kind"].removeprefix("auth_"))
+                    raise threads_session.SessionError(result["error_kind"].removeprefix("auth_"))
                 processed += 1
                 status = result_status(result)
                 if status == "Success":
@@ -869,18 +976,7 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                         kind = result.get("error_kind", "unknown")
                         diagnostics["errorKinds"][kind] = diagnostics["errorKinds"].get(kind, 0) + 1
                 if websocket_manager:
-                    diagnostic = f"; {result['diagnostic']}" if result.get("diagnostic") else ""
-                    missing = missing_metric_labels(result)
-                    completeness = f"; nguồn chưa trả: {', '.join(missing)}" if status == "Success" and missing else ""
-                    await websocket_manager.broadcast_log(f"Threads {processed}/{total} [{source}] {status}{completeness}{diagnostic}: {item['url']}")
-                    primary = item["rows"][0]
-                    await websocket_manager.broadcast_data({
-                        "id": processed, "url": item["url"], "sheetName": primary["sheet_name"],
-                        "channelName": result["channel"], "views": result["metrics"]["views"],
-                        "likes": result["metrics"]["likes"], "comments": result["metrics"]["comments"],
-                        "saves": result["metrics"]["reposts"], "shares": result["metrics"]["shares"],
-                        "status": status, "missingMetrics": missing, "metricSources": result.get("metricSources", {}), "worker": source, "singlePartner": len(primary["partners"]) == 1,
-                    })
+                    await _broadcast_result(websocket_manager, item, result, status, source, processed, total)
                     await websocket_manager.broadcast_status({
                         "total": total, "processed": processed, "success": success,
                         "hidden": hidden, "error": errors, "workers": workers,
@@ -888,7 +984,12 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                         "rate": round(processed / max(time.monotonic() - started, 0.1) * 60, 1),
                     })
                 if processed % 5 == 0:
-                    await finish_owned_task(asyncio.create_task(save_pending()))
+                    await finish_pending_task(asyncio.create_task(save_pending()))
+            # Every page load is done: Chromium closes while the workbook is finalized.
+            closing = asyncio.ensure_future(close_browser_bounded(browser))
+            if sheet_name:
+                await _rebuild_threads_summary(workbook, sheet_name, selected_partners, websocket_manager)
+                dirty = True
             completed = True
         finally:
             async def cleanup():
@@ -901,12 +1002,13 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                         await save_pending()
                 finally:
                     try:
-                        if browser:
-                            await browser.close()
+                        # Bounded: a slow Chromium exit is force-killed, and
+                        # playwright_session waits only briefly for the driver.
+                        await (closing if closing is not None else close_browser_bounded(browser))
                     finally:
                         workbook.close()
 
-            await finish_owned_task(asyncio.create_task(cleanup()))
+            await finish_pending_task(asyncio.create_task(cleanup()))
     if completed and websocket_manager:
         await websocket_manager.broadcast_status({
             "total": total, "processed": processed, "success": success,

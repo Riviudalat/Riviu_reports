@@ -1,15 +1,26 @@
+import functools
 import hashlib
 import html
+import io
 import json
 import os
+import posixpath
 import re
+import tempfile
+import threading
 import unicodedata
 import urllib.request
+import zipfile
+from collections import OrderedDict
+from contextlib import contextmanager
+from dataclasses import dataclass
 from datetime import datetime
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.parse import urlparse
+from xml.etree import ElementTree
 
 import pandas as pd
+from openpyxl.formula.translate import Translator
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.packaging.custom import StringProperty
@@ -43,15 +54,22 @@ TTBD_INTERNAL_HEADERS = {
     TTBD_SOURCE_URL_HEADER,
     "__THREADS_SCAN_STATUS",
 }
-METRIC_COLUMNS = ["LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"]
-SUMMARY_METRIC_COLUMNS = ["TỔNG LƯỢT XEM", "TỔNG TIM", "TỔNG BÌNH LUẬN", "TỔNG LƯỢT LƯU", "TỔNG CHIA SẺ"]
 PARTNER_HEADING_MARKERS = ("DANH SÁCH", "DANH SACH", "BỘ ẢNH", "BO ANH")
 CHANNEL_OVERRIDE_FILENAME = "channel_name_overrides.json"
-DEFAULT_CHANNEL_OVERRIDES = {}
 RESULT_SHEET_PREFIX = "report seeding tiktok"
 THREADS_RESULT_SHEET_PREFIX = "report seeding threads"
-THREADS_REPORT_COLUMNS = ["NGÀY AIR", "TÊN KÊNH", "LINK AIR", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "REPOST", "CHIA SẺ", "TRẠNG THÁI"]
+# Same layout as TikTok; REPOST takes the LƯỢT LƯU slot because Threads has no saves.
+THREADS_REPORT_COLUMNS = ["NGÀY AIR", "TÊN KÊNH", "LINK AIR", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "REPOST", "CHIA SẺ"]
 THREADS_SCAN_STATUS_HEADER = "__THREADS_SCAN_STATUS"
+# Single header vocabulary for scanners, previews and reports; matched with normalize_key
+# (case/diacritic-insensitive) so a scan never appends a duplicate of a column the report reads.
+COLUMN_ALIASES = {
+    "link": ("LINK AIR", "Link", "URL"),
+    "date": ("NGÀY AIR", "Ngày"),
+    "TÊN KÊNH": ("TÊN KÊNH",),
+    "Tên Kênh": ("TÊN KÊNH",),
+    LAST_UPDATE_COLUMN: (LAST_UPDATE_COLUMN, "Ngày cập nhật"),
+}
 RESULT_SHEET_TIMESTAMP_RE = re.compile(
     r"^(?:T\d{1,2}\s+)?\d{2}-\d{2}-\d{4}-\d{2}[:-]?\d{2}(?:-\d+)?$"
 )
@@ -68,9 +86,36 @@ def ensure_data_dir(base_dir):
 
 
 def is_internal_workbook_filename(filename):
-    """Skip Excel temp files and underscore-prefixed internal/test workbooks."""
+    """Skip Excel/atomic-save temp files and underscore-prefixed internal/test workbooks."""
     name = os.path.basename(str(filename or ""))
-    return not name or name.startswith("~$") or name.startswith("_")
+    return not name or name.startswith(("~$", "_", "."))
+
+
+def _replace_atomically(path, write):
+    # Hidden temp name: an interrupted save must never show up as a selectable workbook.
+    directory = os.path.dirname(os.path.abspath(path))
+    descriptor, temp_path = tempfile.mkstemp(prefix=".riviu-", suffix=".tmp", dir=directory)
+    os.close(descriptor)
+    try:
+        write(temp_path)
+        os.replace(temp_path, path)
+        # Reads are keyed by content, so this is memory hygiene: the old version is gone.
+        WORKBOOK_READ_CACHE.invalidate(path)
+    finally:
+        if os.path.exists(temp_path):
+            os.remove(temp_path)
+
+
+def save_workbook_atomic(workbook, path):
+    _replace_atomically(path, workbook.save)
+
+
+def write_json_atomic(path, payload):
+    def write(temp_path):
+        with open(temp_path, "w", encoding="utf-8") as stream:
+            json.dump(payload, stream, ensure_ascii=False, indent=2)
+
+    _replace_atomically(path, write)
 
 
 def normalize_header(value):
@@ -173,6 +218,13 @@ def set_cell_literal(cell, value):
     return cell
 
 
+def preview_datetime_text(value):
+    """A date-only cell (midnight) shows as dd/mm/yyyy; a time is shown only when there is one."""
+    if (value.hour, value.minute, value.second, value.microsecond) == (0, 0, 0, 0):
+        return value.strftime("%d/%m/%Y")
+    return value.strftime(DISPLAY_DATETIME_FORMAT)
+
+
 def clean_preview_value(value):
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
@@ -196,12 +248,6 @@ def extract_tiktok_username(url):
     match = re.search(r"tiktok\.com/@([^/?]+)", str(url or ""), re.IGNORECASE)
     return match.group(1).strip() if match else ""
 
-
-def google_sheet_file_id(spreadsheet_id):
-    safe_id = re.sub(r"[^a-zA-Z0-9_-]+", "", spreadsheet_id)
-    if not safe_id:
-        raise ValueError("Google Sheet ID không hợp lệ")
-    return f"{DATA_DIR_NAME}/{GOOGLE_SHEET_FILENAME_PREFIX}{safe_id}.xlsx"
 
 
 def safe_workbook_filename(name, *, max_length=80):
@@ -234,6 +280,15 @@ def fetch_google_spreadsheet_title(source_url):
         if title:
             return title
     return f"Google Sheet {spreadsheet_id[:12]}"
+
+
+def display_datetime_sort_key(value):
+    """Order "dd/mm/YYYY-HH:MM" stamps chronologically; unparseable text sorts first."""
+    text = clean_text(value)
+    try:
+        return (1, datetime.strptime(text, DISPLAY_DATETIME_FORMAT), "")
+    except ValueError:
+        return (0, datetime.min, text)
 
 
 def format_display_datetime(moment=None):
@@ -311,9 +366,6 @@ def google_sheet_sync_timestamp_display(moment=None):
     return format_display_datetime(moment)
 
 
-def google_sheet_sync_timestamp_filename(moment=None):
-    return format_filename_datetime(moment)
-
 
 def google_sheet_sync_label(title, timestamp_display=None):
     sheet_title = clean_text(title)
@@ -342,9 +394,6 @@ def google_sheet_filename_to_label(filename):
     return base
 
 
-def timestamped_google_sheet_file_id(timestamp):
-    return google_sheet_file_id_from_title("Report Seeding Tiktok", timestamp)
-
 
 def google_sheet_registry_path(base_dir):
     return os.path.join(ensure_data_dir(base_dir), GOOGLE_SHEET_REGISTRY_FILENAME)
@@ -363,9 +412,7 @@ def load_google_sheet_registry(base_dir):
 
 
 def save_google_sheet_registry(base_dir, registry):
-    path = google_sheet_registry_path(base_dir)
-    with open(path, "w", encoding="utf-8") as file_obj:
-        json.dump(registry, file_obj, ensure_ascii=False, indent=2)
+    write_json_atomic(google_sheet_registry_path(base_dir), registry)
 
 
 def register_google_sheet_source(base_dir, file_id, source_url, title=""):
@@ -407,11 +454,7 @@ def channel_override_path(file_path):
 
 def load_channel_overrides(file_path):
     path = channel_override_path(file_path)
-    overrides = {
-        str(key).casefold(): clean_text(value)
-        for key, value in DEFAULT_CHANNEL_OVERRIDES.items()
-        if clean_text(value)
-    }
+    overrides = {}
     if not os.path.exists(path):
         return overrides
     try:
@@ -463,20 +506,19 @@ def metric_number(value):
 
 
 def format_metric(value):
-    if pd.isna(value) or value == "" or value is None:
-        return 0
+    """Cell value for a metric: unknown stays blank (None), never 0; numbers parse like totals do."""
+    if value is None or (not isinstance(value, str) and pd.isna(value)):
+        return None
     if isinstance(value, (int, float)):
         number = float(value)
         return int(number) if number.is_integer() else number
-    try:
-        number = float(value)
-        return int(number) if number.is_integer() else number
-    except (TypeError, ValueError):
-        return value
+    text = clean_text(value)
+    if not text:
+        return None
+    if re.fullmatch(r"[\d.,\s]+", text) and re.search(r"\d", text):
+        return metric_number(text)
+    return text
 
-
-def to_number(value):
-    return metric_number(value)
 
 
 def google_sheet_export_url(source_url):
@@ -498,24 +540,245 @@ def load_excel_file(file_path):
     return pd.ExcelFile(file_path, engine="openpyxl")
 
 
-def workbook_sheet_names(file_path):
-    workbook = load_excel_file(file_path)
+# Per sheet: its frame, preview and report rows (~1-5 MB each for a 1,600-row month sheet).
+WORKBOOK_READ_CACHE_MAX_ENTRIES = 12
+
+
+class WorkbookReadCache:
+    """Small thread-safe LRU of values parsed from one exact workbook version.
+
+    Every key starts with the version the value was parsed from: (absolute path, mtime_ns,
+    size, content digest). The value is computed from those very bytes, so a cached value
+    can never be served for different file content, whoever writes the file. Atomic saves
+    also drop the path's entries so a replaced version stops holding memory. Concurrent
+    misses for the same key compute once; the others wait for that result.
+    """
+
+    def __init__(self, max_entries=WORKBOOK_READ_CACHE_MAX_ENTRIES):
+        self.max_entries = max_entries
+        self._entries = OrderedDict()
+        self._loading = {}
+        self._lock = threading.Lock()
+
+    def get_or_compute(self, key, compute):
+        with self._lock:
+            if key in self._entries:
+                self._entries.move_to_end(key)
+                return self._entries[key]
+            loading = self._loading.setdefault(key, threading.Lock())
+        with loading:
+            with self._lock:
+                if key in self._entries:
+                    self._entries.move_to_end(key)
+                    return self._entries[key]
+            try:
+                value = compute()
+                with self._lock:
+                    self._entries[key] = value
+                    self._entries.move_to_end(key)
+                    while len(self._entries) > self.max_entries:
+                        self._entries.popitem(last=False)
+                return value
+            finally:
+                with self._lock:
+                    if self._loading.get(key) is loading:
+                        del self._loading[key]
+
+    def invalidate(self, file_path):
+        path_key = workbook_path_key(file_path)
+        with self._lock:
+            for key in [key for key in self._entries if key[0][0] == path_key]:
+                del self._entries[key]
+
+    def clear(self):
+        with self._lock:
+            self._entries.clear()
+
+    def __len__(self):
+        with self._lock:
+            return len(self._entries)
+
+
+WORKBOOK_READ_CACHE = WorkbookReadCache()
+
+
+def workbook_path_key(file_path):
+    return os.path.normcase(os.path.abspath(file_path))
+
+
+def clear_workbook_read_cache():
+    WORKBOOK_READ_CACHE.clear()
+
+
+class WorkbookSnapshot:
+    """One immutable version of a workbook file, read into memory once.
+
+    All reads go through the bytes captured here, so one request (an export of many partners,
+    a partner list) sees one consistent version even if a scan replaces the file meanwhile,
+    and the source file is not held open while it is parsed. Parsed pieces are shared through
+    WORKBOOK_READ_CACHE; values handed out are copies the caller may modify.
+    """
+
+    def __init__(self, file_path):
+        self.path = os.path.abspath(file_path)
+        modified_ns = os.stat(self.path).st_mtime_ns
+        with open(self.path, "rb") as stream:
+            self.content = stream.read()
+        digest = hashlib.blake2b(self.content, digest_size=16).hexdigest()
+        self.version = (workbook_path_key(self.path), modified_ns, len(self.content), digest)
+        self._excel = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc_info):
+        self.close()
+
+    def close(self):
+        if self._excel is not None:
+            self._excel.close()
+            self._excel = None
+
+    def excel(self):
+        if self._excel is None:
+            self._excel = load_excel_file(io.BytesIO(self.content))
+        return self._excel
+
+    def cached(self, item, compute):
+        return WORKBOOK_READ_CACHE.get_or_compute((self.version, item), compute)
+
+    def _sheet_lists(self):
+        def compute():
+            excel = self.excel()
+            return (
+                tuple(excel.sheet_names),
+                tuple(find_data_sheet_names_in_workbook(excel)),
+                tuple(hidden_sheet_names_in_workbook(excel)),
+            )
+
+        return self.cached(("sheets",), compute)
+
+    @property
+    def sheet_names(self):
+        return list(self._sheet_lists()[0])
+
+    @property
+    def data_sheet_names(self):
+        return list(self._sheet_lists()[1])
+
+    @property
+    def hidden_sheet_names(self):
+        return list(self._sheet_lists()[2])
+
+    def frame(self, sheet_name):
+        """The sheet parsed by pandas (header on row 1), as a copy the caller may modify."""
+        return self.cached(("frame", sheet_name), lambda: self.excel().parse(sheet_name)).copy()
+
+    # Only the cached preview needs these two, so they are not cached on their own.
+    def header_row(self, sheet_name):
+        """Raw header cells, without pandas' "Unnamed: N" / "X.1" renaming (reads one row)."""
+        header_frame = self.excel().parse(sheet_name, header=None, nrows=1)
+        return header_frame.iloc[0].tolist() if len(header_frame.index) else []
+
+    def column_formulas(self, sheet_name, column_letter):
+        """{sheet row: formula text} for one column; data_only parsing hides formulas."""
+        return worksheet_column_formulas(self.content, sheet_name, column_letter)
+
+
+@contextmanager
+def open_workbook_snapshot(source):
+    if isinstance(source, WorkbookSnapshot):
+        yield source
+        return
+    with WorkbookSnapshot(source) as snapshot:
+        yield snapshot
+
+
+XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+XLSX_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+XLSX_PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_XML_FORMULA_RE = re.compile(r"<(?:[\w.-]+:)?f\b([^>]*?)(?:/>|>(.*?)</(?:[\w.-]+:)?f>)", re.S)
+_XML_ATTRIBUTE_RE = re.compile(r'([\w:.-]+)\s*=\s*"([^"]*)"')
+
+
+def worksheet_xml_part(archive, sheet_name):
+    workbook_xml = ElementTree.fromstring(archive.read("xl/workbook.xml"))
+    relation_id = next(
+        (
+            sheet.get(f"{{{XLSX_REL_NS}}}id")
+            for sheet in workbook_xml.iter(f"{{{XLSX_MAIN_NS}}}sheet")
+            if sheet.get("name") == sheet_name
+        ),
+        None,
+    )
+    if not relation_id:
+        return None
+    relations = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+    for relation in relations.iter(f"{{{XLSX_PACKAGE_REL_NS}}}Relationship"):
+        if relation.get("Id") == relation_id:
+            target = relation.get("Target", "")
+            return target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join("xl", target))
+    return None
+
+
+def worksheet_column_formulas(content, sheet_name, column_letter):
+    """Formulas of one column, read straight from the sheet XML ({row: "=..."}).
+
+    pandas reads cached values only, and openpyxl-saved workbooks carry no cached values, so a
+    formula column looks blank. Shared formulas are expanded like openpyxl does on load.
+    """
     try:
-        return list(workbook.sheet_names)
-    finally:
-        workbook.close()
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            part = worksheet_xml_part(archive, sheet_name)
+            if not part:
+                return {}
+            sheet_xml = archive.read(part).decode("utf-8")
+    except (KeyError, zipfile.BadZipFile, ElementTree.ParseError, UnicodeDecodeError):
+        return {}
+    cell_pattern = re.compile(
+        r'<(?:[\w.-]+:)?c\s[^>]*?\br="' + re.escape(column_letter) + r'(\d+)"[^>]*?(?:/>|>(.*?)</(?:[\w.-]+:)?c>)',
+        re.S,
+    )
+    formulas = {}
+    shared = {}
+    for match in cell_pattern.finditer(sheet_xml):
+        formula_match = _XML_FORMULA_RE.search(match.group(2) or "")
+        if not formula_match:
+            continue
+        row = int(match.group(1))
+        attributes = dict(_XML_ATTRIBUTE_RE.findall(formula_match.group(1)))
+        text = html.unescape(formula_match.group(2) or "").strip()
+        if attributes.get("t") == "shared" and "si" in attributes:
+            if text:
+                shared[attributes["si"]] = (f"={text}", f"{column_letter}{row}")
+            elif attributes["si"] in shared:
+                formula, origin = shared[attributes["si"]]
+                formulas[row] = Translator(formula, origin=origin).translate_formula(f"{column_letter}{row}")
+                continue
+        if text:
+            formulas[row] = f"={text}"
+    return formulas
 
 
-def read_sheet_frame(file_path, sheet_name):
-    return pd.read_excel(file_path, sheet_name=sheet_name, engine="openpyxl")
+def workbook_sheet_names(file_path):
+    with open_workbook_snapshot(file_path) as snapshot:
+        return snapshot.sheet_names
 
 
-def summary_sheet_title_for_data_sheet(data_sheet_name):
-    """Build a stable per-source summary title without truncation collisions."""
+
+def summary_sheet_title_for_data_sheet(data_sheet_name, platform="tiktok"):
+    """Build a stable per-source, per-platform summary title without truncation collisions.
+
+    Each platform owns its own tab ("Tổng kết <sheet>" for TikTok, the legacy title;
+    "Tổng kết Threads <sheet>" for Threads), so scanning one platform of a sheet that holds
+    both kinds of links never overwrites the other platform's summary.
+    """
+    tag = get_platform(platform).summary_tag
+    prefix = f"{SUMMARY_SHEET_TITLE_PREFIX}{tag} " if tag else SUMMARY_SHEET_TITLE_PREFIX
     label = clean_text(data_sheet_name).lower()
     if not label:
-        return SUMMARY_SHEET_NAME
-    title = f"{SUMMARY_SHEET_TITLE_PREFIX}{label}"
+        return prefix.strip() if tag else SUMMARY_SHEET_NAME
+    title = f"{prefix}{label}"
     if len(title) <= 31:
         return title
     digest = hashlib.sha256(label.encode("utf-8")).hexdigest()[:8]
@@ -533,23 +796,30 @@ def month_label_for_sheet_name(sheet_name):
     return f"T{month}"
 
 
-def data_sheet_name_for_summary_title(workbook_sheet_names, summary_sheet_name):
-    """Resolve the source data sheet name from a per-sheet summary tab title."""
+def resolve_summary_sheet(workbook_sheet_names, summary_sheet_name):
+    """(data sheet, platform key) owning a per-sheet summary tab.
+
+    The legacy bare "Tổng kết" tab and tabs whose data sheet is gone resolve to ("", "tiktok"):
+    every summary written before platform-specific tabs existed was a TikTok summary.
+    """
     text = clean_text(summary_sheet_name)
     if normalize_key(text) == normalize_key(SUMMARY_SHEET_NAME):
-        return ""
+        return "", "tiktok"
     prefix_folded = SUMMARY_SHEET_TITLE_PREFIX.casefold()
-    if not text.casefold().startswith(prefix_folded):
-        return ""
-    suffix = text[len(SUMMARY_SHEET_TITLE_PREFIX) :].strip()
-    if not suffix:
-        return ""
+    if not text.casefold().startswith(prefix_folded) or not text[len(SUMMARY_SHEET_TITLE_PREFIX) :].strip():
+        return "", "tiktok"
     for candidate in workbook_sheet_names:
         if is_summary_sheet_name(candidate) or is_result_sheet_name(candidate):
             continue
-        if summary_sheet_title_for_data_sheet(candidate).lower() == text.lower():
-            return candidate
-    return ""
+        for key in PLATFORMS:
+            if summary_sheet_title_for_data_sheet(candidate, key).lower() == text.lower():
+                return candidate, key
+    return "", "tiktok"
+
+
+def data_sheet_name_for_summary_title(workbook_sheet_names, summary_sheet_name):
+    """Resolve the source data sheet name from a per-sheet summary tab title."""
+    return resolve_summary_sheet(workbook_sheet_names, summary_sheet_name)[0]
 
 
 def is_summary_sheet_name(sheet_name):
@@ -590,11 +860,30 @@ def normalize_threads_url(value):
 
 
 def is_threads_link(value):
-    parsed = urlparse(normalize_threads_url(value))
-    host = (parsed.hostname or "").casefold()
+    try:
+        parsed = urlparse(normalize_threads_url(value))
+        host = (parsed.hostname or "").casefold()
+    except ValueError:
+        return False
     return host in {"threads.com", "www.threads.com", "threads.net", "www.threads.net"} and bool(
         re.fullmatch(r"(?:/@[^/]+/post/|/share/)[A-Za-z0-9_-]+/?", parsed.path)
     )
+
+
+def extract_threads_username(url):
+    if not is_threads_link(url):
+        return ""
+    match = re.match(r"^/@([^/]+)/post/", urlparse(normalize_threads_url(url)).path)
+    return match.group(1) if match else ""
+
+
+def display_threads_channel(link, raw_channel):
+    """Channel cell as written, else "@username" from the post URL so the report keeps the row."""
+    channel = clean_text(raw_channel)
+    if channel:
+        return channel
+    username = extract_threads_username(link)
+    return f"@{username}" if username else ""
 
 
 TIKTOK_HOSTS = {"tiktok.com", "www.tiktok.com", "m.tiktok.com", "mobile.tiktok.com", "vm.tiktok.com", "vt.tiktok.com"}
@@ -651,9 +940,6 @@ def is_tiktok_video_link(url, *, resolved_url=""):
     return detect_tiktok_media_type(url, resolved_url=resolved_url) == TIKTOK_MEDIA_VIDEO
 
 
-def is_tiktok_photo_link(url, *, resolved_url=""):
-    return detect_tiktok_media_type(url, resolved_url=resolved_url) == TIKTOK_MEDIA_PHOTO
-
 
 def should_highlight_video_link(
     url,
@@ -668,6 +954,7 @@ def should_highlight_video_link(
     latest_status = clean_text(scan_status)
     source_url = normalize_tiktok_url(url)
     metadata_source_url = normalize_tiktok_url(resolved_source_url)
+    # Colouring only: legacy rows without the hidden source cell keep using their stored resolution.
     trusted_resolved_url = resolved_url
     if metadata_source_url and metadata_source_url.casefold() != source_url.casefold():
         trusted_resolved_url = ""
@@ -677,6 +964,77 @@ def should_highlight_video_link(
         and is_tiktok_video_link(url, resolved_url=trusted_resolved_url)
         and (metric_number(likes) > 0 or metric_number(shares) > 0)
     )
+
+
+@dataclass(frozen=True)
+class PlatformSpec:
+    """Everything that differs between scanned platforms; adding a platform means adding one entry."""
+
+    key: str
+    label: str
+    report_columns: tuple
+    normalize_url: Callable[[object], str]
+    is_link: Callable[[object], bool]
+    display_channel: Callable[[str, str], str]
+    highlights_video_links: bool = False
+    # False: the report modal hides partners with no link of this platform (e.g. TikTok-only
+    # partners in a mixed workbook stay out of the Threads list).
+    lists_partners_without_links: bool = False
+    file_tag: str = ""
+    google_sheet_prefix: str = ""
+    # Inserted into the per-sheet "Tổng kết" tab title; TikTok keeps the legacy untagged title.
+    summary_tag: str = ""
+
+    @property
+    def metric_columns(self):
+        return tuple(column for column in self.report_columns if column in ALL_METRIC_COLUMNS)
+
+    @property
+    def summary_columns(self):
+        """Summary tab layout: the report's metrics in report order (REPOST in the LƯỢT LƯU slot)."""
+        return ("Stt", "ĐỐI TÁC", "TỔNG LINK", *(f"TỔNG {metric}" for metric in self.metric_columns), LAST_UPDATE_COLUMN)
+
+
+ALL_METRIC_COLUMNS = ("LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "REPOST", "CHIA SẺ")
+
+PLATFORMS = {
+    "tiktok": PlatformSpec(
+        key="tiktok",
+        label="TikTok",
+        report_columns=tuple(REPORT_COLUMNS),
+        normalize_url=lambda value: normalize_tiktok_url(value),
+        is_link=lambda value: is_tiktok_link(value),
+        display_channel=lambda link, raw: display_channel_name_from_file(link, raw),
+        highlights_video_links=True,
+        lists_partners_without_links=True,
+    ),
+    "threads": PlatformSpec(
+        key="threads",
+        label="Threads",
+        report_columns=tuple(THREADS_REPORT_COLUMNS),
+        normalize_url=lambda value: normalize_threads_url(value),
+        is_link=lambda value: is_threads_link(value),
+        display_channel=lambda link, raw: display_threads_channel(link, raw),
+        file_tag="Threads",
+        google_sheet_prefix="Report Seeding Threads",
+        summary_tag="Threads",
+    ),
+}
+
+
+def get_platform(key):
+    spec = PLATFORMS.get(clean_text(key).lower())
+    if spec is None:
+        raise ValueError("Nền tảng không hợp lệ")
+    return spec
+
+
+def metric_total(values):
+    """Sum the known metric values (a confirmed 0 counts); blank only when nothing is known."""
+    known = [value for value in values if clean_text(value)]
+    if not known:
+        return ""
+    return sum(metric_number(value) for value in known)
 
 
 def fill_preview_total_row(frame, link_column, metric_columns, *, platform=None):
@@ -696,17 +1054,13 @@ def fill_preview_total_row(frame, link_column, metric_columns, *, platform=None)
         return frame
 
     source_frame = frame.iloc[:total_position]
-    if platform in {"tiktok", "threads"}:
-        link_predicate = is_threads_link if platform == "threads" else is_tiktok_link
-        source_frame = frame[frame[link_column].map(link_predicate)]
+    spec = PLATFORMS.get(platform or "")
+    if spec:
+        source_frame = frame[frame[link_column].map(spec.is_link)]
     for column in metric_columns:
         if not column or column not in frame.columns:
             continue
-        total_value = sum(metric_number(value) for value in source_frame[column])
-        if (platform == "threads" and any(not clean_text(value) for value in source_frame[column])) or (
-            normalize_key(column) == "repost" and not any(clean_text(value) for value in source_frame[column])
-        ):
-            total_value = ""
+        total_value = metric_total(source_frame[column])
         # pandas 3 string columns reject assigning numeric totals. Display rows
         # are intentionally mixed, while the original workbook stays untouched.
         frame[column] = frame[column].astype(object)
@@ -718,11 +1072,12 @@ def fill_missing_dates_from_previous(frame, date_column, link_column):
     if not date_column or date_column not in frame.columns:
         return frame
 
+    date_position = frame.columns.get_loc(date_column)
+    links = frame[link_column].tolist() if link_column else [""] * len(frame.index)
     last_date = ""
-    for index, row in frame.iterrows():
-        raw_date = row.get(date_column, "")
+    for position, (raw_date, raw_link) in enumerate(zip(frame[date_column].tolist(), links)):
         cleaned_date = clean_text(raw_date)
-        link = clean_text(row.get(link_column, "")) if link_column else ""
+        link = clean_text(raw_link)
 
         if not (is_tiktok_link(link) or is_threads_link(link)):
             # Totals, section headings and empty separators delimit date groups.
@@ -732,129 +1087,262 @@ def fill_missing_dates_from_previous(frame, date_column, link_column):
             last_date = raw_date
             continue
         if clean_text(last_date):
-            frame.at[index, date_column] = last_date
+            frame.iat[position, date_position] = last_date
     return frame
 
 
+def evaluate_sequence_formula(formula, row, column_letter, known):
+    """Value of a numbering formula such as =ROW()-1 or =A2+1 at `row`; None if not supported.
+
+    `known` maps sheet rows of the same column to their numbers.
+    """
+    text = re.sub(r"\s+", "", str(formula or "").lstrip("=")).upper()
+    match = re.fullmatch(
+        r"(?:ROW\(\)|\$?" + re.escape(column_letter.upper()) + r"\$?(\d+))(?:([+-])(\d+))?",
+        text,
+    )
+    if not match:
+        return None
+    base = row if match.group(1) is None else known.get(int(match.group(1)))
+    if base is None:
+        return None
+    offset = int(match.group(3) or 0)
+    return base - offset if match.group(2) == "-" else base + offset
+
+
+def _sequence_number(value):
+    if isinstance(value, (int, float)) and not pd.isna(value) and float(value).is_integer():
+        return int(value)
+    text = clean_text(value)
+    return int(text) if re.fullmatch(r"\d+", text) else None
+
+
+def fill_formula_sequence_numbers(frame, snapshot, sheet_name):
+    """Show STT numbers that come from formulas without a cached value.
+
+    Workbooks saved by openpyxl (every scan) keep formulas but drop their cached values, so a
+    "=A2+1" or "=ROW()-1" STT column reads as blank. Cached values stay as they are.
+    """
+    column = find_column_name(frame, ["STT"])
+    if column is None:
+        return frame
+    values = frame[column].tolist()
+    if all(clean_text(value) for value in values):
+        return frame
+    position = frame.columns.get_loc(column)
+    column_letter = get_column_letter(position + 1)
+    formulas = snapshot.column_formulas(sheet_name, column_letter)
+    if not formulas:
+        return frame
+    known = {}
+    filled = {}
+    for index, value in enumerate(values):
+        row = index + 2  # pandas takes the header from sheet row 1 and keeps blank rows
+        if clean_text(value):
+            number = _sequence_number(value)
+            if number is not None:
+                known[row] = number
+            continue
+        number = evaluate_sequence_formula(formulas.get(row), row, column_letter, known) if row in formulas else None
+        if number is not None:
+            known[row] = number
+            filled[index] = number
+    if filled:
+        frame[column] = frame[column].astype(object)
+        for index, number in filled.items():
+            frame.iat[index, position] = number
+    return frame
+
+
+def preview_column_labels(frame, raw_headers):
+    """Display label per frame column, replacing pandas placeholder headers.
+
+    pandas names a blank header "Unnamed: N" and a repeated one "X.1". Blank-header columns
+    without data are dropped (label None); with data they become "Cột <letter>". Repeats keep
+    a stable "X (2)" label because preview rows are keyed by column name.
+    """
+    labels = {}
+    used = set()
+    for position, column in enumerate(frame.columns):
+        raw = raw_headers[position] if position < len(raw_headers) else None
+        raw_blank = raw is None or (not isinstance(raw, str) and pd.isna(raw)) or not str(raw).strip()
+        text = str(column)
+        label = column
+        if raw_blank and normalize_header(text).startswith("unnamed:"):
+            if all(not clean_text(value) for value in frame.iloc[:, position].tolist()):
+                labels[column] = None
+                continue
+            label = f"Cột {get_column_letter(position + 1)}"
+        elif not raw_blank and text != str(raw):
+            match = re.fullmatch(re.escape(str(raw)) + r"\.(\d+)", text)
+            if match:
+                label = f"{raw} ({int(match.group(1)) + 1})"
+        while label in used:
+            label = f"{label} ({len(used) + 1})"
+        used.add(label)
+        labels[column] = label
+    return labels
+
+
 def read_sheet_preview(file_path, sheet_name=None, limit=None, *, platform=None):
-    workbook = load_excel_file(file_path)
-    try:
-        sheets = list(workbook.sheet_names)
+    with open_workbook_snapshot(file_path) as snapshot:
+        sheets = snapshot.sheet_names
         current_sheet = sheet_name if sheet_name in sheets else (sheets[0] if sheets else "")
         if not current_sheet:
             return {"sheets": [], "currentSheet": "", "columns": [], "data": [], "message": "Workbook không có sheet nào."}
+        preview = snapshot.cached(
+            ("preview", current_sheet, platform or "", limit),
+            lambda: build_sheet_preview(snapshot, current_sheet, limit, platform=platform),
+        )
+        hidden_sheets = snapshot.hidden_sheet_names
+    return {
+        "sheets": sheets,
+        "hiddenSheets": hidden_sheets,
+        "currentSheet": current_sheet,
+        "columns": list(preview["columns"]),
+        "data": [dict(row) for row in preview["data"]],
+        "totalRows": preview["totalRows"],
+        "shownRows": preview["shownRows"],
+    }
 
-        frame = workbook.parse(current_sheet)
-        link_column = find_link_column_name(frame)
-        channel_column = find_column_name(frame, ["TÊN KÊNH", "Tên Kênh"])
-        date_column = find_column_name(frame, ["NGÀY AIR", "Ngày"])
-        partner_columns = dataframe_partner_columns(frame)
-        views_column = find_column_name(frame, ["LƯỢT XEM"])
-        likes_column = find_column_name(frame, ["TIM"])
-        comments_column = find_column_name(frame, ["BÌNH LUẬN"])
-        saves_column = find_column_name(frame, ["LƯỢT LƯU"])
-        reposts_column = find_column_name(frame, ["REPOST"])
-        shares_column = find_column_name(frame, ["CHIA SẺ"])
-        scan_status_column = find_column_name(frame, [TTBD_SCAN_STATUS_HEADER])
-        resolved_url_column = find_column_name(frame, [TTBD_RESOLVED_URL_HEADER])
-        source_url_column = find_column_name(frame, [TTBD_SOURCE_URL_HEADER])
-        public_columns = [
-            column
-            for column in frame.columns
-            if clean_text(column) not in TTBD_INTERNAL_HEADERS
-        ]
-        metric_columns = [
-            views_column,
-            likes_column,
-            comments_column,
-            saves_column,
-            reposts_column,
-            shares_column,
-        ]
-        frame = fill_missing_dates_from_previous(frame, date_column, link_column)
-        for column in frame.select_dtypes(include=["datetime"]).columns:
-            frame[column] = frame[column].dt.strftime(DISPLAY_DATETIME_FORMAT)
-        if platform in {"tiktok", "threads"} and link_column and not is_summary_sheet_name(current_sheet):
-            link_predicate = is_threads_link if platform == "threads" else is_tiktok_link
-            frame = frame[frame[link_column].map(lambda value: link_predicate(value) or is_total_label(value))].copy()
-            frame.reset_index(drop=True, inplace=True)
-        frame = fill_preview_total_row(frame, link_column, metric_columns, platform=platform)
 
-        preview_frame = frame
-        if limit and link_column and len(frame.index) > limit:
-            total_positions = [
-                index
-                for index, value in enumerate(frame[link_column].tolist())
-                if is_total_label(value)
-            ]
-            if total_positions and total_positions[-1] >= limit:
-                preview_frame = pd.concat(
-                    [frame.head(max(limit - 1, 0)), frame.iloc[[total_positions[-1]]]],
-                    ignore_index=True,
-                )
-            else:
-                preview_frame = frame.head(limit)
-        elif limit:
+def build_sheet_preview(snapshot, current_sheet, limit=None, *, platform=None):
+    frame = snapshot.frame(current_sheet)
+    raw_headers = snapshot.header_row(current_sheet)
+    column_labels = preview_column_labels(frame, raw_headers)
+    frame = fill_formula_sequence_numbers(frame, snapshot, current_sheet)
+    link_column = find_link_column_name(frame)
+    channel_column = find_column_name(frame, COLUMN_ALIASES["TÊN KÊNH"])
+    date_column = find_column_name(frame, COLUMN_ALIASES["date"])
+    partner_columns = dataframe_partner_columns(frame)
+    views_column = find_column_name(frame, ["LƯỢT XEM"])
+    likes_column = find_column_name(frame, ["TIM"])
+    comments_column = find_column_name(frame, ["BÌNH LUẬN"])
+    saves_column = find_column_name(frame, ["LƯỢT LƯU"])
+    reposts_column = find_column_name(frame, ["REPOST"])
+    shares_column = find_column_name(frame, ["CHIA SẺ"])
+    scan_status_column = find_column_name(frame, [TTBD_SCAN_STATUS_HEADER])
+    resolved_url_column = find_column_name(frame, [TTBD_RESOLVED_URL_HEADER])
+    source_url_column = find_column_name(frame, [TTBD_SOURCE_URL_HEADER])
+    public_columns = [
+        column
+        for column in frame.columns
+        if clean_text(column) not in TTBD_INTERNAL_HEADERS and column_labels.get(column) is not None
+    ]
+    metric_columns = [
+        views_column,
+        likes_column,
+        comments_column,
+        saves_column,
+        reposts_column,
+        shares_column,
+    ]
+    frame = fill_missing_dates_from_previous(frame, date_column, link_column)
+    for column in frame.select_dtypes(include=["datetime"]).columns:
+        frame[column] = frame[column].map(lambda value: None if pd.isna(value) else preview_datetime_text(value))
+    spec = PLATFORMS.get(platform or "")
+    if spec and link_column and not is_summary_sheet_name(current_sheet):
+        frame = frame[frame[link_column].map(lambda value: spec.is_link(value) or is_total_label(value))].copy()
+        frame.reset_index(drop=True, inplace=True)
+    frame = fill_preview_total_row(frame, link_column, metric_columns, platform=platform)
+
+    preview_frame = frame
+    if limit and link_column and len(frame.index) > limit:
+        total_positions = [
+            index
+            for index, value in enumerate(frame[link_column].tolist())
+            if is_total_label(value)
+        ]
+        if total_positions and total_positions[-1] >= limit:
+            preview_frame = pd.concat(
+                [frame.head(max(limit - 1, 0)), frame.iloc[[total_positions[-1]]]],
+                ignore_index=True,
+            )
+        else:
             preview_frame = frame.head(limit)
+    elif limit:
+        preview_frame = frame.head(limit)
 
-        data = []
-        for record in preview_frame.to_dict(orient="records"):
-            preview_row = {}
-            for column in public_columns:
-                value = record.get(column, "")
-                cleaned = clean_preview_value(value)
-                preview_row[column] = cleaned
-            if link_column and channel_column:
-                preview_row[channel_column] = display_channel_name_from_file(
-                    record.get(link_column, ""),
-                    preview_row.get(channel_column, ""),
-                )
-            link_value = record.get(link_column, "") if link_column else ""
-            if link_column and is_tiktok_link(link_value):
-                if partner_columns:
-                    row_partners = extract_row_partners(record, partner_columns)
-                    if len(row_partners) == 1:
-                        preview_row["_singlePartner"] = True
-                if should_highlight_video_link(
-                    link_value,
-                    likes=record.get(likes_column, "") if likes_column else 0,
-                    shares=record.get(shares_column, "") if shares_column else 0,
-                    resolved_url=record.get(resolved_url_column, "") if resolved_url_column else "",
-                    resolved_source_url=record.get(source_url_column, "") if source_url_column else "",
-                    scan_status=record.get(scan_status_column, "") if scan_status_column else "",
-                ):
-                    preview_row["_videoLink"] = True
-            data.append(preview_row)
+    data = []
+    for record in preview_frame.to_dict(orient="records"):
+        preview_row = {}
+        for column in public_columns:
+            preview_row[column_labels[column]] = clean_preview_value(record.get(column, ""))
+        if link_column and channel_column and column_labels.get(channel_column) is not None:
+            channel_label = column_labels[channel_column]
+            preview_row[channel_label] = display_channel_name_from_file(
+                record.get(link_column, ""),
+                preview_row.get(channel_label, ""),
+            )
+        link_value = record.get(link_column, "") if link_column else ""
+        if link_column and is_tiktok_link(link_value):
+            if partner_columns:
+                row_partners = extract_row_partners(record, partner_columns)
+                if len(row_partners) == 1:
+                    preview_row["_singlePartner"] = True
+            if should_highlight_video_link(
+                link_value,
+                likes=record.get(likes_column, "") if likes_column else 0,
+                shares=record.get(shares_column, "") if shares_column else 0,
+                resolved_url=record.get(resolved_url_column, "") if resolved_url_column else "",
+                resolved_source_url=record.get(source_url_column, "") if source_url_column else "",
+                scan_status=record.get(scan_status_column, "") if scan_status_column else "",
+            ):
+                preview_row["_videoLink"] = True
+        data.append(preview_row)
 
-        return {
-            "sheets": sheets,
-            "currentSheet": current_sheet,
-            "columns": public_columns,
-            "data": data,
-            "totalRows": int(len(frame.index)),
-            "shownRows": int(len(preview_frame.index)),
-        }
-    finally:
-        workbook.close()
+    # Cached and shared between requests: read_sheet_preview hands out copies.
+    return {
+        "columns": tuple(column_labels[column] for column in public_columns),
+        "data": tuple(data),
+        "totalRows": int(len(frame.index)),
+        "shownRows": int(len(preview_frame.index)),
+    }
 
 
-def read_summary_dashboard(file_path, data_sheet_name=None):
-    workbook = load_excel_file(file_path)
-    try:
-        sheet_names = list(workbook.sheet_names)
+SUMMARY_TOTAL_KEYS = {
+    "LƯỢT XEM": "views",
+    "TIM": "likes",
+    "BÌNH LUẬN": "comments",
+    "LƯỢT LƯU": "saves",
+    "REPOST": "reposts",
+    "CHIA SẺ": "shares",
+}
+
+
+def read_summary_dashboard(file_path, data_sheet_name=None, *, platform="tiktok"):
+    """Read the platform's summary tab for a data sheet.
+
+    data_sheet_name may also be a summary tab title (a tab the user opened); that tab is read
+    as-is, with the platform that owns it, so a Threads tab opened from the TikTok view still
+    shows Threads totals.
+    """
+    spec = get_platform(platform)
+    with open_workbook_snapshot(file_path) as snapshot:
+        sheet_names = snapshot.sheet_names
         requested_data_sheet = clean_text(data_sheet_name)
-        if requested_data_sheet:
-            summary_sheet = summary_sheet_title_for_data_sheet(requested_data_sheet)
+        if requested_data_sheet and requested_data_sheet in sheet_names and is_summary_sheet_name(requested_data_sheet):
+            summary_sheet = requested_data_sheet
+            requested_data_sheet, owner = resolve_summary_sheet(sheet_names, summary_sheet)
+            spec = get_platform(owner)
+        elif requested_data_sheet:
+            summary_sheet = summary_sheet_title_for_data_sheet(requested_data_sheet, spec.key)
             if summary_sheet not in sheet_names:
                 summary_sheet = ""
         else:
-            summary_sheet = next((sheet for sheet in sheet_names if is_summary_sheet_name(sheet)), "")
+            summary_sheet = next(
+                (
+                    sheet for sheet in sheet_names
+                    if is_summary_sheet_name(sheet) and resolve_summary_sheet(sheet_names, sheet)[1] == spec.key
+                ),
+                "",
+            )
         if not summary_sheet:
             label = requested_data_sheet or "sheet này"
             return {
                 "sheet": "",
                 "dataSheet": requested_data_sheet,
-                "columns": SUMMARY_COLUMNS,
+                "columns": list(spec.summary_columns),
                 "rows": [],
                 "totals": {},
                 "message": f"Workbook chưa có tổng kết cho {label}. Quét sheet đó để tạo.",
@@ -863,9 +1351,7 @@ def read_summary_dashboard(file_path, data_sheet_name=None):
         resolved_data_sheet = requested_data_sheet or data_sheet_name_for_summary_title(
             sheet_names, summary_sheet
         )
-        frame = workbook.parse(summary_sheet).fillna("")
-    finally:
-        workbook.close()
+        frame = snapshot.frame(summary_sheet).fillna("")
 
     columns = frame.columns.tolist()
     if LAST_UPDATE_COLUMN not in columns:
@@ -874,62 +1360,40 @@ def read_summary_dashboard(file_path, data_sheet_name=None):
     partner_column = find_column_name(frame, ["ĐỐI TÁC", "Đối tác"])
     total_link_column = find_column_name(frame, ["TỔNG LINK", "Tổng link"])
     summary_metric_map = {
-        "views": find_column_name(frame, ["TỔNG LƯỢT XEM", "LƯỢT XEM"]),
-        "likes": find_column_name(frame, ["TỔNG TIM", "TIM"]),
-        "comments": find_column_name(frame, ["TỔNG BÌNH LUẬN", "BÌNH LUẬN"]),
-        "saves": find_column_name(frame, ["TỔNG LƯỢT LƯU", "LƯỢT LƯU"]),
-        "shares": find_column_name(frame, ["TỔNG CHIA SẺ", "CHIA SẺ"]),
+        SUMMARY_TOTAL_KEYS[metric]: find_column_name(frame, [f"TỔNG {metric}", metric])
+        for metric in spec.metric_columns
     }
 
     numeric_summary_keys = {
         normalize_key(item)
-        for item in SUMMARY_COLUMNS
+        for item in spec.summary_columns
         if normalize_key(item) not in {"doi tac", normalize_key(LAST_UPDATE_COLUMN)}
     }
+    def summary_value(column, value):
+        if normalize_key(column) not in numeric_summary_keys:
+            return clean_text(value)
+        # A blank metric total means nothing was known for that partner; it must not become 0.
+        return metric_total([value])
+
     totals_row = None
     for record in frame.to_dict(orient="records"):
         partner_name = clean_text(record.get(partner_column or "", ""))
         if not partner_name:
             continue
-        if is_total_label(partner_name):
-            totals_row = {}
-            for column in columns:
-                value = record.get(column, "")
-                totals_row[column] = to_number(value) if normalize_key(column) in numeric_summary_keys else clean_text(value)
-            totals_row.setdefault(LAST_UPDATE_COLUMN, "")
-            continue
-        row = {}
-        for column in columns:
-            value = record.get(column, "")
-            row[column] = to_number(value) if normalize_key(column) in numeric_summary_keys else clean_text(value)
+        row = {column: summary_value(column, record.get(column, "")) for column in columns}
         row.setdefault(LAST_UPDATE_COLUMN, "")
+        if is_total_label(partner_name):
+            totals_row = row
+            continue
         rows.append(row)
 
+    source_rows = [totals_row] if totals_row else rows
     totals = {
         "partners": len(rows),
-        "links": 0,
-        "views": 0,
-        "likes": 0,
-        "comments": 0,
-        "saves": 0,
-        "shares": 0,
+        "links": sum(metric_number(row.get(total_link_column, 0)) for row in source_rows) if total_link_column else 0,
     }
-    for row in rows:
-        totals["links"] += to_number(row.get(total_link_column, 0)) if total_link_column else 0
-        for key, column in summary_metric_map.items():
-            if column:
-                totals[key] += to_number(row.get(column, 0))
-
-    if totals_row:
-        totals = {
-            "partners": len(rows),
-            "links": to_number(totals_row.get(total_link_column, 0)) if total_link_column else totals["links"],
-            "views": to_number(totals_row.get(summary_metric_map["views"], 0)) if summary_metric_map["views"] else totals["views"],
-            "likes": to_number(totals_row.get(summary_metric_map["likes"], 0)) if summary_metric_map["likes"] else totals["likes"],
-            "comments": to_number(totals_row.get(summary_metric_map["comments"], 0)) if summary_metric_map["comments"] else totals["comments"],
-            "saves": to_number(totals_row.get(summary_metric_map["saves"], 0)) if summary_metric_map["saves"] else totals["saves"],
-            "shares": to_number(totals_row.get(summary_metric_map["shares"], 0)) if summary_metric_map["shares"] else totals["shares"],
-        }
+    for key, column in summary_metric_map.items():
+        totals[key] = metric_total(row.get(column, "") for row in source_rows) if column else 0
 
     return {
         "sheet": summary_sheet,
@@ -966,11 +1430,16 @@ def split_partner_value(value):
     text = clean_text(value)
     if not text:
         return []
+    return list(_split_partner_text(text))
 
+
+# Partner cells repeat the same few names thousands of times per sheet.
+@functools.lru_cache(maxsize=4096)
+def _split_partner_text(text):
     raw_lines = [line.strip() for line in text.replace("\r", "\n").split("\n") if line.strip()]
     if len(raw_lines) <= 1 and not any(marker in text.upper() for marker in PARTNER_HEADING_MARKERS) and not text.lstrip().startswith(("-", "*", "•")):
         cleaned = _normalize_partner_token(text)
-        return [cleaned] if cleaned else []
+        return (cleaned,) if cleaned else ()
 
     partners = []
     for line in raw_lines:
@@ -981,7 +1450,7 @@ def split_partner_value(value):
         if any(marker in upper_line for marker in PARTNER_HEADING_MARKERS):
             continue
         partners.append(cleaned)
-    return unique_preserve_order(partners)
+    return tuple(unique_preserve_order(partners))
 
 
 def _normalize_partner_token(text):
@@ -995,17 +1464,28 @@ def _normalize_partner_token(text):
 
 
 def partner_dedup_key(value):
-    text = unicodedata.normalize("NFC", str(value or ""))
+    return _partner_text_dedup_key(str(value or ""))
+
+
+@functools.lru_cache(maxsize=4096)
+def _partner_text_dedup_key(text):
+    text = unicodedata.normalize("NFC", text)
     text = re.sub(r"[\u200B-\u200D\uFEFF\u00AD]", "", text)
     text = re.sub(r"\s+", " ", text).strip()
     return text.casefold()
 
 
 def extract_row_partners(row, partner_columns: Iterable):
+    return row_partners_from_values(row.get(column, "") for column in partner_columns)
+
+
+def row_partners_from_values(values):
     partners = []
-    for column in partner_columns:
-        for partner in split_partner_value(row.get(column, "")):
-            partners.append(partner)
+    for value in values:
+        # Most partner cells are empty; skip them before the (slow) text normalisation.
+        if value is None or (isinstance(value, float) and value != value) or (isinstance(value, str) and not value.strip()):
+            continue
+        partners.extend(split_partner_value(value))
     return unique_preserve_order(partners)
 
 
@@ -1030,114 +1510,203 @@ def find_column_name(frame, aliases):
     return None
 
 
+LINK_COLUMN_SAMPLE_ROWS = 200
+# "Link kênh"/"Profile URL" point at an account, never at the post a scan or report needs.
+NON_POST_LINK_HEADER_MARKERS = ("kenh", "channel", "profile", "tai khoan")
+
+
+def is_post_url(value):
+    """A TikTok video/photo/short link or a Threads post link (not a profile page)."""
+    text = normalize_tiktok_url(value)
+    if text:
+        parsed = urlparse(text)
+        host = (parsed.hostname or "").casefold()
+        return bool(detect_tiktok_media_type(text)) or host in {"vm.tiktok.com", "vt.tiktok.com"} or parsed.path.startswith("/t/")
+    return is_threads_link(value)
+
+
+def pick_link_column(headers, sample_values):
+    """Index of the post-link column among headers matched by substring ('link'/'url').
+
+    `sample_values(index)` yields cell values of that column. Account/profile link columns are
+    skipped unless they are the only ones holding post URLs; a column with post URLs wins.
+    """
+    internal_keys = {normalize_key(header) for header in TTBD_INTERNAL_HEADERS}
+    post_candidates = []
+    account_candidates = []
+    for index, header in enumerate(headers):
+        key = normalize_key(header)
+        if key in internal_keys or not ("link" in key or "url" in key):
+            continue
+        if any(marker in key for marker in NON_POST_LINK_HEADER_MARKERS):
+            account_candidates.append(index)
+        else:
+            post_candidates.append(index)
+    for index in post_candidates + account_candidates:
+        if any(is_post_url(value) for value in sample_values(index)):
+            return index
+    return post_candidates[0] if post_candidates else None
+
+
 def find_link_column_name(frame):
-    column = find_column_name(frame, ["LINK AIR", "Link", "URL"])
+    column = find_column_name(frame, COLUMN_ALIASES["link"])
     if column:
         return column
-    internal_keys = {normalize_key(header) for header in TTBD_INTERNAL_HEADERS}
-    for candidate in frame.columns:
-        key = normalize_key(candidate)
-        if key in internal_keys:
-            continue
-        if "link" in key or "url" in key:
-            return candidate
-    return None
+    columns = list(frame.columns)
+    index = pick_link_column(
+        columns,
+        lambda position: frame.iloc[:LINK_COLUMN_SAMPLE_ROWS, position].tolist(),
+    )
+    return None if index is None else columns[index]
 
 
 def find_data_sheet_names(file_path):
-    workbook = load_excel_file(file_path)
+    with open_workbook_snapshot(file_path) as snapshot:
+        return snapshot.data_sheet_names
+
+
+def find_data_sheet_listing(file_path):
+    """(data sheets, hidden sheet titles) from one workbook read."""
+    with open_workbook_snapshot(file_path) as snapshot:
+        return snapshot.data_sheet_names, snapshot.hidden_sheet_names
+
+
+def hidden_sheet_names_in_workbook(workbook):
+    """Titles of the worksheets Excel hides (hidden or veryHidden), in workbook order."""
     try:
-        return find_data_sheet_names_in_workbook(workbook)
-    finally:
-        workbook.close()
+        return [ws.title for ws in workbook.book.worksheets if ws.sheet_state != "visible"]
+    except AttributeError:
+        return []
 
 
 def find_data_sheet_names_in_workbook(workbook):
+    """Data sheets with visible ones first: callers default to [0], which must not be a hidden old month."""
     sheets = workbook.sheet_names
     data_sheets = [sheet for sheet in sheets if not is_summary_sheet_name(sheet) and not is_result_sheet_name(sheet)]
-    return data_sheets
+    hidden = set(hidden_sheet_names_in_workbook(workbook))
+    return [sheet for sheet in data_sheets if sheet not in hidden] + [sheet for sheet in data_sheets if sheet in hidden]
+
+
+@dataclass(frozen=True)
+class SheetReportRows:
+    """One sheet read for every partner at once (cached; treat as read-only)."""
+
+    rows: tuple  # report rows holding a link of the platform, in sheet order
+    partners: tuple  # every partner named on the sheet, first spelling seen, in sheet order
+
+
+def sheet_report_rows(snapshot, sheet_name, platform="tiktok"):
+    spec = get_platform(platform)
+    return snapshot.cached(
+        ("rows", sheet_name, spec.key),
+        lambda: _build_sheet_report_rows(snapshot.frame(sheet_name), sheet_name, spec),
+    )
+
+
+def _build_sheet_report_rows(frame, sheet_name, spec):
+    partner_columns = dataframe_partner_columns(frame)
+    date_column = find_column_name(frame, COLUMN_ALIASES["date"])
+    channel_column = find_column_name(frame, COLUMN_ALIASES["TÊN KÊNH"])
+    link_column = find_link_column_name(frame)
+    last_update_column = find_column_name(frame, COLUMN_ALIASES[LAST_UPDATE_COLUMN])
+    metric_columns = {metric: find_column_name(frame, [metric]) for metric in ALL_METRIC_COLUMNS}
+    internal_columns = {
+        "_scanStatus": find_column_name(frame, [TTBD_SCAN_STATUS_HEADER]),
+        "_resolvedUrl": find_column_name(frame, [TTBD_RESOLVED_URL_HEADER]),
+        "_resolvedSourceUrl": find_column_name(frame, [TTBD_SOURCE_URL_HEADER]),
+    }
+    if link_column:
+        frame = fill_missing_dates_from_previous(frame, date_column, link_column)
+    positions = {column: index for index, column in enumerate(frame.columns)}
+    partner_positions = [positions[column] for column in partner_columns]
+    link_position = positions[link_column] if link_column else None
+
+    def position(column):
+        return positions[column] if column else None
+
+    date_position = position(date_column)
+    channel_position = position(channel_column)
+    last_update_position = position(last_update_column)
+    metric_positions = {metric: position(column) for metric, column in metric_columns.items()}
+    internal_positions = {key: position(column) for key, column in internal_columns.items()}
+
+    partner_names = {}
+    rows = []
+    # frame.values holds the same cell objects iterrows() yields, without building a Series per row.
+    for record in frame.values:
+        def cell(index):
+            return record[index] if index is not None else ""
+
+        partners = row_partners_from_values(record[index] for index in partner_positions) if partner_positions else []
+        for partner in partners:
+            partner_names.setdefault(partner_dedup_key(partner), partner)
+        if link_position is None:
+            continue
+        link = spec.normalize_url(record[link_position])
+        if not link or is_total_label(link) or not spec.is_link(link):
+            continue
+        rows.append({
+            "sheet_name": sheet_name,
+            "NGÀY AIR": cell(date_position),
+            "TÊN KÊNH": spec.display_channel(link, clean_text(cell(channel_position))),
+            "LINK AIR": link,
+            **{metric: cell(index) for metric, index in metric_positions.items()},
+            LAST_UPDATE_COLUMN: clean_text(cell(last_update_position)),
+            "partners": partners,
+            **{key: clean_text(cell(index)) for key, index in internal_positions.items()},
+        })
+    return SheetReportRows(rows=tuple(rows), partners=tuple(partner_names.values()))
+
+
+def _shared_report_rows(snapshot, sheet_name, spec):
+    """Cached rows of the requested sheet (any sheet) or of every data sheet; do not modify."""
+    requested_sheet = clean_text(sheet_name)
+    if requested_sheet:
+        sheets = [requested_sheet] if requested_sheet in snapshot.sheet_names else []
+    else:
+        sheets = snapshot.data_sheet_names
+    rows = []
+    for current_sheet in sheets:
+        rows.extend(sheet_report_rows(snapshot, current_sheet, spec.key).rows)
+    return rows
+
+
+def copy_report_row(row):
+    return {**row, "partners": list(row["partners"])}
 
 
 def build_workbook_rows(file_path, selected_partner=None, sheet_name=None, *, platform="tiktok"):
-    workbook = load_excel_file(file_path)
-    try:
-        selected_key = selected_partner.casefold() if selected_partner else None
-        requested_sheet = clean_text(sheet_name)
-        rows = []
-        data_sheets = find_data_sheet_names_in_workbook(workbook)
-        if requested_sheet:
-            data_sheets = [requested_sheet] if requested_sheet in workbook.sheet_names else []
-
-        for sheet_name in data_sheets:
-            frame = workbook.parse(sheet_name)
-            partner_columns = dataframe_partner_columns(frame)
-            date_column = find_column_name(frame, ["NGÀY AIR", "Ngày"])
-            channel_column = find_column_name(frame, ["TÊN KÊNH", "Tên Kênh"])
-            link_column = find_link_column_name(frame)
-            metric_columns = {
-                "LƯỢT XEM": find_column_name(frame, ["LƯỢT XEM"]),
-                "TIM": find_column_name(frame, ["TIM"]),
-                "BÌNH LUẬN": find_column_name(frame, ["BÌNH LUẬN"]),
-                "LƯỢT LƯU": find_column_name(frame, ["LƯỢT LƯU"]),
-                "CHIA SẺ": find_column_name(frame, ["CHIA SẺ"]),
-                "REPOST": find_column_name(frame, ["REPOST"]),
-            }
-            scan_status_column = find_column_name(frame, [TTBD_SCAN_STATUS_HEADER])
-            resolved_url_column = find_column_name(frame, [TTBD_RESOLVED_URL_HEADER])
-            source_url_column = find_column_name(frame, [TTBD_SOURCE_URL_HEADER])
-            threads_status_column = find_column_name(frame, [THREADS_SCAN_STATUS_HEADER])
-
-            if not link_column:
-                continue
-            frame = fill_missing_dates_from_previous(frame, date_column, link_column)
-
-            for _, row in frame.iterrows():
-                partners = extract_row_partners(row, partner_columns) if partner_columns else []
-                if selected_key and selected_key not in {partner.casefold() for partner in partners}:
-                    continue
-                if selected_key and not partners:
-                    continue
-
-                raw_link = row.get(link_column, "")
-                link = normalize_threads_url(raw_link) if platform == "threads" else normalize_tiktok_url(raw_link)
-                if not link or is_total_label(link) or not (is_threads_link(link) if platform == "threads" else is_tiktok_link(link)):
-                    continue
-
-                rows.append({
-                    "sheet_name": sheet_name,
-                    "NGÀY AIR": row.get(date_column, "") if date_column else "",
-                    "TÊN KÊNH": (
-                        clean_text(row.get(channel_column, "")) if channel_column else ""
-                    ) if platform == "threads" else display_channel_name_from_file(
-                        link, clean_text(row.get(channel_column, "")) if channel_column else ""
-                    ),
-                    "LINK AIR": link,
-                    "LƯỢT XEM": row.get(metric_columns["LƯỢT XEM"], "") if metric_columns["LƯỢT XEM"] else "",
-                    "TIM": row.get(metric_columns["TIM"], "") if metric_columns["TIM"] else "",
-                    "BÌNH LUẬN": row.get(metric_columns["BÌNH LUẬN"], "") if metric_columns["BÌNH LUẬN"] else "",
-                    "LƯỢT LƯU": row.get(metric_columns["LƯỢT LƯU"], "") if metric_columns["LƯỢT LƯU"] else "",
-                    "CHIA SẺ": row.get(metric_columns["CHIA SẺ"], "") if metric_columns["CHIA SẺ"] else "",
-                    "REPOST": row.get(metric_columns["REPOST"], "") if metric_columns["REPOST"] else "",
-                    "TRẠNG THÁI": (clean_text(row.get(threads_status_column, "")) or "Chưa quét") if platform == "threads" and threads_status_column else ("Chưa quét" if platform == "threads" else ""),
-                    "partners": partners,
-                    "_scanStatus": clean_text(row.get(scan_status_column, "")) if scan_status_column else "",
-                    "_resolvedUrl": clean_text(row.get(resolved_url_column, "")) if resolved_url_column else "",
-                    "_resolvedSourceUrl": clean_text(row.get(source_url_column, "")) if source_url_column else "",
-                })
-
-        return rows
-    finally:
-        workbook.close()
+    spec = get_platform(platform)
+    with open_workbook_snapshot(file_path) as snapshot:
+        rows = _shared_report_rows(snapshot, sheet_name, spec)
+    if selected_partner:
+        selected_key = selected_partner.casefold()
+        rows = [row for row in rows if selected_key in {partner.casefold() for partner in row["partners"]}]
+    return [copy_report_row(row) for row in rows]
 
 
-def is_exportable_report_row(row, *, apply_min_views=True, min_views=100, platform="tiktok"):
-    if platform == "threads":
-        return True
+def build_partner_report_rows(file_path, sheet_name=None, *, platform="tiktok"):
+    """{partner_dedup_key: rows} for every partner, from one read of the sheet.
+
+    Same rows, in the same order, as build_workbook_rows(selected_partner=...) per partner.
+    """
+    spec = get_platform(platform)
+    groups = {}
+    with open_workbook_snapshot(file_path) as snapshot:
+        rows = _shared_report_rows(snapshot, sheet_name, spec)
+    for row in rows:
+        for partner in row["partners"]:
+            groups.setdefault(partner_dedup_key(partner), []).append(row)
+    return {key: [copy_report_row(row) for row in group] for key, group in groups.items()}
+
+
+def is_exportable_report_row(row, *, apply_min_views=True, min_views=100):
+    """Every platform reports the same rows: a readable channel and, when enabled, enough views."""
     if is_failed_channel_name(row.get("TÊN KÊNH", "")):
         return False
     if apply_min_views:
         threshold = max(int(min_views or 0), 0)
-        if to_number(row.get("LƯỢT XEM", 0)) < threshold:
+        if metric_number(row.get("LƯỢT XEM", 0)) < threshold:
             return False
     return True
 
@@ -1150,41 +1719,35 @@ def list_workbook_partners_with_link_counts(
     min_views=100,
     platform="tiktok",
 ):
+    spec = get_platform(platform)
     partner_stats = {}
-    workbook = load_excel_file(file_path)
-    try:
-        data_sheets = find_data_sheet_names_in_workbook(workbook)
+    with open_workbook_snapshot(file_path) as snapshot:
+        data_sheets = snapshot.data_sheet_names
         requested_sheet = clean_text(sheet_name)
         if requested_sheet:
             data_sheets = [requested_sheet] if requested_sheet in data_sheets else []
         for current_sheet in data_sheets:
-            frame = workbook.parse(current_sheet)
-            partner_columns = dataframe_partner_columns(frame)
-            if not partner_columns:
-                continue
-            for _, row in frame.iterrows():
-                for partner in extract_row_partners(row, partner_columns):
-                    key = partner_dedup_key(partner)
-                    if key not in partner_stats:
-                        partner_stats[key] = {"name": partner, "linkCount": 0, "rawLinkCount": 0}
-    finally:
-        workbook.close()
+            for partner in sheet_report_rows(snapshot, current_sheet, spec.key).partners:
+                key = partner_dedup_key(partner)
+                if key not in partner_stats:
+                    partner_stats[key] = {"name": partner, "linkCount": 0, "rawLinkCount": 0}
+        if not partner_stats:
+            return []
+        rows = _shared_report_rows(snapshot, sheet_name, spec)
 
-    if not partner_stats:
-        return []
-
-    for row in build_workbook_rows(file_path, sheet_name=sheet_name, platform=platform):
+    for row in rows:
         row_partners = row.get("partners") or []
+        exportable = bool(row_partners) and is_exportable_report_row(row, apply_min_views=apply_min_views, min_views=min_views)
         for partner in row_partners:
             key = partner_dedup_key(partner)
             if key not in partner_stats:
                 continue
             partner_stats[key]["rawLinkCount"] += 1
-            if is_exportable_report_row(row, apply_min_views=apply_min_views, min_views=min_views, platform=platform):
+            if exportable:
                 partner_stats[key]["linkCount"] += 1
 
     values = partner_stats.values()
-    if platform == "threads":
+    if not spec.lists_partners_without_links:
         values = [item for item in values if item["rawLinkCount"] > 0]
     return sorted(values, key=lambda item: item["name"].casefold())
 
@@ -1208,37 +1771,33 @@ def worksheet_find_column_index(worksheet, aliases):
     return None
 
 
+def worksheet_ensure_column(worksheet, header, aliases=None, *, hidden=False):
+    """Find a column the same way previews/reports do, appending it only when truly absent."""
+    index = worksheet_find_column_index(worksheet, aliases or COLUMN_ALIASES.get(header) or (header,))
+    if index is None:
+        index = (worksheet.max_column or 0) + 1
+        worksheet.cell(row=1, column=index).value = header
+    if hidden:
+        worksheet.column_dimensions[get_column_letter(index)].hidden = True
+    return index
+
+
 def worksheet_find_link_column_index(worksheet):
-    column_index = worksheet_find_column_index(worksheet, ["LINK AIR", "Link", "URL"])
+    column_index = worksheet_find_column_index(worksheet, COLUMN_ALIASES["link"])
     if column_index:
         return column_index
 
-    internal_keys = {normalize_key(header) for header in TTBD_INTERNAL_HEADERS}
-    for index, header in enumerate(worksheet_headers(worksheet), start=1):
-        key = normalize_key(header)
-        if key in internal_keys:
-            continue
-        if "link" in key or "url" in key:
-            return index
-    return None
+    last_row = min(worksheet.max_row or 0, LINK_COLUMN_SAMPLE_ROWS + 1)
+    index = pick_link_column(
+        worksheet_headers(worksheet),
+        lambda position: (worksheet.cell(row=row, column=position + 1).value for row in range(2, last_row + 1)),
+    )
+    return None if index is None else index + 1
 
 
 def worksheet_find_last_update_column_index(worksheet):
-    return worksheet_find_column_index(worksheet, [LAST_UPDATE_COLUMN, "Ngày cập nhật", "Ngay cap nhat"])
+    return worksheet_find_column_index(worksheet, COLUMN_ALIASES[LAST_UPDATE_COLUMN])
 
-
-def worksheet_has_link_column(worksheet):
-    if worksheet_find_link_column_index(worksheet):
-        return True
-
-    max_row = worksheet.max_row or 0
-    max_column = worksheet.max_column or 0
-    for row_index in range(2, min(max_row, 25) + 1):
-        for column_index in range(1, max_column + 1):
-            value = clean_text(worksheet.cell(row=row_index, column=column_index).value)
-            if "tiktok.com" in value or "vt.tiktok.com" in value:
-                return True
-    return False
 
 
 def workbook_data_sheet_names(workbook):
@@ -1310,15 +1869,15 @@ def read_existing_summary_updates(worksheet):
     updates = {}
     if not worksheet or (worksheet.max_row or 0) < 2:
         return updates
-    partner_column = worksheet_find_column_index(worksheet, ["ĐỐI TÁC", "Đối tác"])
-    update_column = worksheet_find_column_index(worksheet, [LAST_UPDATE_COLUMN, "Ngày cập nhật", "Ngay cap nhat"])
+    partner_column = worksheet_find_column_index(worksheet, ["ĐỐI TÁC"])
+    update_column = worksheet_find_last_update_column_index(worksheet)
     if not partner_column or not update_column:
         return updates
     for row_index in range(2, (worksheet.max_row or 0) + 1):
         partner = clean_text(worksheet.cell(row=row_index, column=partner_column).value)
         update_value = clean_text(worksheet.cell(row=row_index, column=update_column).value)
         if partner and update_value:
-            updates[partner.casefold()] = update_value
+            updates[partner_dedup_key(partner)] = update_value
     return updates
 
 
@@ -1342,7 +1901,10 @@ def build_partner_summary_rows(
     selected_partners=None,
     previous_updates=None,
     data_sheet_name=None,
+    platform="tiktok",
 ):
+    # Only this platform's links count, so a mixed sheet yields one summary per platform.
+    spec = get_platform(platform)
     selected_keys = normalize_selected_partner_keys(selected_partner, selected_partners)
     previous_updates = previous_updates or {}
     summary = {}
@@ -1362,13 +1924,13 @@ def build_partner_summary_rows(
 
         metric_columns = {
             header: worksheet_find_column_index(worksheet, [header])
-            for header in METRIC_COLUMNS
+            for header in spec.metric_columns
         }
         last_update_column = worksheet_find_last_update_column_index(worksheet)
 
         for row_index in range(2, (worksheet.max_row or 0) + 1):
             link = clean_text(worksheet.cell(row=row_index, column=link_column).value)
-            if not is_tiktok_link(link):
+            if not spec.is_link(link):
                 continue
 
             partners = worksheet_row_partners(worksheet, row_index, partner_columns)
@@ -1376,97 +1938,41 @@ def build_partner_summary_rows(
                 continue
 
             for partner in partners:
+                # Same grouping as the partner picker, so "Shop A"/"shop a" is one summary row.
+                key = partner_dedup_key(partner)
                 bucket = summary.setdefault(
-                    partner,
+                    key,
                     {
                         "ĐỐI TÁC": partner,
                         "TỔNG LINK": 0,
-                        "TỔNG LƯỢT XEM": 0,
-                        "TỔNG TIM": 0,
-                        "TỔNG BÌNH LUẬN": 0,
-                        "TỔNG LƯỢT LƯU": 0,
-                        "TỔNG CHIA SẺ": 0,
-                        LAST_UPDATE_COLUMN: previous_updates.get(partner.casefold(), ""),
+                        # Blank until a known value arrives: a partner whose links are all unknown is not 0.
+                        **{f"TỔNG {metric}": "" for metric in spec.metric_columns},
+                        LAST_UPDATE_COLUMN: previous_updates.get(key, ""),
                     },
                 )
                 bucket["TỔNG LINK"] += 1
                 if last_update_column:
                     update_value = clean_text(worksheet.cell(row=row_index, column=last_update_column).value)
-                    if update_value and update_value > clean_text(bucket.get(LAST_UPDATE_COLUMN, "")):
+                    if update_value and display_datetime_sort_key(update_value) > display_datetime_sort_key(bucket[LAST_UPDATE_COLUMN]):
                         bucket[LAST_UPDATE_COLUMN] = update_value
                 for metric, column_index in metric_columns.items():
-                    if not column_index:
-                        continue
-                    value = to_number(worksheet.cell(row=row_index, column=column_index).value)
-                    if metric == "LƯỢT XEM":
-                        bucket["TỔNG LƯỢT XEM"] += value
-                    elif metric == "TIM":
-                        bucket["TỔNG TIM"] += value
-                    elif metric == "BÌNH LUẬN":
-                        bucket["TỔNG BÌNH LUẬN"] += value
-                    elif metric == "LƯỢT LƯU":
-                        bucket["TỔNG LƯỢT LƯU"] += value
-                    elif metric == "CHIA SẺ":
-                        bucket["TỔNG CHIA SẺ"] += value
+                    if column_index:
+                        value = worksheet.cell(row=row_index, column=column_index).value
+                        bucket[f"TỔNG {metric}"] = metric_total([bucket[f"TỔNG {metric}"], value])
 
     result = []
     if summary_update_time:
-        for partner, row in summary.items():
-            if not selected_keys or partner.casefold() in selected_keys:
+        for row in summary.values():
+            if not selected_keys or row["ĐỐI TÁC"].casefold() in selected_keys:
                 row[LAST_UPDATE_COLUMN] = summary_update_time
 
-    for index, name in enumerate(sorted(summary, key=lambda value: value.casefold()), start=1):
-        row = summary[name]
+    for index, row in enumerate(sorted(summary.values(), key=lambda value: value["ĐỐI TÁC"].casefold()), start=1):
         row["Stt"] = index
         result.append(row)
     return result
 
 
-def _summary_row_metric_sums(partner_rows):
-    sums = {}
-    for row in partner_rows:
-        for column, value in row.items():
-            column_key = normalize_key(column)
-            if column_key in {"stt", normalize_key(LAST_UPDATE_COLUMN)} or column_key.startswith("doi tac"):
-                continue
-            sums[column_key] = sums.get(column_key, 0) + to_number(value)
-    return sums
 
-
-def build_summary_totals_row(partner_rows):
-    metric_sums = _summary_row_metric_sums(partner_rows)
-    totals = {
-        "Stt": "",
-        "ĐỐI TÁC": SUMMARY_TOTAL_LABEL,
-        "TỔNG LINK": 0,
-        "TỔNG LƯỢT XEM": 0,
-        "TỔNG TIM": 0,
-        "TỔNG BÌNH LUẬN": 0,
-        "TỔNG LƯỢT LƯU": 0,
-        "TỔNG CHIA SẺ": 0,
-        LAST_UPDATE_COLUMN: "",
-    }
-    for header, value in totals.items():
-        header_key = normalize_key(header)
-        if header_key in metric_sums:
-            totals[header] = metric_sums[header_key]
-    return totals
-
-
-def build_summary_totals_row_aligned(columns, partner_rows):
-    metric_sums = _summary_row_metric_sums(partner_rows)
-    aligned = {}
-    for column in columns:
-        column_key = normalize_key(column)
-        if column_key == "stt":
-            aligned[column] = ""
-        elif column_key.startswith("doi tac"):
-            aligned[column] = SUMMARY_TOTAL_LABEL
-        elif column_key == normalize_key(LAST_UPDATE_COLUMN):
-            aligned[column] = ""
-        else:
-            aligned[column] = metric_sums.get(column_key, 0)
-    return aligned
 
 
 def rebuild_summary_sheet(
@@ -1475,15 +1981,26 @@ def rebuild_summary_sheet(
     selected_partner=None,
     selected_partners=None,
     data_sheet_name=None,
+    platform="tiktok",
 ):
+    spec = get_platform(platform)
     source_sheet = clean_text(data_sheet_name)
     if not source_sheet or source_sheet not in workbook.sheetnames:
         return 0
 
-    summary_sheet = summary_sheet_title_for_data_sheet(source_sheet)
+    summary_sheet = summary_sheet_title_for_data_sheet(source_sheet, spec.key)
     existing_worksheet = workbook[summary_sheet] if summary_sheet in workbook.sheetnames else None
     previous_updates = read_existing_summary_updates(existing_worksheet)
-    insert_index = workbook.sheetnames.index(source_sheet) + 1
+    # Sit right after the data sheet, behind the summaries of platforms listed earlier in the
+    # registry, so rebuilding one platform's tab never reorders the other's.
+    anchor = source_sheet
+    for key in PLATFORMS:
+        if key == spec.key:
+            break
+        sibling = summary_sheet_title_for_data_sheet(source_sheet, key)
+        if sibling in workbook.sheetnames:
+            anchor = sibling
+    insert_index = workbook.sheetnames.index(anchor) + 1
     if summary_sheet in workbook.sheetnames:
         worksheet = workbook[summary_sheet]
         worksheet.delete_rows(1, max(worksheet.max_row or 1, 1))
@@ -1502,17 +2019,20 @@ def rebuild_summary_sheet(
         selected_partners=selected_partners,
         previous_updates=previous_updates,
         data_sheet_name=source_sheet,
+        platform=spec.key,
     )
+    summary_columns = spec.summary_columns
     header_fill = PatternFill("solid", fgColor="0B5ED7")
-    for column_index, header in enumerate(SUMMARY_COLUMNS, start=1):
+    for column_index, header in enumerate(summary_columns, start=1):
         cell = worksheet.cell(row=1, column=column_index, value=header)
         cell.fill = header_fill
         cell.font = Font(color="FFFFFF", bold=True)
         cell.alignment = Alignment(horizontal="center")
 
     for row_index, row in enumerate(rows, start=2):
-        for column_index, header in enumerate(SUMMARY_COLUMNS, start=1):
-            cell = set_cell_literal(worksheet.cell(row=row_index, column=column_index), row.get(header, ""))
+        for column_index, header in enumerate(summary_columns, start=1):
+            value = row.get(header, "")
+            cell = set_cell_literal(worksheet.cell(row=row_index, column=column_index), None if value == "" else value)
             if header == "ĐỐI TÁC":
                 cell.alignment = Alignment(wrap_text=True, vertical="top")
             elif header == LAST_UPDATE_COLUMN:
@@ -1523,7 +2043,7 @@ def rebuild_summary_sheet(
 
     last_row = max(len(rows) + 1, 1)
     worksheet.freeze_panes = "A2"
-    worksheet.auto_filter.ref = f"A1:{get_column_letter(len(SUMMARY_COLUMNS))}{last_row}"
+    worksheet.auto_filter.ref = f"A1:{get_column_letter(len(summary_columns))}{last_row}"
     widths = [8, 38, 12, 16, 12, 16, 16, 14, 20]
     for index, width in enumerate(widths, start=1):
         worksheet.column_dimensions[get_column_letter(index)].width = width
@@ -1531,25 +2051,11 @@ def rebuild_summary_sheet(
     return len(rows)
 
 
-def _cell_has_single_link_fill(cell):
+def _cell_has_fill(cell, color):
     fill = cell.fill
     if fill is None or fill.fill_type != "solid":
         return False
-    return str(fill.fgColor.rgb or "").upper().endswith(SINGLE_LINK_FILL_COLOR)
-
-
-def _cell_has_video_link_fill(cell):
-    fill = cell.fill
-    if fill is None or fill.fill_type != "solid":
-        return False
-    return str(fill.fgColor.rgb or "").upper().endswith(VIDEO_LINK_FILL_COLOR)
-
-
-def _cell_has_legacy_photo_link_fill(cell):
-    fill = cell.fill
-    if fill is None or fill.fill_type != "solid":
-        return False
-    return str(fill.fgColor.rgb or "").upper().endswith(LEGACY_PHOTO_LINK_FILL_COLOR)
+    return str(fill.fgColor.rgb or "").upper().endswith(color)
 
 
 def highlight_single_partner_link_rows(workbook, data_sheet_name):
@@ -1600,7 +2106,7 @@ def highlight_single_partner_link_rows(workbook, data_sheet_name):
             cell = worksheet.cell(row=row_index, column=column_index)
             if should_highlight:
                 cell.fill = highlight_fill
-            elif _cell_has_single_link_fill(cell):
+            elif _cell_has_fill(cell, SINGLE_LINK_FILL_COLOR):
                 cell.fill = clear_fill
 
     return highlighted_count
@@ -1652,7 +2158,7 @@ def highlight_video_link_rows(workbook, data_sheet_name):
             cell = worksheet.cell(row=row_index, column=column_index)
             if is_video:
                 cell.fill = video_fill
-            elif _cell_has_video_link_fill(cell) or _cell_has_legacy_photo_link_fill(cell):
+            elif _cell_has_fill(cell, VIDEO_LINK_FILL_COLOR) or _cell_has_fill(cell, LEGACY_PHOTO_LINK_FILL_COLOR):
                 cell.fill = clear_fill
 
     return video_count

@@ -16,7 +16,8 @@ CRITICAL_MARKERS = {
     "Khoidong.bat": [
         r"call .venv\Scripts\activate.bat",
         "Get-NetTCPConnection -LocalPort 1231",
-        '"%VENV_PY%" app.py',
+        '"%VENV_PY%" -m riviu',
+        "from riviu.proxy_utils import PROXY_TEST_BUILD",
     ],
     "capnhat.bat": [
         'stash push -u -m "capnhat-auto-stash"',

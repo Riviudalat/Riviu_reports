@@ -9,20 +9,21 @@ import openpyxl
 import pytest
 from fastapi.testclient import TestClient
 
-import app as backend
-import proxy_utils
-import threads_scraper as threads
+from riviu import app as backend
+from riviu import proxy_utils
+from riviu import reports
+from riviu.platforms import threads
 from test_backend_review_fixes import isolated_backend
 
 
 def test_report_untrusted_strings_are_literal_excel_text():
     row = {'NGÀY AIR':'=1+1','TÊN KÊNH':'=HYPERLINK("https://example.invalid","x")',
-           'LINK AIR':'=1+1','LƯỢT XEM':100,'TIM':0,'BÌNH LUẬN':0,'REPOST':0,'CHIA SẺ':'','TRẠNG THÁI':'=1+1'}
-    payload = backend.build_partner_report('Fixture', [row], platform='threads')
+           'LINK AIR':'=1+1','LƯỢT XEM':100,'TIM':0,'BÌNH LUẬN':0,'REPOST':0,'CHIA SẺ':''}
+    payload = reports.build_partner_report('Fixture', [row], platform='threads')
     book = openpyxl.load_workbook(io.BytesIO(payload))
     try:
         sheet = book.active
-        for address in ('A4','B4','C4','I4'):
+        for address in ('A4','B4','C4'):
             assert sheet[address].data_type == 's'
             assert sheet[address].value.startswith('=')
         assert sheet['D4'].value == 100
@@ -38,21 +39,19 @@ def test_multi_partner_export_uses_single_snapshot(tmp_path, monkeypatch):
         book.active.append(['https://www.threads.com/@demo/post/Fixture','demo',views,0,'A','B'])
         book.save(path); book.close()
     write(10)
-    original = backend.build_workbook_rows
-    calls=[]
+    original = reports.build_partner_report_rows
     def read(snapshot, **kwargs):
-        calls.append(snapshot)
-        if len(calls)==1: write(999)
+        # A scan replaces the workbook after the partner list was read, before the rows are.
+        write(999)
         return original(snapshot, **kwargs)
-    monkeypatch.setattr(backend,'build_workbook_rows',read)
-    result = backend.build_export_payload(path,['A','B'],False,0,'Data','threads')
+    monkeypatch.setattr(reports,'build_partner_report_rows',read)
+    result = reports.build_export_payload(path,['A','B'],False,0,'Data','threads')
     with zipfile.ZipFile(io.BytesIO(result['content'])) as archive:
         values=[]
         for name in archive.namelist():
             book=openpyxl.load_workbook(io.BytesIO(archive.read(name)))
             values.append(book.active['D4'].value);book.close()
     assert values == [10,10]
-    assert len(set(map(str,calls)))==1 and str(calls[0])!=str(path)
 
 
 def test_threads_exact_unknown_clears_stale_views_and_channel_is_literal():
@@ -66,7 +65,7 @@ def test_threads_exact_unknown_clears_stale_views_and_channel_is_literal():
 
 
 def test_summary_unicode_sources_do_not_collide():
-    from workbook_utils import summary_sheet_title_for_data_sheet,data_sheet_name_for_summary_title
+    from riviu.workbook_utils import summary_sheet_title_for_data_sheet,data_sheet_name_for_summary_title
     first=summary_sheet_title_for_data_sheet('Straße');second=summary_sheet_title_for_data_sheet('STRASSE')
     assert first.lower()!=second.lower()
     assert data_sheet_name_for_summary_title(['Straße','STRASSE'],first)=='Straße'

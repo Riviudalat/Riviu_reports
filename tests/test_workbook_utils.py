@@ -1,6 +1,6 @@
 import pandas as pd
 
-from workbook_utils import (
+from riviu.workbook_utils import (
     dataframe_partner_columns,
     fetch_google_spreadsheet_title,
     find_link_column_name,
@@ -26,7 +26,6 @@ from workbook_utils import (
     metric_number,
     normalize_tiktok_url,
     build_workbook_rows,
-    build_summary_totals_row,
     read_sheet_preview,
     rebuild_summary_sheet,
     safe_join,
@@ -36,13 +35,12 @@ from workbook_utils import (
     TIKTOK_MEDIA_PHOTO,
     TIKTOK_MEDIA_VIDEO,
     detect_tiktok_media_type,
-    is_tiktok_photo_link,
     is_tiktok_video_link,
     month_label_for_sheet_name,
     should_highlight_video_link,
     split_partner_value,
     summary_sheet_title_for_data_sheet,
-    to_number,
+
     workbook_file_entries,
     worksheet_find_link_column_index,
 )
@@ -69,8 +67,31 @@ def test_link_column_fallback_ignores_internal_metadata_headers():
     workbook.close()
 
 
-def test_to_number_delegates_to_metric_number():
-    assert to_number("2.500") == 2500
+def test_link_column_fallback_skips_channel_links_and_prefers_post_urls():
+    import openpyxl
+
+    headers = ["Link kênh", "Link tham khảo", "Link bài đăng"]
+    rows = [
+        ["https://www.tiktok.com/@shop", "https://example.com/brief", "https://www.tiktok.com/@shop/video/1"],
+        ["https://www.threads.com/@cafe", "", "https://www.threads.com/@cafe/post/ABC"],
+    ]
+    frame = pd.DataFrame(rows, columns=headers)
+    assert find_link_column_name(frame) == "Link bài đăng"
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(headers)
+    for row in rows:
+        sheet.append(row)
+    assert worksheet_find_link_column_index(sheet) == 3
+
+    # No sample post URL anywhere: the first non-account link column still wins over "Link kênh".
+    assert find_link_column_name(pd.DataFrame({"Link kênh": [""], "Video URL": [""]})) == "Video URL"
+    workbook.close()
+
+
+def test_metric_number_reads_dot_thousands_separator():
+    assert metric_number("2.500") == 2500
 
 
 def test_split_partner_value_multiline():
@@ -124,9 +145,37 @@ def test_is_exportable_report_row_respects_min_views():
     assert is_exportable_report_row(row, apply_min_views=False, min_views=100) is True
 
 
+def test_threads_rows_use_url_username_for_blank_channel_and_count_like_tiktok(tmp_path):
+    import openpyxl
+    from riviu.workbook_utils import list_workbook_partners_with_link_counts
+
+    path = tmp_path / "threads.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["Link", "Tên Kênh", "LƯỢT XEM", "TIM", "Đối tác"])
+    sheet.append(["https://www.threads.com/@miri_viu/post/AAA", "", 500, 3, "Cafe A"])
+    sheet.append(["https://www.threads.com/@cafe.saigon/post/BBB", "cafe.saigon", 0, 0, "Cafe A"])
+    sheet.append(["https://www.threads.com/@an_123/post/CCC", "", "", "", "Cafe A"])
+    book.save(path)
+
+    rows = build_workbook_rows(path, platform="threads")
+    assert [row["TÊN KÊNH"] for row in rows] == ["@miri_viu", "cafe.saigon", "@an_123"]
+    assert all("TRẠNG THÁI" not in row for row in rows)
+    assert not any(is_failed_channel_name(row["TÊN KÊNH"]) for row in rows)
+
+    def counts(**options):
+        [partner] = list_workbook_partners_with_link_counts(path, platform="threads", **options)
+        return partner["linkCount"], partner["rawLinkCount"]
+
+    # Same rule as TikTok: 0/unknown views fall under the min-views threshold unless it is off.
+    assert counts(apply_min_views=True, min_views=100) == (1, 3)
+    assert counts(apply_min_views=False) == (3, 3)
+
+
 def test_google_sheet_file_id_uses_spreadsheet_title(monkeypatch):
     monkeypatch.setattr(
-        "workbook_utils.fetch_google_spreadsheet_title",
+        "riviu.workbook_utils.fetch_google_spreadsheet_title",
         lambda _url: "Report Seeding Tiktok 2026",
     )
     file_id = google_sheet_file_id_from_title("Report Seeding Tiktok 2026", "05-06-2026-10-42")
@@ -206,7 +255,12 @@ def test_safe_workbook_filename():
 def test_summary_sheet_title_for_data_sheet():
     assert summary_sheet_title_for_data_sheet("Tháng 6") == "Tổng kết tháng 6"
     assert summary_sheet_title_for_data_sheet("Tháng 5") == "Tổng kết tháng 5"
+    assert summary_sheet_title_for_data_sheet("Tháng 6", "threads") == "Tổng kết Threads tháng 6"
+    long_name = "Danh sách seeding tháng 6 năm 2026"
+    assert len(summary_sheet_title_for_data_sheet(long_name, "threads")) <= 31
+    assert summary_sheet_title_for_data_sheet(long_name, "threads") != summary_sheet_title_for_data_sheet(long_name)
     assert is_summary_sheet_name("Tổng kết tháng 6") is True
+    assert is_summary_sheet_name("Tổng kết Threads tháng 6") is True
     assert is_summary_sheet_name("Tháng 6") is False
 
 
@@ -246,6 +300,159 @@ def test_rebuild_summary_sheet_only_one_data_sheet(tmp_path):
     wb.close()
 
 
+def test_summary_groups_partner_case_variants_and_orders_updates_by_date():
+    import openpyxl
+
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "Data"
+    sheet.append(["LINK AIR", "Đối tác", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ", "Cập nhật lần cuối"])
+    sheet.append(["https://www.tiktok.com/@a/video/1", "Shop A", 10, 1, 0, 0, 0, "31/08/2026-23:00"])
+    sheet.append(["https://www.tiktok.com/@b/video/2", "shop a", 5, 1, 0, 0, 0, "01/09/2026-08:00"])
+
+    assert rebuild_summary_sheet(wb, data_sheet_name="Data") == 1
+    summary = wb[wb.sheetnames[1]]
+    headers = [cell.value for cell in summary[1]]
+    row = {header: summary.cell(row=2, column=index).value for index, header in enumerate(headers, start=1)}
+    assert row["TỔNG LINK"] == 2 and row["TỔNG LƯỢT XEM"] == 15
+    # "01/09" is later than "31/08" even though it sorts first as text.
+    assert row["Cập nhật lần cuối"] == "01/09/2026-08:00"
+
+
+def test_summary_sheet_and_dashboard_keep_unknown_partner_metrics_blank(tmp_path):
+    import openpyxl
+    from riviu.workbook_utils import read_summary_dashboard
+
+    path = tmp_path / "summary.xlsx"
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "Data"
+    sheet.append(["LINK AIR", "Đối tác", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"])
+    sheet.append(["https://www.tiktok.com/@a/video/1", "Known", 10, 0, None, None, None])
+    sheet.append(["https://www.tiktok.com/@b/video/2", "Known", None, None, None, None, None])
+    sheet.append(["https://www.tiktok.com/@c/video/3", "Unknown", None, None, None, None, None])
+    assert rebuild_summary_sheet(wb, data_sheet_name="Data") == 2
+    summary = wb[summary_sheet_title_for_data_sheet("Data")]
+    headers = [cell.value for cell in summary[1]]
+    cells = {
+        summary.cell(row=row, column=2).value: {header: summary.cell(row=row, column=index).value for index, header in enumerate(headers, start=1)}
+        for row in range(2, summary.max_row + 1)
+    }
+    assert cells["Known"]["TỔNG LINK"] == 2
+    assert (cells["Known"]["TỔNG LƯỢT XEM"], cells["Known"]["TỔNG TIM"], cells["Known"]["TỔNG BÌNH LUẬN"]) == (10, 0, None)
+    assert cells["Unknown"]["TỔNG LINK"] == 1
+    assert cells["Unknown"]["TỔNG LƯỢT XEM"] is None and cells["Unknown"]["TỔNG TIM"] is None
+    wb.save(path)
+    wb.close()
+
+    dashboard = read_summary_dashboard(str(path), "Data")
+    rows = {row["ĐỐI TÁC"]: row for row in dashboard["rows"]}
+    assert rows["Known"]["TỔNG LƯỢT XEM"] == 10 and rows["Known"]["TỔNG TIM"] == 0
+    assert rows["Known"]["TỔNG BÌNH LUẬN"] == ""
+    assert rows["Unknown"]["TỔNG LƯỢT XEM"] == "" and rows["Unknown"]["TỔNG LINK"] == 1
+    assert dashboard["totals"]["views"] == 10 and dashboard["totals"]["likes"] == 0
+    assert dashboard["totals"]["comments"] == "" and dashboard["totals"]["links"] == 3
+
+
+def test_mixed_sheet_keeps_one_summary_per_platform(tmp_path):
+    """Each platform counts only its own links into its own tab; neither rebuild touches the other."""
+    import openpyxl
+    from riviu.workbook_utils import SUMMARY_COLUMNS, read_summary_dashboard
+
+    path = tmp_path / "mixed.xlsx"
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "Data"
+    sheet.append(["LINK AIR", "Đối tác", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "REPOST", "CHIA SẺ"])
+    sheet.append(["https://www.tiktok.com/@a/video/1", "Shop A", 100, 5, 1, 2, None, 3])
+    sheet.append(["https://www.threads.com/@a/post/AbC1", "Shop A", 40, 4, 0, None, 1, None])
+    sheet.append(["https://www.threads.com/@b/post/AbC2", "Shop A", None, 6, None, None, 2, None])
+    sheet.append(["https://www.threads.com/@c/post/AbC3", "Shop B", None, None, None, None, None, None])
+    wb.create_sheet("Other")
+
+    assert rebuild_summary_sheet(wb, data_sheet_name="Data", platform="threads") == 2
+    assert rebuild_summary_sheet(wb, data_sheet_name="Data") == 1
+    assert rebuild_summary_sheet(wb, data_sheet_name="Data", platform="threads") == 2
+    assert wb.sheetnames == ["Data", "Tổng kết data", "Tổng kết Threads data", "Other"]
+
+    def table(title):
+        worksheet = wb[title]
+        headers = [cell.value for cell in worksheet[1]]
+        rows = {
+            worksheet.cell(row=row, column=2).value: dict(zip(headers, (cell.value for cell in worksheet[row])))
+            for row in range(2, worksheet.max_row + 1)
+        }
+        return headers, rows
+
+    tiktok_headers, tiktok = table("Tổng kết data")
+    assert tiktok_headers == SUMMARY_COLUMNS and list(tiktok) == ["Shop A"]
+    assert (tiktok["Shop A"]["TỔNG LINK"], tiktok["Shop A"]["TỔNG LƯỢT LƯU"]) == (1, 2)
+    threads_headers, threads = table("Tổng kết Threads data")
+    assert threads_headers == [
+        "Stt", "ĐỐI TÁC", "TỔNG LINK", "TỔNG LƯỢT XEM", "TỔNG TIM",
+        "TỔNG BÌNH LUẬN", "TỔNG REPOST", "TỔNG CHIA SẺ", "Cập nhật lần cuối",
+    ]
+    shop_a = threads["Shop A"]
+    assert [shop_a[header] for header in threads_headers[2:8]] == [2, 40, 10, 0, 3, None]
+    assert threads["Shop B"]["TỔNG LINK"] == 1 and threads["Shop B"]["TỔNG LƯỢT XEM"] is None
+    wb.save(path)
+    wb.close()
+
+    threads_dashboard = read_summary_dashboard(str(path), "Data", platform="threads")
+    assert (threads_dashboard["sheet"], threads_dashboard["dataSheet"]) == ("Tổng kết Threads data", "Data")
+    assert threads_dashboard["totals"] == {
+        "partners": 2, "links": 3, "views": 40, "likes": 10, "comments": 0, "reposts": 3, "shares": "",
+    }
+    assert read_summary_dashboard(str(path), "Data")["totals"] == {
+        "partners": 1, "links": 1, "views": 100, "likes": 5, "comments": 1, "saves": 2, "shares": 3,
+    }
+    # A summary tab opened from the TikTok view is read with the platform that owns it.
+    opened = read_summary_dashboard(str(path), "Tổng kết Threads data", platform="tiktok")
+    assert (opened["dataSheet"], opened["totals"]) == ("Data", threads_dashboard["totals"])
+
+
+def test_read_sheet_preview_hides_pandas_placeholder_headers(tmp_path):
+    import json
+    import openpyxl
+
+    path = tmp_path / "headers.xlsx"
+    wb = openpyxl.Workbook()
+    sheet = wb.active
+    sheet.title = "Data"
+    sheet.append(["LINK AIR", None, "Ghi chú", "Ghi chú", None])
+    sheet.append(["https://www.tiktok.com/@a/video/1", None, "một", "hai", "dữ liệu"])
+    wb.save(path)
+    wb.close()
+
+    preview = read_sheet_preview(str(path), sheet_name="Data")
+    assert preview["columns"] == ["LINK AIR", "Ghi chú", "Ghi chú (2)", "Cột E"]
+    assert preview["data"][0]["Ghi chú"] == "một" and preview["data"][0]["Ghi chú (2)"] == "hai"
+    assert preview["data"][0]["Cột E"] == "dữ liệu"
+    assert "Unnamed" not in json.dumps(preview, ensure_ascii=False)
+
+
+def test_shared_column_lookup_matches_unaccented_headers_instead_of_appending():
+    import openpyxl
+    from riviu.workbook_utils import worksheet_ensure_column
+
+    sheet = openpyxl.Workbook().active
+    sheet.append(["Link", "Luot xem", "Ngày cập nhật"])
+    assert worksheet_ensure_column(sheet, "LƯỢT XEM") == 2
+    assert worksheet_ensure_column(sheet, "Cập nhật lần cuối") == 3
+    assert worksheet_ensure_column(sheet, "TIM") == 4 and sheet.cell(row=1, column=4).value == "TIM"
+
+
+def test_atomic_save_temp_files_are_never_listed_as_workbooks(tmp_path):
+    import openpyxl
+    from riviu.workbook_utils import save_workbook_atomic, workbook_file_entries
+
+    target = tmp_path / "Report.xlsx"
+    save_workbook_atomic(openpyxl.Workbook(), target)
+    (tmp_path / ".riviu-interrupted.xlsx").write_bytes(b"partial")
+    assert [entry["id"] for entry in workbook_file_entries(str(tmp_path))] == ["Report.xlsx"]
+    assert sorted(path.name for path in tmp_path.iterdir() if path.is_file()) == [".riviu-interrupted.xlsx", "Report.xlsx"]
+
+
 def test_detect_tiktok_media_type_from_video_and_photo_urls():
     video_url = (
         "https://www.tiktok.com/@ngkhangg.008/video/7635258581851360520"
@@ -259,8 +466,6 @@ def test_detect_tiktok_media_type_from_video_and_photo_urls():
     assert detect_tiktok_media_type(photo_url) == TIKTOK_MEDIA_PHOTO
     assert is_tiktok_video_link(video_url) is True
     assert is_tiktok_video_link(photo_url) is False
-    assert is_tiktok_photo_link(photo_url) is True
-    assert is_tiktok_photo_link(video_url) is False
     assert detect_tiktok_media_type("https://vt.tiktok.com/ZSabc123/") == ""
     assert (
         detect_tiktok_media_type(
@@ -677,48 +882,6 @@ def test_read_sheet_preview_flags_single_partner_rows(tmp_path):
     assert not rows[2].get("_singlePartner")
 
 
-def test_build_summary_totals_row_sums_partner_metrics():
-    rows = [
-        {
-            "TỔNG LINK": 2,
-            "TỔNG LƯỢT XEM": 100,
-            "TỔNG TIM": 10,
-            "TỔNG BÌNH LUẬN": 3,
-            "TỔNG LƯỢT LƯU": 4,
-            "TỔNG CHIA SẺ": 5,
-        },
-        {
-            "TỔNG LINK": 1,
-            "TỔNG LƯỢT XEM": 50,
-            "TỔNG TIM": 5,
-            "TỔNG BÌNH LUẬN": 1,
-            "TỔNG LƯỢT LƯU": 2,
-            "TỔNG CHIA SẺ": 1,
-        },
-    ]
-    totals = build_summary_totals_row(rows)
-    assert totals["ĐỐI TÁC"] == "TỔNG"
-    assert totals["TỔNG LINK"] == 3
-    assert totals["TỔNG LƯỢT XEM"] == 150
-    assert totals["TỔNG TIM"] == 15
-    assert totals["TỔNG CHIA SẺ"] == 6
-
-
-def test_build_summary_totals_row_aligned_uses_actual_column_names():
-    from workbook_utils import build_summary_totals_row_aligned
-
-    columns = ["Stt", "Đối tác", "Tổng link", "Tổng lượt xem", "Tổng tim", "Cập nhật lần cuối"]
-    rows = [
-        {"Stt": 1, "Đối tác": "A", "Tổng link": 2, "Tổng lượt xem": 100, "Tổng tim": 10, "Cập nhật lần cuối": ""},
-        {"Stt": 2, "Đối tác": "B", "Tổng link": 1, "Tổng lượt xem": 50, "Tổng tim": 5, "Cập nhật lần cuối": ""},
-    ]
-    aligned = build_summary_totals_row_aligned(columns, rows)
-    assert aligned["Đối tác"] == "TỔNG"
-    assert aligned["Tổng link"] == 3
-    assert aligned["Tổng lượt xem"] == 150
-    assert aligned["Tổng tim"] == 15
-
-
 def test_is_scrapable_tiktok_url():
     assert is_scrapable_tiktok_url("tiktok.com/@a/video/1") is True
     assert is_scrapable_tiktok_url("https://www.tiktok.com/@a/video/1") is True
@@ -759,3 +922,100 @@ def test_workbook_file_entries_skips_internal_files(tmp_path):
     assert "data/_test_export.xlsx" not in ids
     assert "data/Report Seeding Tiktok.xlsx" in ids
     assert "Report.xlsx" in ids
+
+
+def test_data_sheet_defaults_skip_hidden_months(tmp_path):
+    import openpyxl
+    from riviu.workbook_utils import find_data_sheet_names, is_threads_link
+
+    workbook = openpyxl.Workbook()
+    workbook.active.title = "Tháng 6"
+    workbook.active.sheet_state = "hidden"
+    workbook.create_sheet("Tháng 8")
+    path = tmp_path / "months.xlsx"
+    workbook.save(path)
+    # Every "first data sheet" default ([0]) must land on the month the user can see.
+    assert find_data_sheet_names(path) == ["Tháng 8", "Tháng 6"]
+    # A malformed host must be "not a Threads link", never an exception that aborts a scan or export.
+    assert is_threads_link("https://[threads.com/@a/post/ABC") is False
+
+
+def count_sheet_parses(monkeypatch):
+    """Record each full pandas parse of a sheet (the 1-row raw-header read is not a parse)."""
+    parses = []
+    original = pd.ExcelFile.parse
+
+    def parse(self, sheet_name=0, *args, **kwargs):
+        if kwargs.get("nrows") is None:
+            parses.append(sheet_name)
+        return original(self, sheet_name, *args, **kwargs)
+
+    monkeypatch.setattr(pd.ExcelFile, "parse", parse)
+    return parses
+
+
+def test_unchanged_workbook_reads_are_cached_until_an_atomic_save(tmp_path, monkeypatch):
+    import openpyxl
+    from riviu.workbook_utils import list_workbook_partners_with_link_counts, save_workbook_atomic
+
+    path = tmp_path / "cached.xlsx"
+    book = openpyxl.Workbook()
+    book.active.title = "Data"
+    book.active.append(["Link", "Tên Kênh", "LƯỢT XEM", "Đối tác"])
+    book.active.append(["https://www.tiktok.com/@a/video/1", "Kênh A", 111, "Partner A"])
+    book.save(path)
+    parses = count_sheet_parses(monkeypatch)
+
+    assert read_sheet_preview(str(path), "Data", platform="tiktok")["data"][0]["LƯỢT XEM"] == "111"
+    list_workbook_partners_with_link_counts(str(path), "Data")
+    assert read_sheet_preview(str(path), "Data", platform="tiktok")["data"][0]["LƯỢT XEM"] == "111"
+    assert parses == ["Data"]
+
+    # A scan writes its results through save_workbook_atomic; the next read must see them.
+    book = openpyxl.load_workbook(path)
+    book["Data"]["C2"] = 222
+    save_workbook_atomic(book, str(path))
+    assert read_sheet_preview(str(path), "Data", platform="tiktok")["data"][0]["LƯỢT XEM"] == "222"
+    assert build_workbook_rows(str(path), sheet_name="Data")[0]["LƯỢT XEM"] == 222
+    assert parses == ["Data", "Data"]
+
+
+def test_preview_shows_formula_stt_numbers_without_cached_values(tmp_path):
+    import openpyxl
+
+    path = tmp_path / "stt.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["   STT", "Link"])
+    sheet.append([1, "https://www.tiktok.com/@a/video/1"])
+    sheet.append(["=A2+1", "https://www.tiktok.com/@a/video/2"])
+    sheet.append(["=A3+1", "https://www.tiktok.com/@a/video/3"])
+    sheet.append(["=row()-1", "https://www.tiktok.com/@a/video/4"])
+    sheet.append(["=ROW()-3", "https://www.tiktok.com/@a/video/5"])
+    sheet.append([None, "https://www.tiktok.com/@a/video/6"])
+    # openpyxl stores formulas without cached values, as every scan save does.
+    book.save(path)
+
+    preview = read_sheet_preview(str(path), "Data", platform="tiktok")
+
+    assert [row["   STT"] for row in preview["data"]] == ["1", "2", "3", "4", "3", ""]
+
+
+def test_preview_drops_midnight_time_from_date_only_cells(tmp_path):
+    from datetime import datetime
+    import openpyxl
+
+    path = tmp_path / "dates.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["Ngày", "Link", "Cập nhật"])
+    sheet.append([datetime(2026, 8, 1), "https://www.tiktok.com/@a/video/1", datetime(2026, 8, 2, 14, 30)])
+    sheet.append([None, "https://www.tiktok.com/@a/video/2", datetime(2026, 8, 3)])
+    book.save(path)
+
+    rows = read_sheet_preview(str(path), "Data", platform="tiktok")["data"]
+
+    assert [row["Ngày"] for row in rows] == ["01/08/2026", "01/08/2026"]
+    assert [row["Cập nhật"] for row in rows] == ["02/08/2026-14:30", "03/08/2026"]

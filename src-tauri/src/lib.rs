@@ -1,20 +1,43 @@
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
 use tauri::ipc::CapabilityBuilder;
 use tauri::{AppHandle, Manager, RunEvent};
-use tauri_plugin_shell::process::CommandChild;
+use tauri_plugin_shell::process::{Command, CommandChild, CommandEvent};
 use tauri_plugin_shell::ShellExt;
 use tauri_plugin_updater::UpdaterExt;
 use url::Url;
+
+/// How long a graceful `/_desktop/shutdown` may take before the sidecar is
+/// force-killed. Python needs this time to close its Chromium children; on
+/// macOS/Linux the PyInstaller one-file bootloader also deletes its `_MEI*`
+/// extraction folder.
+const SERVER_EXIT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Folder under the resource dir that holds the Windows one-folder server build
+/// (mapped in tauri.windows.conf.json).
+#[cfg(windows)]
+const SERVER_RESOURCE_DIR: &str = "riviu-server";
 
 struct ServerState {
     port: u16,
     shutdown_token: String,
     child: Mutex<Option<CommandChild>>,
+    /// Set once the sidecar process has terminated (its event channel closed).
+    exited: Arc<AtomicBool>,
+}
+
+/// 256-bit token from the OS CSPRNG. The `/_desktop/*` routes skip the session
+/// cookie and rely only on this value, so it must not be guessable by other
+/// local processes (unlike a PID or start time).
+fn generate_shutdown_token() -> String {
+    let mut bytes = [0u8; 32];
+    getrandom::fill(&mut bytes).expect("OS random number generator is unavailable");
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 fn reserve_loopback_port() -> std::io::Result<u16> {
@@ -24,10 +47,13 @@ fn reserve_loopback_port() -> std::io::Result<u16> {
     Ok(port)
 }
 
-fn wait_for_server(port: u16) -> Result<(), String> {
+fn wait_for_server(port: u16, exited: &AtomicBool) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(45);
     let address = format!("127.0.0.1:{port}");
     while Instant::now() < deadline {
+        if exited.load(Ordering::SeqCst) {
+            return Err("Riviu Reports server exited during startup.".to_string());
+        }
         if TcpStream::connect_timeout(
             &address
                 .parse::<SocketAddr>()
@@ -43,6 +69,56 @@ fn wait_for_server(port: u16) -> Result<(), String> {
     Err("Riviu Reports server did not start within 45 seconds.".to_string())
 }
 
+/// On Windows the server is a PyInstaller one-folder build shipped as bundle
+/// resources, so a launch does not first unpack Python and Chromium into a new
+/// temp folder. macOS and Linux keep the one-file `externalBin` sidecar.
+#[cfg(windows)]
+fn server_command(app: &AppHandle) -> Result<Command, String> {
+    let program = app
+        .path()
+        .resource_dir()
+        .map_err(|error| error.to_string())?
+        .join(SERVER_RESOURCE_DIR)
+        .join("riviu-server.exe");
+    if !program.is_file() {
+        return Err(format!(
+            "Riviu Reports server is missing: {}",
+            program.display()
+        ));
+    }
+    Ok(app.shell().command(program))
+}
+
+#[cfg(not(windows))]
+fn server_command(app: &AppHandle) -> Result<Command, String> {
+    app.shell()
+        .sidecar("riviu-server")
+        .map_err(|error| error.to_string())
+}
+
+/// Force-kill the server. The Windows one-folder build has no one-file
+/// bootloader whose job object takes the children down, so kill the whole tree
+/// there; otherwise Playwright's driver and Chromium could outlive it.
+fn kill_server(child: CommandChild) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        let killed_tree = std::process::Command::new("taskkill")
+            .args(["/PID", &child.pid().to_string(), "/T", "/F"])
+            .creation_flags(CREATE_NO_WINDOW)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success());
+        if killed_tree {
+            return;
+        }
+    }
+    let _ = child.kill();
+}
+
 fn start_server(app: &AppHandle, state: &ServerState) -> Result<(), String> {
     let data_dir = app
         .path()
@@ -50,16 +126,25 @@ fn start_server(app: &AppHandle, state: &ServerState) -> Result<(), String> {
         .map_err(|error| error.to_string())?;
     std::fs::create_dir_all(&data_dir).map_err(|error| error.to_string())?;
 
-    let command = app
-        .shell()
-        .sidecar("riviu-server")
-        .map_err(|error| error.to_string())?
+    let command = server_command(app)?
         .env("RIVIU_PORT", state.port.to_string())
         .env("RIVIU_SHUTDOWN_TOKEN", &state.shutdown_token)
         .env("RIVIU_DATA_DIR", data_dir.to_string_lossy().to_string());
-    let (_receiver, child) = command.spawn().map_err(|error| error.to_string())?;
-    if let Err(error) = wait_for_server(state.port) {
-        let _ = child.kill();
+    let (mut receiver, child) = command.spawn().map_err(|error| error.to_string())?;
+    // Drain the sidecar's events so stop_server can tell when the process (and
+    // its inherited stdout/stderr handles) are really gone.
+    let exited = state.exited.clone();
+    exited.store(false, Ordering::SeqCst);
+    tauri::async_runtime::spawn(async move {
+        while let Some(event) = receiver.recv().await {
+            if matches!(event, CommandEvent::Terminated(_)) {
+                break;
+            }
+        }
+        exited.store(true, Ordering::SeqCst);
+    });
+    if let Err(error) = wait_for_server(state.port, &state.exited) {
+        kill_server(child);
         return Err(error);
     }
     *state.child.lock().map_err(|error| error.to_string())? = Some(child);
@@ -79,8 +164,19 @@ async fn check_for_update(app: AppHandle) -> Result<Option<String>, String> {
 
 #[tauri::command]
 async fn install_update(app: AppHandle) -> Result<(), String> {
+    // On Windows the updater launches the NSIS installer and then calls
+    // `std::process::exit(0)`, so RunEvent::Exit never fires. Stop the sidecar
+    // in the pre-exit hook; otherwise riviu-server.exe (and Chromium) would be
+    // orphaned and keep the executable locked while the installer replaces it.
+    // This replaces the plugin's default hook, so keep its cleanup call too.
+    let exit_handle = app.clone();
     let Some(update) = app
-        .updater()
+        .updater_builder()
+        .on_before_exit(move || {
+            stop_server(&exit_handle);
+            exit_handle.cleanup_before_exit();
+        })
+        .build()
         .map_err(|error| error.to_string())?
         .check()
         .await
@@ -146,28 +242,35 @@ fn request_server_action(port: u16, shutdown_token: &str, path: &str) -> Result<
     }
 }
 
+/// Ask the sidecar to shut down, wait (bounded) for it to exit on its own, and
+/// only force-kill it if it is still running. Idempotent: the child is taken
+/// out of the state, so later calls (ExitRequested then Exit) return at once.
 fn stop_server(app: &AppHandle) {
-    if let Some(state) = app.try_state::<ServerState>() {
-        let _ = request_server_action(state.port, &state.shutdown_token, "/_desktop/shutdown");
-        if let Ok(mut child) = state.child.lock() {
-            if let Some(child) = child.take() {
-                thread::sleep(Duration::from_millis(300));
-                let _ = child.kill();
-            }
+    let Some(state) = app.try_state::<ServerState>() else {
+        return;
+    };
+    let child = state
+        .child
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .take();
+    let Some(child) = child else {
+        return;
+    };
+    if request_server_action(state.port, &state.shutdown_token, "/_desktop/shutdown").is_ok() {
+        let deadline = Instant::now() + SERVER_EXIT_TIMEOUT;
+        while !state.exited.load(Ordering::SeqCst) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(100));
         }
+    }
+    if !state.exited.load(Ordering::SeqCst) {
+        kill_server(child);
     }
 }
 
 pub fn run() {
     let port = reserve_loopback_port().expect("failed to reserve a local port");
-    let shutdown_token = format!(
-        "{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .expect("system clock before Unix epoch")
-            .as_nanos()
-    );
+    let shutdown_token = generate_shutdown_token();
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
@@ -175,6 +278,7 @@ pub fn run() {
             port,
             shutdown_token,
             child: Mutex::new(None),
+            exited: Arc::new(AtomicBool::new(false)),
         })
         .setup(|app| {
             let handle = app.handle();
