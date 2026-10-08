@@ -8,11 +8,33 @@ import platform
 import shutil
 import subprocess
 import sys
+from collections.abc import Iterable
 from pathlib import Path
+
+try:
+    from bundle_contents import BUNDLED_BROWSERS_ENV, browser_dirs_from_install_dry_run, bundled_browser_dirs
+except ModuleNotFoundError:  # imported as desktop.build_sidecar (tests)
+    from desktop.bundle_contents import BUNDLED_BROWSERS_ENV, browser_dirs_from_install_dry_run, bundled_browser_dirs
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SIDECAR_NAME = "riviu-server"
+
+
+def bundle_paths(built: Path) -> list[str]:
+    """Paths of the files in a one-folder build, or in a one-file executable's archive."""
+    if built.is_dir():
+        return [path.relative_to(built).as_posix() for path in built.rglob("*")]
+    from PyInstaller.archive.readers import CArchiveReader
+
+    return list(CArchiveReader(str(built)).toc)
+
+
+def check_bundled_browsers(built: Path, expected: Iterable[str]) -> None:
+    """Fail the build unless it holds exactly the expected browser folders."""
+    found = bundled_browser_dirs(bundle_paths(built))
+    if found != set(expected):
+        raise RuntimeError(f"Bundled browsers {sorted(found)} do not match {sorted(expected)}")
 
 
 def uses_onedir(platform_name: str) -> bool:
@@ -63,12 +85,24 @@ def main() -> None:
     playwright_env = os.environ.copy()
     # Store Chromium under the Playwright package so PyInstaller collects it.
     playwright_env["PLAYWRIGHT_BROWSERS_PATH"] = "0"
-    subprocess.run(
-        [sys.executable, "-m", "playwright", "install", "chromium"],
+    # Every launch is headless, which Playwright runs with chromium-headless-shell,
+    # so the full Chromium build is never needed.
+    playwright_cli = [sys.executable, "-m", "playwright", "install"]
+    subprocess.run([*playwright_cli, "--only-shell", "chromium"], cwd=ROOT, check=True, env=playwright_env)
+    dry_run = subprocess.run(
+        [*playwright_cli, "--dry-run", "--only-shell", "chromium"],
         cwd=ROOT,
         check=True,
         env=playwright_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
     )
+    browser_dirs = browser_dirs_from_install_dry_run(dry_run.stdout)
+    # The Playwright hook keeps only these folders, so a full Chromium left in
+    # the package-local browsers folder by an earlier install is not bundled.
+    playwright_env[BUNDLED_BROWSERS_ENV] = os.pathsep.join(browser_dirs)
     command = [
         sys.executable,
         "-m",
@@ -132,6 +166,7 @@ def main() -> None:
         built_dir = dist_dir / SIDECAR_NAME
         if not (built_dir / f"{SIDECAR_NAME}{extension}").exists():
             raise FileNotFoundError(f"PyInstaller did not create {built_dir}")
+        check_bundled_browsers(built_dir, browser_dirs)
         bundled_dir = output_dir / SIDECAR_NAME
         shutil.rmtree(bundled_dir, ignore_errors=True)
         shutil.copytree(built_dir, bundled_dir)
@@ -141,6 +176,7 @@ def main() -> None:
     built_binary = dist_dir / f"{SIDECAR_NAME}{extension}"
     if not built_binary.exists():
         raise FileNotFoundError(f"PyInstaller did not create {built_binary}")
+    check_bundled_browsers(built_binary, browser_dirs)
 
     bundled_binary = output_dir / f"{SIDECAR_NAME}-{args.target}{extension}"
     shutil.copy2(built_binary, bundled_binary)

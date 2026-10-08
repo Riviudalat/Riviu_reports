@@ -1,3 +1,4 @@
+import ast
 import io
 import asyncio
 import json
@@ -5,6 +6,8 @@ from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from openpyxl import load_workbook
 
@@ -122,6 +125,104 @@ def test_desktop_bundle_keeps_resources_separate_from_user_data_and_release_ci()
     assert "macos-15-intel" in workflow
     assert "macos-14" in workflow
     assert "TAURI_SIGNING_PRIVATE_KEY" in workflow
+
+
+def test_sidecar_bundles_only_the_headless_shell_browser():
+    from desktop import bundle_contents as bundle
+
+    dry_run = (
+        "Chrome Headless Shell 147.0.7727.15 (playwright chromium-headless-shell v1217)\n"
+        r"  Install location:    C:\venv\Lib\site-packages\playwright\driver\package\.local-browsers\chromium_headless_shell-1217" "\n"
+        "  Download url:        https://cdn.playwright.dev/builds/cft/147.0.7727.15/win64/chrome-headless-shell-win64.zip\n"
+        "\n"
+        "FFmpeg (playwright ffmpeg v1011)\n"
+        "  Install location:    /venv/lib/python3.12/site-packages/playwright/driver/package/.local-browsers/ffmpeg-1011\n"
+        "\n"
+        "Winldd (playwright winldd v1007)\n"
+        r"  Install location:    C:\venv\Lib\site-packages\playwright\driver\package\.local-browsers\winldd-1007" "\n"
+    )
+    browsers = bundle.browser_dirs_from_install_dry_run(dry_run)
+    assert browsers == ["chromium_headless_shell-1217", "winldd-1007"]
+
+    package = r"C:\venv\Lib\site-packages\playwright\driver\package"
+    headless_shell = rf"{package}\.local-browsers\chromium_headless_shell-1217\chrome-headless-shell-win64\chrome-headless-shell.exe"
+    winldd = f"{package}/.local-browsers/winldd-1007/PrintDeps.exe"
+    driver_file = f"{package}/lib/server/registry/index.js"
+    sources = [
+        rf"{package}\.local-browsers\chromium-1217\chrome-win64\chrome.exe",  # stale full Chromium
+        headless_shell,
+        f"{package}/.local-browsers/ffmpeg-1011/ffmpeg-win64.exe",
+        f"{package}/.local-browsers/.links/0123abcd",
+        winldd,
+        driver_file,
+    ]
+    assert [source for source in sources if bundle.keep_playwright_data(source, browsers)] == [
+        headless_shell, winldd, driver_file,
+    ]
+    with pytest.raises(RuntimeError):
+        bundle.browser_dirs_from_install_dry_run(dry_run.replace("chromium_headless_shell-1217", "chromium-1217"))
+
+
+def test_production_browser_launches_are_headless_chromium_only():
+    """The desktop bundle ships only chromium-headless-shell, which Playwright uses
+    for headless Chromium launches without a channel. Anything else would fail in
+    the installed app with a missing-executable error."""
+    root = Path(__file__).parents[1]
+    launches = 0
+    for path in sorted(root.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute):
+                assert node.attr not in {"firefox", "webkit", "launch_persistent_context", "connect_over_cdp"}, path.name
+            if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute) and node.func.attr == "launch"
+                    and isinstance(node.func.value, ast.Attribute) and node.func.value.attr == "chromium"):
+                continue
+            launches += 1
+            for keyword in node.keywords:
+                if keyword.arg is None:
+                    options = keyword.value.id
+                    literals = [
+                        assignment.value for assignment in ast.walk(tree)
+                        if isinstance(assignment, ast.Assign) and isinstance(assignment.value, ast.Dict)
+                        and any(isinstance(target, ast.Name) and target.id == options for target in assignment.targets)
+                    ]
+                    stored_keys = [
+                        target.slice.value for assignment in ast.walk(tree) if isinstance(assignment, ast.Assign)
+                        for target in assignment.targets
+                        if isinstance(target, ast.Subscript) and isinstance(target.value, ast.Name) and target.value.id == options
+                    ]
+                    assert literals and "headless" not in stored_keys and "channel" not in stored_keys, path.name
+                    for literal in literals:
+                        entries = {key.value: value for key, value in zip(literal.keys, literal.values)}
+                        assert "channel" not in entries and getattr(entries.get("headless"), "value", None) is True, path.name
+                else:
+                    assert keyword.arg != "channel", path.name
+                    if keyword.arg == "headless":
+                        assert isinstance(keyword.value, ast.Constant) and keyword.value.value is True, path.name
+    assert launches == 3
+
+
+def test_bundled_google_discovery_documents_cover_every_api_the_app_builds():
+    import googleapiclient
+    from desktop.bundle_contents import GOOGLE_DISCOVERY_DOCS
+
+    root = Path(__file__).parents[1]
+    built = set()
+    for path in sorted(root.glob("*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        builders = {
+            alias.asname or alias.name for node in ast.walk(tree)
+            if isinstance(node, ast.ImportFrom) and node.module == "googleapiclient.discovery"
+            for alias in node.names if alias.name == "build"
+        }
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in builders:
+                api, version = (argument.value for argument in node.args[:2])
+                assert not any(keyword.arg in {"discoveryServiceUrl", "static_discovery"} for keyword in node.keywords)
+                built.add(f"{api}.{version}")
+    assert built and built <= set(GOOGLE_DISCOVERY_DOCS)
+    documents = Path(googleapiclient.__file__).parent / "discovery_cache" / "documents"
+    assert all((documents / f"{name}.json").is_file() for name in GOOGLE_DISCOVERY_DOCS)
 
 
 def test_template_has_no_duplicate_ids():
