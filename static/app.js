@@ -24,7 +24,9 @@ const PLATFORMS = Object.freeze({
         // Fourth metric column: TikTok saves vs Threads reposts.
         savedMetric: Object.freeze({ column: 'LƯỢT LƯU', label: 'Lượt lưu' }),
         previewKeepsTotalRow: true,
-        hidesGeneratedSheetTabs: false,
+        // Summary tabs are "Tổng kết <sheet>" (TikTok, legacy) or "Tổng kết <tag> <sheet>".
+        summaryTag: '',
+        hidesResultSheetTabs: false,
         cookieSession: false,
         partialWithMetricsIsSuccess: false,
         reconcileCountsFromRows: false,
@@ -43,7 +45,8 @@ const PLATFORMS = Object.freeze({
         liveLinkHeader: 'LINK THREADS',
         savedMetric: Object.freeze({ column: 'REPOST', label: 'Repost' }),
         previewKeepsTotalRow: false,
-        hidesGeneratedSheetTabs: true,
+        summaryTag: 'Threads',
+        hidesResultSheetTabs: true,
         cookieSession: true,
         partialWithMetricsIsSuccess: true,
         reconcileCountsFromRows: true,
@@ -251,7 +254,7 @@ async function setPlatform(platform) {
     } finally { sourceBusy = false; syncScanControls(); }
     clearLiveResults({ emptyText: 'Chưa có kết quả mới' });
     resetProgressDisplay();
-    if (platformConfig(platform).hidesGeneratedSheetTabs && isSummarySheetName(currentSheetName)) {
+    if (isSummarySheetName(currentSheetName) && summarySheetPlatform(currentSheetName) !== platform) {
         currentSheetName = filterDataSheets(window.lastWorkbookSheets || [])[0] || '';
     }
     setWorkspaceTab('sheet');
@@ -611,6 +614,25 @@ function fileDisplayLabel(file) {
 function isSummarySheetName(value) {
     const key = normalizeVietnameseKey(value);
     return key === 'tong ket' || key.startsWith('tong ket ');
+}
+
+function summarySheetPlatform(value) {
+    if (!isSummarySheetName(value)) return '';
+    const key = normalizeVietnameseKey(value);
+    const tagged = PLATFORM_KEYS.find(platform => {
+        const tag = normalizeVietnameseKey(PLATFORMS[platform].summaryTag);
+        return tag && (key === `tong ket ${tag}` || key.startsWith(`tong ket ${tag} `));
+    });
+    return tagged || PLATFORM_KEYS.find(platform => !PLATFORMS[platform].summaryTag) || '';
+}
+
+function visibleSheetTabs(sheets, platform = activePlatform) {
+    // Each platform sees its data sheets and its own summary tabs, never the other platform's.
+    return (Array.isArray(sheets) ? sheets : []).filter(sheet => {
+        if (!sheet) return false;
+        if (isSummarySheetName(sheet)) return summarySheetPlatform(sheet) === platform;
+        return !(platformConfig(platform).hidesResultSheetTabs && isResultSheetName(sheet));
+    });
 }
 
 function dataSheetNameForSummaryTab(summaryTabName, sheets) {
@@ -1491,7 +1513,7 @@ async function downloadCurrentWorkbook() {
 function renderSheetTabs(sheets, currentSheet) {
     const tabs = document.getElementById('sheetTabs');
     tabs.innerHTML = '';
-    const visibleSheets = platformConfig().hidesGeneratedSheetTabs ? filterDataSheets(sheets) : sheets;
+    const visibleSheets = visibleSheetTabs(sheets);
     if (!visibleSheets || visibleSheets.length <= 1) return;
 
     visibleSheets.forEach(sheet => {

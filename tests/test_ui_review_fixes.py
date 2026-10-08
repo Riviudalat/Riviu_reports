@@ -204,10 +204,10 @@ def test_latest_preview_request_wins_for_same_workbook():
 
 def test_opened_summary_tab_is_requested_by_its_own_title():
     # A mixed sheet has a TikTok and a Threads summary tab; resolving the tab to its data
-    # sheet would make the TikTok view show its own summary instead of the opened one.
+    # sheet would make the server read the TikTok summary instead of the opened one.
     run_js("""
       (async()=>{
-        activePlatform='tiktok'; currentFileId='Book.xlsx'; currentSheetName='Tổng kết Threads data';
+        activePlatform='threads'; currentFileId='Book.xlsx'; currentSheetName='Tổng kết Threads data';
         renderSheetTabs=()=>{}; renderScanSheetOptions=()=>{}; renderPushSheetOptions=()=>{};
         syncCompactSourceSummary=()=>{}; setPreviewTableVisible=()=>{};
         const urls=[];
@@ -218,6 +218,14 @@ def test_opened_summary_tab_is_requested_by_its_own_title():
         const summary=urls.find(url=>url.startsWith('/summary-dashboard?'));
         assert.equal(new URLSearchParams(summary.split('?')[1]).get('sheet_name'),'Tổng kết Threads data');
       })()
+    """)
+
+
+def test_each_platform_shows_only_its_own_summary_tabs():
+    run_js("""
+      const sheets=['Data','Tổng kết','Tổng kết data','Tổng kết Threads data','08-10-2026-10-30'];
+      assert.deepEqual(visibleSheetTabs(sheets,'tiktok'),['Data','Tổng kết','Tổng kết data','08-10-2026-10-30']);
+      assert.deepEqual(visibleSheetTabs(sheets,'threads'),['Data','Tổng kết Threads data']);
     """)
 
 
