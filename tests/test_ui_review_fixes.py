@@ -47,6 +47,7 @@ const context = vm.createContext({console,document,WebSocket,Map,Set,Date,Number
 vm.runInContext(fs.readFileSync('static/app.js','utf8'),context);
 // Suppress unrelated presentation / asynchronous API edges, not scan routing/rendering.
 vm.runInContext(`const originalLoadPreview=loadPreview; const originalUpdateFileList=updateFileList;
+  const originalSetGooglePushState=setGooglePushState;
   addLog=()=>{}; notify=()=>{}; setGooglePushState=()=>{};
   updateFileList=async()=>{}; loadPreview=async()=>{}; syncProxyCardActiveState=()=>{};
   closeReportModal=()=>{}; closeCompactDrawers=()=>{}; setWorkspaceTab=()=>{};
@@ -224,6 +225,101 @@ def test_idle_session_and_completed_old_run_do_not_lock_or_change_selected_file(
     """)
 
 
+@pytest.mark.parametrize("probe", ["forbidden", "offline", "ok"])
+def test_websocket_reconnect_backs_off_and_stops_when_session_is_gone(probe):
+    run_js("""(async()=>{
+      const timers=[]; setTimeout=(fn,ms)=>{timers.push({fn,ms});};
+      const logs=[]; addLog=message=>logs.push(message);
+      const probes=[]; fetch=async(url)=>{probes.push(url);
+        if(PROBE==='offline') throw Error('fixture offline');
+        return {ok:PROBE==='ok',status:PROBE==='ok'?200:403,json:async()=>({})};};
+      el('connectionBanner').hidden=true;
+      connectWS(); scanPhase='running'; syncScanControls();
+      for(let i=0;i<4;i++){ sockets[sockets.length-1].onclose(); timers[timers.length-1].fn(); }
+      assert.deepEqual(timers.map(t=>t.ms),[1000,2000,4000,8000]);
+      sockets[sockets.length-1].onclose();
+      for(let i=0;i<5;i++) await Promise.resolve();
+      assert.deepEqual(probes,['/']);
+      assert.equal(logs.filter(m=>String(m).includes('Mất kết nối')).length,1);
+      if(PROBE==='ok'){
+        assert.equal(el('connectionBanner').hidden,true); assert.equal(timers.length,5);
+        assert.equal(timers[4].ms,16000); assert.equal(scanPhase,'running');
+      } else {
+        assert.equal(el('connectionBanner').hidden,false); assert.equal(timers.length,4);
+        assert.equal(scanPhase,'idle'); assert.equal(el('startBtn').disabled,false);
+        sockets[sockets.length-1].onclose(); assert.equal(timers.length,4); assert.equal(probes.length,1);
+      }
+    })()""".replace('PROBE', json.dumps(probe)))
+
+
+def test_preview_total_badge_follows_new_workbook_while_source_is_busy():
+    run_js("""(async()=>{
+      sourcesInitialized=true; activePlatform='tiktok'; currentFileId='B.xlsx'; currentSheetName='S';
+      renderSheetTabs=()=>{}; setPreviewTableVisible=()=>{}; syncCompactSourceSummary=()=>{};
+      fetch=async()=>({ok:true,json:async()=>({file:'B.xlsx',currentSheet:'S',sheets:['S'],columns:['LINK AIR'],
+        data:[{'LINK AIR':'https://www.tiktok.com/@a/video/1'},{'LINK AIR':'https://www.tiktok.com/@a/video/2'}]})});
+      el('totalLinks').textContent='7'; sourceBusy=true; syncScanControls();
+      assert.equal(el('startBtn').disabled,true);
+      await originalLoadPreview('S');
+      assert.equal(String(el('totalLinks').textContent),'2');
+      sourceBusy=false; scanPhase='running'; el('totalLinks').textContent='9';
+      await originalLoadPreview('S');
+      assert.equal(String(el('totalLinks').textContent),'9');
+    })()""")
+
+
+def test_run_context_on_other_platform_reloads_that_platforms_source():
+    run_js("""(async()=>{
+      sourcesInitialized=true; activePlatform='tiktok';
+      currentFileId='A.xlsx'; currentSheetName='A'; currentScanSheetName='A';
+      Object.assign(platformSources.tiktok,{fileId:'A.xlsx',label:'A',sheets:['A'],displaySheet:'A',scanSheet:'A'});
+      Object.assign(platformSources.threads,{fileId:'B.xlsx',label:'B',sheets:['B'],displaySheet:'B',scanSheet:'B'});
+      const reloads=[];
+      updateFileList=async()=>{reloads.push(['files',activePlatform,currentFileId]);};
+      loadPreview=async()=>{reloads.push(['preview',activePlatform,currentFileId,currentSheetName]);};
+      applyRunContext({runId:'run-1',platform:'threads',fileId:'C.xlsx',sheetName:'Scan C'});
+      for(let i=0;i<4;i++) await Promise.resolve();
+      assert.equal(document.body.dataset.platform,'threads');
+      assert.equal(currentFileId,'C.xlsx'); assert.equal(currentScanSheetName,'Scan C');
+      assert.equal(platformSources.tiktok.fileId,'A.xlsx');
+      assert.equal(el('sourceFileThreads').textContent,'C.xlsx');
+      assert.deepEqual(reloads,[['files','threads','C.xlsx'],['preview','threads','C.xlsx','Scan C']]);
+      applyRunContext({runId:'run-1',platform:'threads',fileId:'C.xlsx',sheetName:'Scan C'});
+      for(let i=0;i<4;i++) await Promise.resolve();
+      assert.equal(reloads.length,2);
+    })()""")
+
+
+def test_session_snapshot_of_finished_run_does_not_replay_completion():
+    run_js("""(async()=>{
+      const logs=[]; addLog=message=>logs.push(message);
+      let reloads=0; updateFileList=async()=>{reloads++;}; loadPreview=async()=>{reloads++;};
+      activePlatform='tiktok'; currentFileId='A.xlsx';
+      const snapshot=runId=>({data:JSON.stringify({type:'session',data:{runId,platform:'tiktok',fileId:'A.xlsx',
+        sheetName:'S',running:false,results:[],status:{phase:'completed',done:true,total:1,processed:1,success:1}}})});
+      connectWS(); sockets[0].onmessage(snapshot('old-run'));
+      assert.equal(logs.filter(m=>String(m).includes('HOÀN TẤT')).length,0); assert.equal(reloads,0);
+      assert.equal(el('progressStatus').className,'progress-status success');
+      // A run this page was following that finished while disconnected still completes once.
+      currentRunContext={runId:'live-run',platform:'tiktok',fileId:'A.xlsx',sheetName:'S'}; scanPhase='running';
+      sockets[0].onmessage(snapshot('live-run')); sockets[0].onmessage(snapshot('live-run'));
+      assert.equal(logs.filter(m=>String(m).includes('HOÀN TẤT')).length,1); assert.equal(reloads,2);
+    })()""")
+
+
+def test_google_push_buttons_follow_one_enable_rule():
+    run_js("""
+      setGooglePushState=originalSetGooglePushState; activePlatform='tiktok'; googleOAuthAuthorized=true;
+      Object.assign(platformSources.tiktok,{fileId:'A.xlsx',pushSheet:'A',sheets:['A'],
+        url:'https://docs.google.com/spreadsheets/d/Fixture/edit'});
+      renderSourceRows();
+      assert.equal(el('pushGoogleBtn').disabled,false);
+      assert.equal(el('threadsPushGoogleBtn').disabled,true);
+      googleOAuthAuthorized=false; renderSourceRows();
+      assert.equal(el('pushGoogleBtn').disabled,true);
+    """)
+
+
 def test_mobile_tiktok_host_is_visible_in_platform_preview():
     run_js("""
       assert.equal(matchesPlatformLink('https://mobile.tiktok.com/@demo/video/123','tiktok'),true);
@@ -303,15 +399,14 @@ def test_progress_requires_final_saved_confirmation_and_reports_failure(platform
     run_js(f"""
       activePlatform={json.dumps(platform)};
       updateProgress({{phase:'running',total:1,processed:1,success:1}});
-      assert.equal(scanCompletedForCurrentFile,false); assert.equal(el('startBtn').disabled,true);
+      assert.equal(el('startBtn').disabled,true);
       updateProgress({{phase:'saving',total:1,processed:1,success:1}});
-      assert.equal(scanCompletedForCurrentFile,false); assert.equal(el('cancelBtn').disabled,true);
+      assert.equal(el('cancelBtn').disabled,true);
       assert.notEqual(el('progressStatus').className,'progress-status success');
       updateProgress({{phase:'failed',total:1,processed:1,success:1,error:1,done:true}});
-      assert.equal(scanCompletedForCurrentFile,false); assert.equal(el('startBtn').disabled,false);
+      assert.equal(el('startBtn').disabled,false);
       assert.notEqual(el('progressStatus').className,'progress-status success');
       updateProgress({{phase:'completed',total:1,processed:1,success:1,done:true}});
-      assert.equal(scanCompletedForCurrentFile,true);
       assert.equal(el('progressStatus').className,'progress-status success');
     """)
 
@@ -413,7 +508,6 @@ def test_real_dom_threads_snapshot_keeps_blank_metrics_and_locked_controls():
             assert page.locator('#dataFeed .col-status').inner_text() == 'OK'
             assert page.locator('#dataFeed td[data-label="Repost"]').inner_text() == ''
             assert page.locator('#dataFeed td[data-label="Tim"]').inner_text() == ''
-            assert page.locator('#reportMinViewRow').is_hidden()
             assert page.locator('#startBtn').is_disabled()
             assert page.locator('#cancelBtn').is_enabled()
             assert page.locator('#excelFileSelect').is_disabled()

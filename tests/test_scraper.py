@@ -7,7 +7,6 @@ from scraper import (
     enrich_channel_name,
     extract_media_id,
     fetch_profile_channel_name_request,
-    format_metric_log_line,
     format_scrape_result_log,
     is_tiktok_error_page,
     parse_count_value,
@@ -169,54 +168,6 @@ def test_proxy_request_budget_keeps_photo_r1_candidate(monkeypatch):
         "Shares": "0",
     }
     assert r1_url in fetched_urls
-
-
-def test_scrape_link_request_parses_photo_statsv2():
-    content = """
-    <script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">
-    {
-      "__DEFAULT_SCOPE__": {
-        "webapp.photo-detail": {
-          "itemInfo": {
-            "itemStruct": {
-              "id": "764002",
-              "stats": {
-                "playCount": 0,
-                "diggCount": 45,
-                "commentCount": 2,
-                "collectCount": 0,
-                "shareCount": 1
-              },
-              "statsV2": {
-                "playCount": "1234",
-                "diggCount": "45",
-                "commentCount": "2",
-                "collectCount": "0",
-                "shareCount": "1"
-              }
-            }
-          }
-        }
-      }
-    }
-    </script>
-    """
-    from scraper import scrape_link_request
-
-    def fake_fetch(url, timeout=30):
-        return "https://www.tiktok.com/@demo/photo/764002", content
-
-    import scraper as scraper_module
-
-    original = scraper_module.fetch_tiktok_html
-    scraper_module.fetch_tiktok_html = fake_fetch
-    try:
-        data, channel, status = scrape_link_request("https://www.tiktok.com/@demo/photo/764002")
-    finally:
-        scraper_module.fetch_tiktok_html = original
-
-    assert status == "Success"
-    assert data["Views"] == "1234"
 
 
 def test_parse_counts_extracts_matching_photo_metrics_from_api_data():
@@ -499,13 +450,7 @@ def test_parse_counts_rejects_single_embedded_item_with_different_media_id():
     data, found = parse_counts(content, media_id="123")
 
     assert found is False
-    assert data == {
-        "Views": "0",
-        "Likes": "0",
-        "Comments": "0",
-        "Saves": "0",
-        "Shares": "0",
-    }
+    assert data == {"Views": None, "Likes": None, "Comments": None, "Saves": None, "Shares": None}
 
 
 def test_parse_counts_rejects_sigi_item_key_with_mismatched_inner_id():
@@ -531,10 +476,10 @@ def test_parse_counts_rejects_sigi_item_key_with_mismatched_inner_id():
     data, found = parse_counts(content, media_id="123")
 
     assert found is False
-    assert data["Views"] == "0"
+    assert data["Views"] is None
 
 
-def test_parse_counts_treats_missing_collect_count_as_zero_for_exact_item():
+def test_parse_counts_treats_missing_collect_count_as_unknown_for_exact_item():
     content = """
     <script id="SIGI_STATE" type="application/json">
     {
@@ -556,11 +501,12 @@ def test_parse_counts_treats_missing_collect_count_as_zero_for_exact_item():
     data, found = parse_counts(content, media_id="123")
 
     assert found is True
+    # Not a confirmed zero: Saves stays blank instead of overwriting the sheet with 0.
     assert data == {
         "Views": "500",
         "Likes": "25",
         "Comments": "1",
-        "Saves": "0",
+        "Saves": None,
         "Shares": "3",
     }
 
@@ -591,29 +537,7 @@ def test_parse_counts_rejects_idless_item_when_media_id_is_expected():
     data, found = parse_counts(content, media_id="123")
 
     assert found is False
-    assert data["Views"] == "0"
-
-
-def test_parse_counts_returns_defaults_when_missing():
-    data, found = parse_counts("<html></html>")
-    assert found is False
-    assert data["Views"] == "0"
-
-
-def test_parse_counts_rejects_ambiguous_multiple_items_without_media_id():
-    content = """
-    <script id="SIGI_STATE" type="application/json">
-    {
-      "ItemModule": {
-        "111": {"id":"111","stats":{"playCount":10,"diggCount":1,"commentCount":0,"collectCount":0,"shareCount":0}},
-        "222": {"id":"222","stats":{"playCount":20,"diggCount":2,"commentCount":0,"collectCount":0,"shareCount":0}}
-      }
-    }
-    </script>
-    """
-    data, found = parse_counts(content, media_id="")
-    assert found is False
-    assert data["Views"] == "0"
+    assert data["Views"] is None
 
 
 def test_parse_count_value_supports_suffixes():
@@ -629,6 +553,13 @@ def test_validate_metrics_rejects_implausible_values():
     assert validate_metrics(
         {"Views": "1000", "Likes": "50", "Comments": "4", "Saves": "2", "Shares": "1"}
     ) is True
+    # Unknown Saves is tolerated; unknown Views is not.
+    assert validate_metrics(
+        {"Views": "1000", "Likes": "50", "Comments": "4", "Saves": None, "Shares": "1"}
+    ) is True
+    assert validate_metrics(
+        {"Views": None, "Likes": "50", "Comments": "4", "Saves": "2", "Shares": "1"}
+    ) is False
 
 
 def test_counts_match_requires_all_metrics_equal():
@@ -636,6 +567,8 @@ def test_counts_match_requires_all_metrics_equal():
     right = {"Views": "10", "Likes": "1", "Comments": "0", "Saves": "0", "Shares": "0"}
     assert counts_match(left, right) is True
     assert counts_match(left, {**right, "Views": "11"}) is False
+    assert counts_match({**left, "Saves": None}, {**right, "Saves": None}) is True
+    assert counts_match({**left, "Saves": None}, right) is False
 
 
 def test_format_scrape_result_log_error_and_success():
@@ -660,11 +593,18 @@ def test_format_scrape_result_log_error_and_success():
     assert "Tim 1" in success_msg
     assert "Tháng 6#5" in success_msg
 
-
-def test_format_metric_log_line_uses_integers():
-    assert format_metric_log_line(
-        {"Views": "39", "Likes": "5", "Comments": "0", "Saves": "0", "Shares": "0"}
-    ) == "view=39 tim=5 cmt=0 save=0 share=0"
+    unknown_msg, _level, unknown_details = format_scrape_result_log(
+        {
+            "url": "https://www.tiktok.com/@a/video/1",
+            "worker": 2,
+            "status": "Success",
+            "data": {"Views": "10", "Likes": "1", "Comments": "0", "Saves": None, "Shares": "0"},
+        },
+        4,
+        10,
+    )
+    assert unknown_details["metrics"]["saves"] is None
+    assert "Lưu —" in unknown_msg
 
 
 def test_parse_channel_name_from_page_uses_item_struct_when_url_handle_mismatch():
@@ -739,7 +679,6 @@ def test_channel_name_for_sheet_does_not_write_generated_handle():
         "",
         resolved_url=url,
         status="Success",
-        profile_lookup_attempted={"user16205752394791"},
     )
     assert result == "Lỗi"
 
@@ -751,7 +690,6 @@ def test_channel_name_for_sheet_keeps_real_handle_fallback():
         "",
         resolved_url=url,
         status="Success",
-        profile_lookup_attempted={".lt.h.chill"},
     )
     assert result == "@.lt.h.chill"
 
@@ -777,6 +715,54 @@ def test_enrich_channel_name_uses_cache_for_generated_user_accounts():
     cache = {"user2663512211600": "Quỳnh Tiên"}
     name = enrich_channel_name(url, "", channel_cache=cache)
     assert name == "Quỳnh Tiên"
+
+
+def test_enrich_channel_name_dedupes_lookups_with_initially_empty_shared_state(monkeypatch):
+    import scraper
+
+    calls = []
+    names = {"demo": "Demo Name"}
+
+    def fake_fetch(url, timeout=30):
+        calls.append(url)
+        handle = url.rsplit("@", 1)[-1]
+        if handle not in names:
+            return url, "<html></html>"
+        return url, (
+            '<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">'
+            f'{{"userInfo": {{"user": {{"uniqueId": "{handle}", "nickname": "{names[handle]}"}}}}}}'
+            "</script>"
+        )
+
+    monkeypatch.setattr(scraper, "fetch_tiktok_html", fake_fetch)
+    # run_scraper passes these freshly created (empty) objects.
+    cache, attempted = {}, set()
+    for media_id in ("1", "2"):
+        assert enrich_channel_name(
+            f"https://www.tiktok.com/@demo/video/{media_id}", "",
+            channel_cache=cache, profile_lookup_attempted=attempted,
+        ) == "Demo Name"
+        assert enrich_channel_name(
+            f"https://www.tiktok.com/@ghost/video/{media_id}", "",
+            channel_cache=cache, profile_lookup_attempted=attempted,
+        ) == "@ghost"
+
+    assert calls == ["https://www.tiktok.com/@demo", "https://www.tiktok.com/@ghost"]
+    assert cache["demo"] == "Demo Name"
+
+
+def test_enrich_channel_name_skips_profile_fetch_when_sheet_has_real_name(monkeypatch):
+    import scraper
+
+    monkeypatch.setattr(scraper, "fetch_tiktok_html", lambda *_a, **_kw: pytest.fail("profile fetched"))
+
+    assert enrich_channel_name(
+        "https://vt.tiktok.com/ZSdemo/",
+        "",
+        resolved_url="https://www.tiktok.com/@demo/video/1",
+        existing_channel="Kênh Thật",
+        profile_lookup_attempted=set(),
+    ) == "Kênh Thật"
 
 
 def test_enrich_channel_name_uses_resolved_url_for_short_links():
@@ -843,6 +829,90 @@ def test_is_tiktok_error_page_detects_visible_error_text():
     assert is_tiktok_error_page(content) is True
 
 
+# Deleted/nonexistent posts come back as HTTP 200 whose only signal is the item
+# status code (10204 = item not found) in the embedded state (live capture shape).
+DELETED_POST_API_DATA = """
+<html><body><div id="app"><div>Mở TikTok</div></div>
+<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">
+{"__DEFAULT_SCOPE__":{"webapp.app-context":{"language":"vi-VN"},"webapp.reflow.video.strategy":{}}}
+</script>
+<script id="api-data" type="application/json">
+  {"videoDetail":{"statusCode":%s,"statusMessage":"","extra_info":{"web_visit_cnt_more_than_3":"0"}}}
+</script>
+</body></html>
+"""
+
+DELETED_POST_UNIVERSAL = """
+<html><body>
+<script id="__UNIVERSAL_DATA_FOR_REHYDRATION__" type="application/json">
+{"__DEFAULT_SCOPE__":{"webapp.video-detail":{"statusCode":%s,"statusMsg":""}}}
+</script>
+</body></html>
+"""
+
+
+@pytest.mark.parametrize("template", [DELETED_POST_API_DATA, DELETED_POST_UNIVERSAL], ids=["api-data", "universal"])
+def test_request_page_with_item_not_found_code_is_unavailable_and_clears_metrics(template):
+    from scraper import parse_fetched_request_page, should_clear_stale_metrics
+
+    url = "https://www.tiktok.com/@a/video/7673695796168084756"
+    metrics, channel, status = parse_fetched_request_page(url, url, template % "10204")
+
+    assert status == "Error: Trang TikTok không khả dụng"
+    assert should_clear_stale_metrics(status) is True
+    assert channel == ""
+    assert all(value is None for value in metrics.values())
+
+
+@pytest.mark.parametrize("template", [DELETED_POST_API_DATA, DELETED_POST_UNIVERSAL], ids=["api-data", "universal"])
+@pytest.mark.parametrize("code", ["10216", "10222"])
+def test_private_or_restricted_item_codes_are_not_treated_as_deleted(template, code):
+    from scraper import parse_fetched_request_page, should_clear_stale_metrics
+
+    url = "https://www.tiktok.com/@a/video/7673695796168084756"
+    _metrics, _channel, status = parse_fetched_request_page(url, url, template % code)
+
+    assert status != "Error: Trang TikTok không khả dụng"
+    assert should_clear_stale_metrics(status) is False
+
+
+def test_browser_scan_marks_rendered_deleted_post_unavailable(monkeypatch):
+    import asyncio
+
+    import scraper
+
+    url = "https://www.tiktok.com/@a/video/7673695796168084756"
+    # Chromium render of a deleted post: localized message plus the api-data status.
+    content = DELETED_POST_API_DATA.replace(
+        '<div>Mở TikTok</div>',
+        '<p class="css-1osbocj-PMsgTitle e10waoic3">Trang này không khả dụng</p>',
+    ) % "10204"
+
+    class FakePage:
+        url = "https://www.tiktok.com/@a/video/7673695796168084756"
+
+        async def wait_for_selector(self, *_args, **_kwargs):
+            return None
+
+        async def content(self):
+            return content
+
+        async def wait_for_timeout(self, _ms):
+            return None
+
+    async def fake_navigate(_page, _url, **_kwargs):
+        return None
+
+    monkeypatch.setattr(scraper, "navigate_tiktok_page", fake_navigate)
+
+    data, channel, status, page_url = asyncio.run(scraper.scrape_single_link(FakePage(), url))
+
+    assert status == "Error: Trang TikTok không khả dụng"
+    assert scraper.should_clear_stale_metrics(status) is True
+    assert all(value is None for value in data.values())
+    assert page_url == url
+
+
 def test_parse_fetched_request_page_rejects_redirect_to_different_media_id():
     from scraper import STATUS_MEDIA_REDIRECT_MISMATCH, parse_fetched_request_page, should_clear_stale_metrics
 
@@ -878,7 +948,7 @@ def test_parse_fetched_request_page_rejects_redirect_to_different_media_id():
     assert status == STATUS_MEDIA_REDIRECT_MISMATCH
     assert should_clear_stale_metrics(status) is False
     assert channel == ""
-    assert metrics["Views"] == "0"
+    assert metrics["Views"] is None
 
 
 def test_parse_fetched_request_page_rejects_redirect_without_media_id():
@@ -901,7 +971,7 @@ def test_parse_fetched_request_page_rejects_redirect_without_media_id():
 
     assert status == STATUS_MEDIA_REDIRECT_MISMATCH
     assert channel == ""
-    assert metrics["Views"] == "0"
+    assert metrics["Views"] is None
 
 
 def test_parse_fetched_request_page_blank_response_is_unreadable():
@@ -915,7 +985,7 @@ def test_parse_fetched_request_page_blank_response_is_unreadable():
 
     assert status == STATUS_METRICS_UNREADABLE
     assert channel == "@source"
-    assert metrics["Views"] == "0"
+    assert metrics["Views"] is None
 
 
 def test_parse_fetched_request_page_prefers_exact_metrics_over_caption_error_phrase():
@@ -992,7 +1062,7 @@ def test_partial_matching_item_with_caption_phrase_stays_unreadable():
     )
 
     assert status == STATUS_METRICS_UNREADABLE
-    assert metrics["Views"] == "0"
+    assert metrics["Views"] is None
 
 
 def test_parse_fetched_request_page_requires_media_id_for_success():
@@ -1028,45 +1098,30 @@ def test_parse_fetched_request_page_requires_media_id_for_success():
     )
 
     assert status == STATUS_METRICS_UNREADABLE
-    assert metrics["Views"] == "0"
+    assert metrics["Views"] is None
 
 
 def test_configure_request_concurrency_never_reduces_worker_count():
     import scraper
     from scraper import configure_request_concurrency
 
-    configure_request_concurrency(20, proxy_count=0)
-    assert scraper._request_semaphore._value == 20
-    configure_request_concurrency(20, proxy_count=10)
+    configure_request_concurrency(20)
     assert scraper._request_semaphore._value == 20
 
 
-def test_clamp_worker_count_no_proxy_keeps_requested():
+def test_clamp_worker_count_keeps_requested_and_ignores_proxy_count():
     from scraper import clamp_worker_count
 
-    # Không proxy vẫn chạy đúng số luồng đã chọn, không tự giảm.
-    assert clamp_worker_count(50, proxy_count=0) == 50
-
-
-def test_clamp_worker_count_plenty_of_proxies_keeps_requested():
-    from scraper import clamp_worker_count
-
-    assert clamp_worker_count(30, proxy_count=10) == 30
-
-
-def test_clamp_worker_count_few_proxies_keeps_requested_and_distributes_evenly():
-    from scraper import clamp_worker_count
-
-    # 50 luồng chỉ có 3 proxy -> vẫn chạy đủ 50 luồng, chia đều cho 3 proxy
-    # (round-robin ở assign_worker_proxy), không tự giảm số luồng.
+    # Không tự giảm luồng theo số proxy; proxy_count chỉ còn để caller cũ không lỗi.
+    assert clamp_worker_count(50) == 50
     assert clamp_worker_count(50, proxy_count=3) == 50
 
 
 def test_clamp_worker_count_bounds_to_valid_range():
     from scraper import MAX_WORKERS, clamp_worker_count
 
-    assert clamp_worker_count(0, proxy_count=0) == 1
-    assert clamp_worker_count(999, proxy_count=0) == MAX_WORKERS
+    assert clamp_worker_count(0) == 1
+    assert clamp_worker_count(999) == MAX_WORKERS
 
 
 def test_is_request_rate_limited_status():
@@ -1354,7 +1409,7 @@ def test_guard_result_media_identity_rejects_changed_short_url_target():
     assert guarded["status"] == STATUS_MEDIA_REDIRECT_MISMATCH
     assert guarded["resolved_url"] == ""
     assert guarded["channel_name"] == ""
-    assert guarded["data"] == {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
+    assert guarded["data"] == {"Views": None, "Likes": None, "Comments": None, "Saves": None, "Shares": None}
 
 
 def test_collect_rows_binds_resolved_media_only_to_the_same_source_url():
@@ -1376,10 +1431,17 @@ def test_collect_rows_binds_resolved_media_only_to_the_same_source_url():
         "https://vt.tiktok.com/ZSold/",
     ])
 
+    # Legacy rows (no stored source URL): a replaced short link must not inherit
+    # the old target, while a link that names the same media id still matches.
+    sheet.append(["https://vt.tiktok.com/ZSreplaced/", "https://www.tiktok.com/@old/video/789", None])
+    sheet.append(["https://www.tiktok.com/@same/video/321", "https://www.tiktok.com/@same/video/321", None])
+
     rows = collect_rows(workbook)
 
     assert rows[0]["expected_media_id"] == "123"
     assert rows[1]["expected_media_id"] == ""
+    assert rows[2]["expected_media_id"] == ""
+    assert rows[3]["expected_media_id"] == "321"
     workbook.close()
 
 
@@ -1594,7 +1656,15 @@ def test_write_result_clears_metrics_for_definitive_no_data_statuses():
 
         write_result(contexts, item, empty, "", status)
 
-        assert [ws.cell(row=2, column=column).value for column in range(3, 8)] == [0, 0, 0, 0, 0]
+        # Stale numbers are cleared to blank, not to a fake confirmed 0.
+        assert [ws.cell(row=2, column=column).value for column in range(3, 8)] == [None] * 5
+
+    write_result(
+        contexts, item,
+        {"Views": "100", "Likes": "10", "Comments": "0", "Saves": None, "Shares": "4"},
+        "Kênh A", "Success",
+    )
+    assert [ws.cell(row=2, column=column).value for column in range(3, 8)] == [100, 10, 0, None, 4]
 
     wb.close()
 
@@ -1676,6 +1746,33 @@ def test_write_result_persists_scan_status_and_resolved_url():
     assert ws.cell(row=2, column=7).value == resolved
     assert ws.cell(row=2, column=8).value == item["url"]
     assert [ws.cell(row=2, column=column).value for column in (3, 4, 5)] == [120, 12, 5]
+    wb.close()
+
+
+def test_write_result_never_fetches_channel_profiles(monkeypatch):
+    import openpyxl
+    import scraper
+
+    calls = []
+    monkeypatch.setattr(scraper, "fetch_tiktok_html", lambda url, **_kw: calls.append(url) or (url, ""))
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Link", "Tên Kênh", "LƯỢT XEM"])
+    ws.append(["https://www.tiktok.com/@demo/video/123", "", None])
+    contexts = {"Data": {"worksheet": ws, "columns": {"channel": 2, "views": 3}}}
+    item = {"sheet_name": "Data", "row": 2, "url": "https://www.tiktok.com/@demo/video/123"}
+
+    scraper.write_result(
+        contexts, item,
+        {"Views": "10", "Likes": "1", "Comments": "0", "Saves": "0", "Shares": "0"},
+        "", "Success",
+        resolved_url=item["url"], channel_cache={},
+    )
+
+    # Runs on the event loop: lookups belong to the workers' executor threads.
+    assert calls == []
+    assert ws["B2"].value == "@demo"
     wb.close()
 
 
@@ -1797,3 +1894,110 @@ def test_run_scraper_does_not_report_completion_when_final_save_fails(tmp_path, 
         )
 
     assert history_entries == []
+
+
+def test_detect_columns_matches_exact_headers_without_positional_guesses():
+    import openpyxl
+    from scraper import ensure_columns
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.append(["Ngày", "Link", "Tên kênh", "Ghi chú", "Link kênh", "Ngày cập nhật", "Khác", "Khác 2", "Khác 3"])
+    ws.append(["01/07", "https://www.tiktok.com/@a/video/1", "A", "note", "https://www.tiktok.com/@a", "x", 1, 2, 3])
+
+    columns = ensure_columns(ws)
+
+    assert (columns["date"], columns["url"], columns["channel"], columns["last_update"]) == (1, 2, 3, 6)
+    metric_keys = ("views", "likes", "comments", "saves", "shares")
+    # Missing metric columns are appended, never guessed from positions 5-9.
+    assert all(columns[key] > 9 for key in metric_keys)
+    assert [ws.cell(row=1, column=columns[key]).value for key in metric_keys] == [
+        "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ",
+    ]
+    assert ws.cell(row=2, column=4).value == "note"
+    wb.close()
+
+
+def test_detect_columns_content_fallback_skips_channel_profile_urls():
+    import openpyxl
+    from scraper import detect_columns
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    # No header names a link column, so the content scan decides; the profile
+    # column sits left of the post column and must not be chosen.
+    ws.append(["Stt", "Kênh", "Bài đăng", "Rút gọn"])
+    ws.append([1, "https://www.tiktok.com/@kenh", None, None])
+    ws.append([2, "https://www.tiktok.com/@kenh2", "https://www.tiktok.com/@kenh2/video/7673695796168084756", None])
+    assert detect_columns(ws)["url"] == 3
+
+    profiles_only = wb.create_sheet("Profiles")
+    profiles_only.append(["Stt", "Kênh"])
+    profiles_only.append([1, "https://www.tiktok.com/@kenh"])
+    assert detect_columns(profiles_only)["url"] is None
+
+    short_links = wb.create_sheet("Short")
+    short_links.append(["Stt", "Kênh", "Bài"])
+    short_links.append([1, "https://www.tiktok.com/@kenh", "https://vt.tiktok.com/ZSabc123/"])
+    assert detect_columns(short_links)["url"] == 3
+    wb.close()
+
+
+def test_build_result_sheet_keeps_blank_metrics_blank_and_reads_text_numbers():
+    import openpyxl
+    from scraper import build_result_sheet
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"])
+    ws.append(["https://www.tiktok.com/@a/video/1", "A", "1.234", None, 0, "", 5])
+
+    result = wb[build_result_sheet(wb, [{"sheet_name": "Data", "row": 2}], "now")]
+
+    assert [result.cell(row=2, column=column).value for column in range(5, 10)] == [1234, None, 0, None, 5]
+    wb.close()
+
+
+def test_build_result_sheet_failure_removes_partial_tab(monkeypatch):
+    import openpyxl
+    import scraper
+
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Data"
+    ws.append(["Link", "LƯỢT XEM"])
+    ws.append(["https://www.tiktok.com/@a/video/1", 10])
+    before = list(wb.sheetnames)
+
+    def broken_write(*_args):
+        raise ValueError("fixture write failure")
+
+    monkeypatch.setattr(scraper, "set_cell_literal", broken_write)
+    with pytest.raises(ValueError):
+        scraper.build_result_sheet(wb, [{"sheet_name": "Data", "row": 2}], "now")
+
+    assert wb.sheetnames == before
+    wb.close()
+
+
+def test_run_scraper_resets_request_backoff_in_every_mode(tmp_path, monkeypatch):
+    import asyncio
+    import time
+    import openpyxl
+    import scraper
+
+    path = tmp_path / "empty.xlsx"
+    wb = openpyxl.Workbook()
+    wb.active.title = "Data"
+    wb.active.append(["Link", "LƯỢT XEM"])
+    wb.save(path)
+    wb.close()
+    # Left over from an earlier run that hit 403s / DNS failures.
+    monkeypatch.setattr(scraper, "_request_block_until", time.time() + 1000)
+    monkeypatch.setattr(scraper, "_network_fail_streak", 2)
+
+    asyncio.run(scraper.run_scraper(str(path), sheet_name="Data", use_request=False))
+
+    assert scraper._request_block_until == 0.0
+    assert scraper._network_fail_streak == 0

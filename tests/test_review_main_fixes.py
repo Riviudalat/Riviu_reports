@@ -17,12 +17,12 @@ from test_backend_review_fixes import isolated_backend
 
 def test_report_untrusted_strings_are_literal_excel_text():
     row = {'NGÀY AIR':'=1+1','TÊN KÊNH':'=HYPERLINK("https://example.invalid","x")',
-           'LINK AIR':'=1+1','LƯỢT XEM':100,'TIM':0,'BÌNH LUẬN':0,'REPOST':0,'CHIA SẺ':'','TRẠNG THÁI':'=1+1'}
+           'LINK AIR':'=1+1','LƯỢT XEM':100,'TIM':0,'BÌNH LUẬN':0,'REPOST':0,'CHIA SẺ':''}
     payload = backend.build_partner_report('Fixture', [row], platform='threads')
     book = openpyxl.load_workbook(io.BytesIO(payload))
     try:
         sheet = book.active
-        for address in ('A4','B4','C4','I4'):
+        for address in ('A4','B4','C4'):
             assert sheet[address].data_type == 's'
             assert sheet[address].value.startswith('=')
         assert sheet['D4'].value == 100

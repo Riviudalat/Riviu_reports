@@ -29,7 +29,6 @@ def isolated_backend(tmp_path, monkeypatch):
     monkeypatch.setattr(backend, "CURRENT_SELECTED_FILE", "A.xlsx")
     monkeypatch.setattr(backend, "CURRENT_SELECTED_SHEET", "Data")
     monkeypatch.setattr(backend, "CURRENT_SCAN_SHEET", "Data")
-    monkeypatch.setattr(backend, "GOOGLE_SHEET_SOURCE_URL", "https://docs.google.com/spreadsheets/d/ID_A/edit")
     monkeypatch.setattr(backend, "SCRAPE_TASK", None)
     monkeypatch.setattr(backend, "manager", backend.ConnectionManager())
     monkeypatch.setattr(backend, "oauth_status", lambda _: {"valid": False, "configured": False})
@@ -132,7 +131,7 @@ def test_snapshot_metadata_and_terminal_failure(isolated_backend, monkeypatch):
         await events.broadcast_status({"total": 1, "processed": 1, "success": 0, "hidden": 1, "error": 0, "done": False})
         raise RuntimeError("fixture save failed")
     monkeypatch.setattr(backend, "run_threads_scraper", fail_after_partial)
-    asyncio.run(backend.run_scraper_safely(str(isolated_backend / "A.xlsx"), 1, platform="threads", sheet_name="Data"))
+    asyncio.run(backend.run_scraper_safely(str(isolated_backend / "A.xlsx"), backend.scan_options(platform="threads", sheet_name="Data")))
     snapshot = backend.manager.snapshot()
     assert not snapshot["running"]
     assert snapshot["status"]["phase"] == "failed"
@@ -153,7 +152,7 @@ def test_tiktok_legacy_phase_is_normalized_to_running(isolated_backend):
 def test_cancel_before_runner_starts_releases_run(isolated_backend):
     async def scenario():
         context = backend.manager.begin_run("threads", "A.xlsx", "Data")
-        task = asyncio.create_task(backend.run_scraper_safely(str(isolated_backend / "A.xlsx"), 1, run_context=context))
+        task = asyncio.create_task(backend.run_scraper_safely(str(isolated_backend / "A.xlsx"), backend.scan_options(platform="threads"), run_context=context))
         task.add_done_callback(lambda finished: backend.finalize_unstarted_run(finished, context["runId"]))
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
@@ -213,6 +212,10 @@ def test_oauth_does_not_block_other_coroutines(isolated_backend, monkeypatch):
         try:
             await asyncio.wait_for(asyncio.to_thread(entered.wait, 1), 1.5)
             assert not task.done(), "OAuth blocked the event loop"
+            # An abandoned login tab must not hold the Google I/O lock used by previews, pushes and scans.
+            assert backend.GOOGLE_IO_LOCK.acquire(timeout=0.2), "OAuth wait holds GOOGLE_IO_LOCK"
+            backend.GOOGLE_IO_LOCK.release()
+            assert (await backend.google_oauth_login()).status_code == 409
         finally:
             release.set()
         assert (await task)["success"]
@@ -227,26 +230,70 @@ def test_scan_target_stays_bound_if_selection_changes(isolated_backend, monkeypa
         await manager.broadcast_status({"total": 1, "processed": 1, "success": 1, "error": 0, "done": True})
     monkeypatch.setattr(backend, "run_scraper", fake_scan)
     monkeypatch.setattr(backend, "push_rows_to_new_sheet", lambda base, sid, rows, **kw: observed.append(sid) or "Result")
-    asyncio.run(backend.run_scraper_safely(str(isolated_backend / "A.xlsx"), 1, sheet_name="Data", push_to_google=True))
+    asyncio.run(backend.run_scraper_safely(str(isolated_backend / "A.xlsx"), backend.scan_options(sheet_name="Data", push_to_google=True, file_id="A.xlsx")))
     assert observed == ["A.xlsx", "ID_A"]
     assert backend.manager.last_status["phase"] == "completed"
 
 
-@pytest.mark.parametrize("mode,use_request,browser_fallback", [
-    ("request", True, False), ("browser", False, False), ("hybrid", True, True),
-])
+@pytest.mark.parametrize("failure", [RuntimeError("quota exceeded"), backend.GoogleLoginRequired()])
+def test_push_failure_after_saved_scan_is_a_warning_not_a_failed_scan(isolated_backend, monkeypatch, failure):
+    async def fake_scan(path, manager, **kwargs):
+        await manager.broadcast_status({"total": 1, "processed": 1, "success": 1, "error": 0, "done": True})
+    def failing_push(*_args, **_kwargs):
+        raise failure
+    monkeypatch.setattr(backend, "run_scraper", fake_scan)
+    monkeypatch.setattr(backend, "push_rows_to_new_sheet", failing_push)
+    logs = []
+    original_log = backend.manager.broadcast_log
+    async def capture(message, **kwargs):
+        logs.append(message)
+        await original_log(message, **kwargs)
+    monkeypatch.setattr(backend.manager, "broadcast_log", capture)
+    asyncio.run(backend.run_scraper_safely(str(isolated_backend / "A.xlsx"), backend.scan_options(
+        sheet_name="Data", push_to_google=True)))
+    assert backend.manager.last_status["phase"] == "completed"
+    assert any("đã lưu xong" in message for message in logs)
+
+
+def test_websocket_start_scans_the_workbook_the_client_names(isolated_backend, monkeypatch):
+    calls = []
+    async def fake_runner(path, options, **kwargs):
+        calls.append((Path(path).name, options["file_id"]))
+    monkeypatch.setattr(backend, "run_scraper_safely", fake_runner)
+    backend.CURRENT_SELECTED_FILE = "A.xlsx"
+    asyncio.run(run_fixture_websocket_start(monkeypatch, {"platform": "tiktok", "file_id": "B.xlsx"}))
+    assert calls == [("B.xlsx", "B.xlsx")]
+
+
+def test_broadcast_reaches_every_tab_when_one_disconnects_mid_send():
+    manager = backend.ConnectionManager()
+    received = []
+    class Leaving:
+        async def send_json(self, message):
+            manager.disconnect(self)
+            raise RuntimeError("closed")
+    class Staying:
+        async def send_json(self, message):
+            received.append(message["type"])
+    manager.active_connections.extend([Leaving(), Staying()])
+    asyncio.run(manager.broadcast_log("hello"))
+    assert received == ["log"]
+    assert len(manager.active_connections) == 1
+
+
+@pytest.mark.parametrize("mode", ["request", "browser", "hybrid"])
 @pytest.mark.parametrize("use_proxy", [False, True])
-def test_threads_dispatch_forwards_proxy_settings(isolated_backend, monkeypatch, mode, use_request, browser_fallback, use_proxy):
+def test_threads_dispatch_forwards_proxy_settings(isolated_backend, monkeypatch, mode, use_proxy):
     calls = []
     async def fake_threads(path, events, **kwargs):
         calls.append((path, kwargs))
     monkeypatch.setattr(backend, "run_threads_scraper", fake_threads)
     text = "http://fixture-user:fixture-password@proxy.example:8080"
     target = str(isolated_backend / "A.xlsx")
-    asyncio.run(backend.run_scraper_safely(
-        target, 3, platform="threads", sheet_name="Data", partners=["Partner"],
-        use_request=use_request, browser_fallback=browser_fallback, use_proxy=use_proxy, proxy_text=text,
-    ))
+    asyncio.run(backend.run_scraper_safely(target, backend.scan_options(
+        worker_count=3, platform="threads", sheet_name="Data", partners=["Partner"],
+        scrape_mode=mode, use_proxy=use_proxy, proxy_text=text,
+    )))
     assert calls == [(target, {
         "worker_count": 3, "selected_partners": ["Partner"], "sheet_name": "Data", "mode": mode,
         "base_dir": str(isolated_backend), "use_proxy": use_proxy, "proxy_text": text,
@@ -354,8 +401,8 @@ def test_websocket_start_passes_platform_and_normalized_mode(isolated_backend, m
     validation_calls, dispatch_calls = [], []
     def validate(use_proxy, proxy_text, base_dir, platform="tiktok", mode="request"):
         validation_calls.append((use_proxy, proxy_text, base_dir, platform, mode))
-    async def fake_runner(path, workers, **kwargs):
-        dispatch_calls.append(kwargs)
+    async def fake_runner(path, options, **kwargs):
+        dispatch_calls.append(options)
     monkeypatch.setattr(backend, "validate_proxy_start", validate)
     monkeypatch.setattr(backend, "run_scraper_safely", fake_runner)
     asyncio.run(run_fixture_websocket_start(monkeypatch, {
@@ -366,8 +413,7 @@ def test_websocket_start_passes_platform_and_normalized_mode(isolated_backend, m
     assert dispatch_calls[0]["platform"] == platform
     assert dispatch_calls[0]["use_proxy"] is True
     assert dispatch_calls[0]["proxy_text"] == "proxy.example:8080"
-    assert dispatch_calls[0]["use_request"] == (expected_mode != "browser")
-    assert dispatch_calls[0]["browser_fallback"] == (expected_mode == "hybrid")
+    assert dispatch_calls[0]["scrape_mode"] == expected_mode
 
 
 @pytest.mark.parametrize("text,mode", [

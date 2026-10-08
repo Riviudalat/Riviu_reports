@@ -22,7 +22,13 @@ from threads_scraper import (
     same_threads_post,
     write_threads_result,
 )
-from workbook_utils import build_workbook_rows, is_threads_link, list_workbook_partners_with_link_counts
+from workbook_utils import (
+    build_workbook_rows,
+    is_internal_workbook_filename,
+    is_threads_link,
+    list_workbook_partners_with_link_counts,
+    worksheet_find_column_index,
+)
 
 
 URL = "https://www.threads.com/@miri_viu/post/DdRIHGWCURV?xmt=sample"
@@ -154,7 +160,7 @@ def test_hybrid_saves_explicit_zero_counts_and_partial_status(tmp_path, monkeypa
     saved = openpyxl.load_workbook(path)
     try:
         assert [saved.active.cell(2, col).value for col in range(2, 7)] == [135, 0, 0, 0, None]
-        col = threads_scraper.column_index(saved.active, threads_scraper.THREADS_SCAN_STATUS_HEADER)
+        col = worksheet_find_column_index(saved.active, [threads_scraper.THREADS_SCAN_STATUS_HEADER])
         assert saved.active.cell(2, col).value == "Success"
     finally:
         saved.close()
@@ -178,6 +184,47 @@ def test_action_count_does_not_convert_blank_to_zero():
     assert parse_action_count("4") == 4
     assert parse_action_count("1.2K") == 1200
     assert parse_action_count("") is None
+
+
+@pytest.mark.parametrize("text,count", [("32.3K", 32300), ("4.1M", 4100000), ("1.15K", 1150), ("2.7K", 2700)])
+def test_abbreviated_counts_are_exact(text, count):
+    # Binary floats truncated 32.3K to 32299 and 4.1M to 4099999.
+    assert parse_action_count(text) == count
+
+
+NFD_COMMENTS = "BI\u0300NH LUA\u0323\u0302N"  # BÌNH LUẬN decomposed (NFD), as some exports write it
+
+
+def test_threads_result_reuses_existing_header_spellings():
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    # Without diacritics, and NFD-decomposed: the preview reads both as the same column.
+    sheet.append(["Link", "Tên kênh", "Luot xem", "TIM", NFD_COMMENTS, "REPOST", "CHIA SẺ"])
+    sheet.append([URL])
+    result = {"channel": "miri_viu", "error": "",
+              "metrics": {"views": 15, "likes": 2, "comments": 3, "reposts": 0, "shares": None}}
+    write_threads_result(sheet, 2, result)
+    headers = [cell.value for cell in sheet[1]]
+    assert headers[:7] == ["Link", "Tên kênh", "Luot xem", "TIM", NFD_COMMENTS, "REPOST", "CHIA SẺ"]
+    assert "LƯỢT XEM" not in headers and "BÌNH LUẬN" not in headers and "Tên Kênh" not in headers
+    assert [sheet.cell(2, column).value for column in range(2, 7)] == ["miri_viu", 15, 2, 3, 0]
+
+
+def test_threads_save_temp_file_is_hidden_from_workbook_lists(tmp_path):
+    target = tmp_path / "threads.xlsx"
+    written = []
+
+    class Workbook:
+        def save(self, path):
+            written.append(os.path.basename(path))
+            # An interrupted save leaves this name behind; it must never look like a workbook.
+            assert is_internal_workbook_filename(path) and not str(path).endswith(".xlsx")
+            with open(path, "wb") as stream:
+                stream.write(b"saved")
+
+    threads_scraper.save_workbook_atomic(Workbook(), target)
+    assert target.read_bytes() == b"saved" and len(written) == 1
+    assert os.listdir(tmp_path) == ["threads.xlsx"]
     assert result_status({"metrics": {"views": 372, "likes": 4, "comments": 1, "reposts": None, "shares": 2}, "error": ""}) == "Success"
 
 
@@ -211,19 +258,19 @@ def test_threads_exports_use_repost_and_keep_unknown_blank():
     rows = [{
         "NGÀY AIR": "14/9/2026", "TÊN KÊNH": "miri_viu", "LINK AIR": URL,
         "LƯỢT XEM": 372, "TIM": 4, "BÌNH LUẬN": 1, "REPOST": "",
-        "CHIA SẺ": 2, "TRẠNG THÁI": "Partial: thiếu REPOST", "partners": ["Cafe A"],
+        "CHIA SẺ": 2, "partners": ["Cafe A"],
     }]
     pushed = build_google_push_rows(rows, platform="threads")
     assert pushed[0][7] == "REPOST"
     assert pushed[1][7] == ""
-    assert pushed[0][-1] == "Trạng thái"
+    assert "Trạng thái" not in pushed[0]
     assert pushed[2][7] == ""
 
     report = openpyxl.load_workbook(io.BytesIO(build_partner_report("Cafe A", rows, platform="threads")))
     sheet = report.active
     assert sheet["G3"].value == "REPOST"
     assert sheet["G4"].value in (None, "")
-    assert sheet["I4"].value == "Partial: thiếu REPOST"
+    assert sheet["I3"].value is None
     assert sheet["G5"].value is None
 
 
@@ -231,13 +278,13 @@ def test_threads_google_result_tab_has_distinct_name():
     assert create_result_sheet_title("Tháng 9", platform="threads").startswith("Report Seeding Threads ")
 
 
-def test_threads_partner_export_excludes_tiktok_and_does_not_filter_views(tmp_path):
+def test_threads_partner_export_excludes_tiktok(tmp_path):
     path = tmp_path / "mixed.xlsx"
     book = openpyxl.Workbook()
     sheet = book.active
     sheet.title = "Data"
     sheet.append(["Ngày", "Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ", "Đối tác"])
-    sheet.append(["14/9/2026", URL, "miri_viu", 80, 4, 1, "", 2, "Cafe A"])
+    sheet.append(["14/9/2026", URL, "miri_viu", 180, 4, 1, "", 2, "Cafe A"])
     sheet.append(["14/9/2026", "https://www.tiktok.com/@demo/video/123", "TikTok", 500, 5, 2, 3, 4, "Cafe A"])
     sheet.append(["14/9/2026", "https://www.tiktok.com/@other/video/234", "TikTok 2", 300, 2, 1, 0, 0, "TikTok Only"])
     book.save(path)
@@ -251,7 +298,7 @@ def test_threads_partner_export_excludes_tiktok_and_does_not_filter_views(tmp_pa
     assert report.active["C4"].value == URL
     assert report.active["C5"].value is None
     assert report.active["G3"].value == "REPOST"
-    assert report.active["I4"].value == "Chưa quét"
+    assert report.active["I3"].value is None
 
 
 def test_threads_runner_saves_before_done_and_ignores_tiktok(tmp_path, monkeypatch):
@@ -345,7 +392,7 @@ def test_live_threads_http_and_browser_agree_on_post(tmp_path):
     assert isinstance(saved.active["C2"].value, int)
     assert saved.active["F2"].value is None
     for key, header in threads_scraper.METRICS.items():
-        column = threads_scraper.column_index(saved.active, header)
+        column = worksheet_find_column_index(saved.active, [header])
         actual = saved.active.cell(2, column).value if column else None
         assert actual == rendered["metrics"][key]
     saved.close()
@@ -375,12 +422,71 @@ def test_live_threads_share_redirect_in_http_and_browser():
 def test_threads_ui_uses_repost_column_not_tiktok_saves():
     from playwright.sync_api import sync_playwright
 
+    from urllib.parse import parse_qs, urlparse
+
+    # Self-contained and read-only: the server's saved sources, workbook list and selection are
+    # never read or written. Every source API answers from one synthetic Threads workbook.
+    file_id, label = "data/threads-ui-fixture.xlsx", "Threads UI fixture"
+    empty_source = {"fileId": "", "displaySheet": "", "scanSheet": "", "pushSheet": "", "url": ""}
+    sources = {"tiktok": dict(empty_source),
+               "threads": {**empty_source, "fileId": file_id, "displaySheet": "Data", "scanSheet": "Data", "pushSheet": "Data"}}
     preview = {
         "sheets": ["Data"], "currentSheet": "Data",
         "columns": ["Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "REPOST", "CHIA SẺ"],
         "data": [{"Link": URL, "Tên Kênh": "miri_viu", "LƯỢT XEM": 372, "TIM": 4,
                   "BÌNH LUẬN": 1, "LƯỢT LƯU": 99, "REPOST": 3, "CHIA SẺ": 2}],
     }
+
+    def query(route):
+        params = parse_qs(urlparse(route.request.url).query)
+        return params.get("platform", ["tiktok"])[0], params.get("file_id", [""])[0]
+
+    def source_preferences(route):
+        if route.request.method == "GET":
+            route.fulfill(json={"sources": sources})
+        else:
+            route.fulfill(json={"success": True})
+
+    def list_files(route):
+        platform, requested = query(route)
+        selected = file_id if platform == "threads" and requested == file_id else ""
+        route.fulfill(json={
+            "files": [{"id": file_id, "label": label, "source": "google"}],
+            "current": selected, "file_id": selected, "currentLabel": label if selected else "",
+            "currentSheet": "Data" if selected else "", "sheets": ["Data"] if selected else [],
+            "scanSheet": "Data" if selected else "", "googleSheetUrl": "", "platform": platform,
+            "googlePushReady": False, "googleOAuthConfigured": False, "googleOAuthAuthorized": False,
+        })
+
+    def select_file(route):
+        body = route.request.post_data_json or {}
+        selected = body.get("file_id") or body.get("filename") or ""
+        if selected != file_id:
+            route.fulfill(status=400, json={"error": "Không tìm thấy file"})
+            return
+        route.fulfill(json={"success": True, "selected": file_id, "file_id": file_id, "sheet": "Data",
+                            "scanSheet": "Data", "platform": body.get("platform", "threads")})
+
+    def preview_excel(route):
+        platform, requested = query(route)
+        if platform == "threads" and requested == file_id:
+            route.fulfill(json={**preview, "file": file_id, "file_id": file_id, "fileLabel": label,
+                                "platform": platform, "summarySource": "Data"})
+        else:
+            route.fulfill(json={"sheets": [], "currentSheet": "", "columns": [], "data": [], "platform": platform})
+
+    server = urlparse(os.environ["RIVIU_TEST_URL"])
+    unmocked_writes = []
+
+    def read_only_guard(route):
+        # Registered first, so it only sees requests no mock above claimed.
+        request = urlparse(route.request.url)
+        if request.netloc == server.netloc and route.request.method not in {"GET", "HEAD"}:
+            unmocked_writes.append(f"{route.request.method} {request.path}")
+            route.abort()
+        else:
+            route.continue_()
+
     with sync_playwright() as playwright:
         browser = playwright.chromium.launch(headless=True)
         try:
@@ -388,27 +494,37 @@ def test_threads_ui_uses_repost_column_not_tiktok_saves():
                 page = browser.new_page(viewport={"width": width, "height": height})
                 errors = []
                 page.on("pageerror", lambda error: errors.append(str(error)))
-                page.route("**/preview-excel*", lambda route: route.fulfill(json=preview))
-                page.goto(os.environ["RIVIU_TEST_URL"], wait_until="domcontentloaded")
-                page.wait_for_function("websocketSessionReady")
-                page.locator("#platformThreads").click()
-                page.get_by_role("columnheader", name="REPOST").wait_for()
-                headers = page.locator("#previewHeader th").all_inner_texts()
-                cells = page.locator("#previewBody tr td").all_inner_texts()
-                assert "LƯỢT LƯU" not in headers
-                assert cells[headers.index("REPOST")] == "3"
-                assert page.locator("#liveSavedHeader").inner_text() == "REPOST"
-                page.evaluate("""() => {
-                    startBtn.disabled = true;
-                    cancelBtn.disabled = false;
-                    updateProgress({phase: 'running', total: 1, processed: 1, success: 0, hidden: 1, error: 0, done: false});
-                }""")
-                assert page.locator("#startBtn").is_disabled()
-                assert page.locator("#progressStatus").inner_text() == ""
-                page.evaluate("updateProgress({phase: 'completed', total: 1, processed: 1, success: 0, hidden: 1, error: 0, done: true})")
-                assert not page.locator("#startBtn").is_disabled()
-                assert "không trả số liệu" in page.locator("#progressStatus").inner_text()
-                assert not errors, errors
-                page.close()
+                page.route("**/*", read_only_guard)
+                page.route("**/source-preferences*", source_preferences)
+                page.route("**/list-files*", list_files)
+                page.route("**/select-file*", select_file)
+                page.route("**/preview-excel*", preview_excel)
+                try:
+                    page.goto(os.environ["RIVIU_TEST_URL"], wait_until="domcontentloaded")
+                    page.wait_for_function("websocketSessionReady")
+                    page.locator("#platformThreads").click()
+                    page.get_by_role("columnheader", name="REPOST").wait_for()
+                    headers = page.locator("#previewHeader th").all_inner_texts()
+                    cells = page.locator("#previewBody tr td").all_inner_texts()
+                    assert "LƯỢT LƯU" not in headers
+                    assert cells[headers.index("REPOST")] == "3"
+                    assert page.locator("#liveSavedHeader").inner_text() == "REPOST"
+                    page.evaluate("""() => {
+                        startBtn.disabled = true;
+                        cancelBtn.disabled = false;
+                        updateProgress({phase: 'running', total: 1, processed: 1, success: 0, hidden: 1, error: 0, done: false});
+                    }""")
+                    assert page.locator("#startBtn").is_disabled()
+                    assert page.locator("#progressStatus").inner_text() == ""
+                    page.evaluate("updateProgress({phase: 'completed', total: 1, processed: 1, success: 0, hidden: 1, error: 0, done: true})")
+                    assert not page.locator("#startBtn").is_disabled()
+                    assert "không trả số liệu" in page.locator("#progressStatus").inner_text()
+                    assert not errors, errors
+                finally:
+                    # Leave the app while the mocks are still served: a source save queued at the
+                    # end would otherwise slip past the routes during page.close() and hit the server.
+                    page.goto("about:blank")
+                    page.close()
+            assert not unmocked_writes, unmocked_writes
         finally:
             browser.close()

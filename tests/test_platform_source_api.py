@@ -109,6 +109,42 @@ def test_explicit_preview_summary_partners_download_and_export_use_b(client, sou
     assert selection() == before
 
 
+def test_threads_report_apis_honour_min_views_like_tiktok(client, source_backend):
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["Link", "Tên Kênh", "Đối tác", "LƯỢT XEM"])
+    sheet.append(["https://www.threads.com/@hi/post/AAA", "hi", "Cafe", 500])
+    sheet.append(["https://www.threads.com/@lo/post/BBB", "lo", "Cafe", 50])
+    sheet.append(["https://www.threads.com/@zero/post/CCC", "zero", "Cafe", 0])
+    book.save(source_backend / "C.xlsx")
+    book.close()
+    query = {"file_id": "C.xlsx", "platform": "threads", "sheet_name": "Data"}
+
+    def link_count(**params):
+        [partner] = client.get("/report-partners", params={**query, **params}).json()["partners"]
+        return partner["linkCount"], partner["rawLinkCount"]
+
+    assert link_count() == (1, 3)
+    assert link_count(min_views=40) == (2, 3)
+    assert link_count(apply_min_views="false") == (3, 3)
+
+    def exported_links(**options):
+        response = client.post("/export-report", json={
+            "file_id": "C.xlsx", "platform": "threads", "sheetName": "Data", "partners": ["Cafe"], **options,
+        })
+        assert response.status_code == 200
+        report = load_workbook(io.BytesIO(response.content))
+        try:
+            return [row[2] for row in report.active.iter_rows(min_row=4, values_only=True) if row[2] and "threads.com" in row[2]]
+        finally:
+            report.close()
+
+    assert exported_links() == ["https://www.threads.com/@hi/post/AAA"]
+    assert len(exported_links(minViews=40)) == 2
+    assert len(exported_links(applyMinViews=False)) == 3
+
+
 def test_explicit_push_uses_b_provenance_and_never_registers_override(client, source_backend, monkeypatch):
     calls = []
     monkeypatch.setattr(backend, "push_rows_to_new_sheet", lambda base, sid, rows, **kw: calls.append((sid, rows, kw)) or "Result")
@@ -156,7 +192,10 @@ def test_legacy_no_argument_direct_calls_and_default_activation(source_backend, 
     assert asyncio.run(backend.preview_excel())["currentSheet"] == "A Other"
     assert asyncio.run(backend.summary_dashboard())["file"] == "A.xlsx"
     assert asyncio.run(backend.report_partners())["file"] == "A.xlsx"
-    assert Path(asyncio.run(backend.download_excel()).path).name == "A.xlsx"
+    download = asyncio.run(backend.download_excel())
+    assert "A.xlsx" in download.headers["content-disposition"]
+    # A snapshot of the bytes, not a stream of the live file: an open download must not block the scan's atomic replace.
+    assert download.body == (Path(backend.EXCEL_DIR) / "A.xlsx").read_bytes()
     calls = []
     monkeypatch.setattr(backend, "push_rows_to_new_sheet", lambda base, sid, rows, **kw: calls.append(sid) or "Result")
     assert asyncio.run(backend.push_google_sheet())["success"] and calls == ["ID_A"]
@@ -254,7 +293,7 @@ async def websocket_start(monkeypatch, payload):
 @pytest.mark.parametrize("payload", [{"platform": "wrong"}, {"file_id": ""}])
 def test_websocket_rejects_platform_and_empty_source_before_legacy_resolution(source_backend, monkeypatch, payload):
     def unexpected(): pytest.fail("Rejected start must not resolve current workbook")
-    monkeypatch.setattr(backend, "current_excel_path", unexpected)
+    monkeypatch.setattr(backend, "ensure_selected_file", unexpected)
     messages = asyncio.run(websocket_start(monkeypatch, payload))
     assert any(message.get("data", {}).get("phase") == "failed" for message in messages)
     assert backend.SCRAPE_TASK is None
@@ -268,7 +307,7 @@ def test_session_start_follows_proxy_toggle_without_separate_consent(source_back
         def snapshot(self, generation):
             generations.append(generation)
             return cookies
-    async def runner(path, workers, **kwargs): calls.append(kwargs)
+    async def runner(path, options, **kwargs): calls.append(options)
     monkeypatch.setattr(backend, "threads_session_manager", lambda: Session())
     monkeypatch.setattr(backend, "run_scraper_safely", runner)
     asyncio.run(websocket_start(monkeypatch, {
@@ -283,9 +322,27 @@ def test_session_start_follows_proxy_toggle_without_separate_consent(source_back
     assert ([proxy["host"] for proxy in proxies] if use_proxy else proxies) == (["first.example", "second.example"] if use_proxy else [])
 
 
+def test_session_start_rejects_socks5_auth_proxy_before_dispatch(source_backend, monkeypatch):
+    class Session:
+        def snapshot(self, generation):
+            return ({"name": "sessionid", "value": "synthetic-only"},)
+    calls = []
+    async def runner(path, options, **kwargs): calls.append(options)
+    monkeypatch.setattr(backend, "threads_session_manager", lambda: Session())
+    monkeypatch.setattr(backend, "run_scraper_safely", runner)
+    messages = asyncio.run(websocket_start(monkeypatch, {
+        "platform": "threads", "file_id": "A.xlsx", "use_threads_session": True,
+        "threads_session_generation": "fixture-generation", "scrape_mode": "request",
+        "use_proxy": True, "proxy_text": "socks5://fixture-user:fixture-password@proxy.example:1080",
+    }))
+    assert not calls
+    assert any("SOCKS5" in message.get("message", "") for message in messages)
+    assert "fixture-password" not in json.dumps(messages)
+
+
 def test_session_generation_still_required(source_backend, monkeypatch):
     calls = []
-    async def runner(*args, **kwargs): calls.append(kwargs)
+    async def runner(path, options, **kwargs): calls.append(options)
     monkeypatch.setattr(backend, "run_scraper_safely", runner)
     messages = asyncio.run(websocket_start(monkeypatch, {"platform": "threads", "use_threads_session": True}))
     assert not calls

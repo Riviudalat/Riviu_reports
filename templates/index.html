@@ -12,6 +12,7 @@
 <body class="compact-page" data-workspace-tab="sheet" data-platform="tiktok">
     <div class="toast-stack" id="toastStack" aria-live="assertive"></div>
     <div class="server-banner" id="serverBanner" hidden>Server đã cập nhật — restart Khoidong.bat rồi F5 trang này.</div>
+    <div class="server-banner" id="connectionBanner" role="alert" hidden>Mất kết nối, hãy tải lại trang (F5)</div>
     <div class="compact-drawer-backdrop" id="compactDrawerBackdrop" onclick="closeCompactDrawers()"></div>
     <div class="compact-app">
         <div class="compact-header">
@@ -139,10 +140,8 @@
             </div>
         </div>
 
-        <div class="platform-bar" role="group" aria-label="Nền tảng báo cáo">
-            <button class="platform-option active" id="platformTikTok" type="button" aria-pressed="true" onclick="setPlatform('tiktok')"><img class="platform-brand-icon" src="/static/platform-icons/tiktok.svg" alt="" aria-hidden="true">TikTok</button>
-            <button class="platform-option" id="platformThreads" type="button" aria-pressed="false" onclick="setPlatform('threads')"><img class="platform-brand-icon" src="/static/platform-icons/threads.svg" alt="" aria-hidden="true">Threads</button>
-        </div>
+        <!-- Platform buttons are rendered from PLATFORMS in static/app.js -->
+        <div class="platform-bar" id="platformBar" role="group" aria-label="Nền tảng báo cáo"></div>
 
         <nav class="workspace-tabs" role="tablist" aria-label="Các vùng dữ liệu">
             <button class="workspace-tab active" type="button" role="tab" aria-selected="true" data-workspace-tab="sheet" onclick="setWorkspaceTab('sheet')">
@@ -173,7 +172,6 @@
             <div class="progress-meta">
                 <span id="progressText" aria-live="polite">Sẵn sàng chờ lệnh...</span>
                 <span id="progressStatus" class="progress-status"></span>
-                <span id="errorLinks" hidden>0</span>
             </div>
         </div>
 
@@ -200,6 +198,7 @@
                             <div class="source-block-title">Nguồn Google Sheet</div>
                         </div>
                     </div>
+                    <!-- One row per PLATFORMS entry; ids must match its `dom` map in static/app.js -->
                     <div class="field-stack platform-source-row" data-source-platform="tiktok">
                         <div class="platform-source-label"><span class="platform-source-name"><img class="platform-brand-icon" src="/static/platform-icons/tiktok.svg" alt="" aria-hidden="true">TikTok</span> <span id="sourceFileTikTok" class="platform-source-file">Chưa chọn file</span></div>
                         <div class="source-inline">

@@ -15,6 +15,7 @@ import threading
 import sys
 import zipfile
 from collections import deque
+from pathlib import Path
 from datetime import datetime
 import urllib.error
 from urllib.parse import quote, urlsplit, parse_qs, urlunsplit
@@ -29,10 +30,11 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.cell import coordinate_from_string
 from openpyxl.utils.units import pixels_to_EMU
 
-from scraper import run_scraper, read_scrape_history
+from scraper import clamp_worker_count, run_scraper, read_scrape_history
 from threads_scraper import resolve_threads_proxies, run_threads_scraper
-from threads_session import ThreadsSession, SessionError, MAX_IMPORT_BYTES
+from threads_session import ThreadsSession, SessionError, MAX_IMPORT_BYTES, chromium_proxy_unsupported
 from google_sheets_sync import (
+    GoogleLoginRequired,
     authorize_google,
     download_google_sheet_authenticated,
     oauth_status,
@@ -48,10 +50,9 @@ from proxy_utils import (
     test_proxy_text,
 )
 from workbook_utils import (
-    GOOGLE_SHEET_LABEL,
+    LAST_UPDATE_COLUMN,
     LEGACY_GOOGLE_SHEET_FILE_ID,
-    REPORT_COLUMNS,
-    THREADS_REPORT_COLUMNS,
+    PLATFORMS,
     SINGLE_LINK_FILL_COLOR,
     VIDEO_LINK_FILL_COLOR,
     build_workbook_rows,
@@ -60,17 +61,19 @@ from workbook_utils import (
     ensure_data_dir,
     find_data_sheet_names,
     google_sheet_source_for_file,
+    get_platform,
+    is_exportable_report_row,
     is_failed_channel_name,
     should_highlight_video_link,
     list_workbook_partners,
     list_workbook_partners_with_link_counts,
-    normalize_header,
+    partner_dedup_key,
     parse_google_spreadsheet_id,
     read_summary_dashboard,
     read_sheet_preview,
     register_google_sheet_source,
     safe_join,
-    metric_number,
+    metric_total,
     format_metric,
     fetch_google_spreadsheet_title,
     format_display_datetime,
@@ -81,6 +84,7 @@ from workbook_utils import (
     workbook_sheet_names,
     set_cell_literal,
     data_sheet_name_for_summary_title,
+    write_json_atomic,
 )
 
 
@@ -117,6 +121,9 @@ def threads_session_manager():
     return THREADS_SESSION
 
 GOOGLE_IO_LOCK = threading.RLock()
+# The interactive OAuth flow waits on the user's browser, so it must never hold GOOGLE_IO_LOCK.
+GOOGLE_LOGIN_LOCK = threading.Lock()
+GOOGLE_LOGIN_TIMEOUT_SECONDS = 300
 
 
 def trusted_local_request(request, *, require_origin=False):
@@ -215,48 +222,40 @@ class ConnectionManager:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
 
+    async def _send_all(self, payload):
+        # Copy first: a disconnect during an await must not make the loop skip another tab.
+        for connection in list(self.active_connections):
+            try:
+                await connection.send_json(payload)
+            except Exception:
+                self.disconnect(connection)
+
     async def broadcast_log(self, message: str, *, level: str = "", details=None):
         payload = {"type": "log", "message": message, **self.context}
         if level:
             payload["level"] = level
         if details:
             payload["details"] = details
-        for conn in self.active_connections:
-            try:
-                await conn.send_json(payload)
-            except Exception:
-                pass
+        await self._send_all(payload)
 
     async def broadcast_status(self, status: dict):
         status = {**status, **self.context}
         self.last_status = status
         if status.get("done"):
             self.running = False
-        for conn in self.active_connections:
-            try:
-                await conn.send_json({"type": "status", "data": status, **self.context})
-            except Exception:
-                pass
+        await self._send_all({"type": "status", "data": status, **self.context})
 
     async def broadcast_data(self, row: dict):
         row = {**row, **self.context}
         self.results.append(row)
-        for conn in self.active_connections:
-            try:
-                await conn.send_json({"type": "data", "row": row, **self.context})
-            except Exception:
-                pass
+        await self._send_all({"type": "data", "row": row, **self.context})
 
     async def broadcast_duplicates(self, data: dict):
-        for conn in self.active_connections:
-            try:
-                await conn.send_json({"type": "duplicates", "data": data, **self.context})
-            except Exception:
-                pass
+        await self._send_all({"type": "duplicates", "data": data, **self.context})
 
 
 manager = ConnectionManager()
-DATA_DIR = ensure_data_dir(EXCEL_DIR)
+ensure_data_dir(EXCEL_DIR)
 SCRAPE_TASK = None
 SCAN_STARTING = False
 SOURCE_BUSY = False
@@ -264,7 +263,6 @@ DESKTOP_UPDATE_PENDING = False
 CURRENT_SELECTED_FILE = ""
 CURRENT_SELECTED_SHEET = ""
 CURRENT_SCAN_SHEET = ""
-GOOGLE_SHEET_SOURCE_URL = ""
 LOGO_PATH = os.path.join(APP_RESOURCE_DIR, "logo.png")
 
 
@@ -323,10 +321,10 @@ class SourceRequestError(ValueError):
 
 
 def validate_platform(platform="tiktok"):
-    platform = clean_text(platform).lower()
-    if platform not in {"tiktok", "threads"}:
-        raise SourceRequestError("Nền tảng không hợp lệ")
-    return platform
+    try:
+        return get_platform(platform).key
+    except ValueError as error:
+        raise SourceRequestError(str(error)) from error
 
 
 def resolve_source_file(file_id=None, platform="tiktok", *, allow_empty=False):
@@ -385,22 +383,9 @@ def ensure_selected_file():
     return CURRENT_SELECTED_FILE
 
 
-def current_excel_path():
-    selected = ensure_selected_file()
-    return resolve_file_path(selected) if selected else ""
-
-
 def current_google_sheet_source():
     current_id = ensure_selected_file()
     return google_sheet_source_for_file(EXCEL_DIR, current_id)
-
-
-def current_display_label():
-    current_id = ensure_selected_file()
-    for entry in file_entries():
-        if entry["id"] == current_id:
-            return entry["label"]
-    return current_id
 
 
 def file_display_label(file_id):
@@ -417,28 +402,6 @@ def default_sheet_for_file(file_id):
         return ""
 
 
-def sheets_for_current_file():
-    target_path = current_excel_path()
-    if not os.path.exists(target_path):
-        return []
-    try:
-        return find_data_sheet_names(target_path)
-    except Exception:
-        return []
-
-
-def resolve_scan_sheet(requested_sheet=""):
-    global CURRENT_SCAN_SHEET
-    sheets = sheets_for_current_file()
-    if not sheets:
-        raise ValueError("File đã chọn không có sheet dữ liệu để quét")
-    sheet_name = clean_text(requested_sheet) or CURRENT_SCAN_SHEET or CURRENT_SELECTED_SHEET or sheets[0]
-    if sheet_name not in sheets:
-        raise ValueError("Sheet không tồn tại")
-    CURRENT_SCAN_SHEET = sheet_name
-    return sheet_name, sheets
-
-
 def safe_report_name(name):
     filename = re.sub(r'[\\/:*?"<>|]+', "-", clean_text(name))
     filename = re.sub(r"\s+", " ", filename).strip(" .")
@@ -446,8 +409,7 @@ def safe_report_name(name):
 
 
 def spreadsheet_text(value):
-    text = clean_text(value)
-    return f"'{text}" if text else ""
+    return clean_text(value)
 
 
 def spreadsheet_date_text(value):
@@ -479,10 +441,6 @@ def parse_report_date(value):
     if re.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}", text):
         return pd.to_datetime(text, errors="coerce")
     return pd.to_datetime(text, errors="coerce", dayfirst=True)
-
-
-def spreadsheet_formula_text(value):
-    return clean_text(value).replace('"', '""')
 
 
 def spreadsheet_hyperlink(value):
@@ -544,116 +502,120 @@ def add_centered_image_to_cell(ws, cell_address, image_path, max_height_px=36):
     return True
 
 
-def find_report_column(frame, header):
-    target = normalize_header(header)
-    for column in frame.columns:
-        if normalize_header(column) == target:
-            return column
-    if header == "LINK AIR":
-        for column in frame.columns:
-            name = normalize_header(column)
-            if "link" in name or "url" in name:
-                return column
-    if header == "TÊN KÊNH":
-        for column in frame.columns:
-            name = normalize_header(column)
-            if "tên kênh" in name or "ten kenh" in name:
-                return column
+REPORT_COLUMN_WIDTHS = {
+    "NGÀY AIR": 14, "TÊN KÊNH": 24, "LINK AIR": 72, "LƯỢT XEM": 14, "TIM": 12,
+    "BÌNH LUẬN": 14, "LƯỢT LƯU": 14, "REPOST": 14, "CHIA SẺ": 12,
+}
+REPORT_TEXT_COLUMNS = {"LINK AIR", "TÊN KÊNH"}
+REPORT_ACCENT = "FF6B00"
+REPORT_ACCENT_TEXT = "9A3412"
+REPORT_TOTAL_FILL = "FFF7ED"
+
+
+def report_cell_value(header, value):
     if header == "NGÀY AIR":
-        for column in frame.columns:
-            name = normalize_header(column)
-            if "ngày" in name or "ngay" in name:
-                return column
+        if pd.isna(value):
+            return ""
+        if hasattr(value, "to_pydatetime"):
+            return value.to_pydatetime()
+        parsed_date = parse_report_date(value)
+        return parsed_date.to_pydatetime() if not pd.isna(parsed_date) else clean_text(value)
+    if header in REPORT_TEXT_COLUMNS:
+        return clean_text(value)
+    return format_metric(value)
+
+
+def report_row_fill(spec, source_row):
+    partners = source_row.get("partners")
+    partners = partners if isinstance(partners, (list, tuple)) else []
+    if spec.highlights_video_links and should_highlight_video_link(
+        clean_text(source_row.get("LINK AIR", "")),
+        likes=source_row.get("TIM", 0),
+        shares=source_row.get("CHIA SẺ", 0),
+        resolved_url=source_row.get("_resolvedUrl", ""),
+        resolved_source_url=source_row.get("_resolvedSourceUrl", ""),
+        scan_status=source_row.get("_scanStatus", ""),
+    ):
+        return PatternFill("solid", fgColor=VIDEO_LINK_FILL_COLOR)
+    if len(partners) == 1:
+        return PatternFill("solid", fgColor=SINGLE_LINK_FILL_COLOR)
     return None
 
 
-def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100, platform="tiktok"):
-    threads = platform == "threads"
-    report_columns = THREADS_REPORT_COLUMNS if threads else REPORT_COLUMNS
-    if threads:
-        apply_min_views = False
-    threshold = max(int(min_views or 0), 0) if apply_min_views else 0
-    if apply_min_views:
-        valid_rows = [
-            row
-            for row in rows
-            if threads or not is_failed_channel_name(row.get("TÊN KÊNH", ""))
-            and metric_number(row.get("LƯỢT XEM", 0)) >= threshold
-        ]
-    else:
-        valid_rows = [
-            row
-            for row in rows
-            if threads or not is_failed_channel_name(row.get("TÊN KÊNH", ""))
-        ]
-    frame = pd.DataFrame(valid_rows)
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Báo cáo"
-    updated_at = format_display_datetime()
-    table_header_row = 3
-    data_start_row = table_header_row + 1
-    last_column = get_column_letter(len(report_columns))
-
-    title_fill = PatternFill("solid", fgColor="FF6B00")
-    header_fill = PatternFill("solid", fgColor="FF6B00")
-    total_fill = PatternFill("solid", fgColor="FFF7ED")
-    thin = Side(style="thin", color="D8DEE9")
-    border = Border(left=thin, right=thin, top=thin, bottom=thin)
-
+def write_report_banner(ws, spec, partner, link_count, columns):
     ws.row_dimensions[1].height = 42
     ws.row_dimensions[2].height = 26
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
     add_centered_image_to_cell(ws, "A1", LOGO_PATH)
 
-    ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=len(report_columns))
+    ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=len(columns))
     title_cell = ws["B1"]
-    title_cell.value = f"BÁO CÁO {'THREADS' if threads else 'TIKTOK'} - ĐỐI TÁC: {partner}"
-    title_cell.fill = title_fill
+    title_cell.value = f"BÁO CÁO {spec.label.upper()} - ĐỐI TÁC: {partner}"
+    title_cell.fill = PatternFill("solid", fgColor=REPORT_ACCENT)
     title_cell.font = Font(color="FFFFFF", bold=True, size=14)
     title_cell.alignment = Alignment(horizontal="center", vertical="center")
 
-    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(report_columns) - 1)
-    platform_icon = os.path.join(APP_RESOURCE_DIR, "static", "platform-icons", f"{'threads' if threads else 'tiktok'}.png")
-    ws.column_dimensions[last_column].width = 32 if threads else 12
+    # Row 2: metadata across all but the last column, platform icon in the last one.
+    last_column = get_column_letter(len(columns))
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(columns) - 1)
+    ws.column_dimensions[last_column].width = REPORT_COLUMN_WIDTHS.get(columns[-1], 12)
+    platform_icon = os.path.join(APP_RESOURCE_DIR, "static", "platform-icons", f"{spec.key}.png")
     add_centered_image_to_cell(ws, f"{last_column}2", platform_icon, max_height_px=22)
-    ws["A2"] = f"Tổng link: {len(frame)} • Ngày cập nhật: {updated_at}"
-    ws["A2"].font = Font(color="9A3412", italic=True, bold=True)
+    ws["A2"] = f"Tổng link: {link_count} • Ngày cập nhật: {format_display_datetime()}"
+    ws["A2"].font = Font(color=REPORT_ACCENT_TEXT, italic=True, bold=True)
     ws["A2"].alignment = Alignment(horizontal="center")
 
-    for col_index, header in enumerate(report_columns, start=1):
+
+def write_report_total(ws, spec, frame, columns, total_row, border):
+    total_fill = PatternFill("solid", fgColor=REPORT_TOTAL_FILL)
+    ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=3)
+    for col_index in range(1, len(columns) + 1):
+        cell = ws.cell(row=total_row, column=col_index)
+        cell.fill = total_fill
+        cell.border = border
+    total_label = ws.cell(row=total_row, column=1, value="TỔNG")
+    total_label.font = Font(bold=True, color=REPORT_ACCENT_TEXT)
+    total_label.alignment = Alignment(horizontal="center", vertical="center")
+    for header in spec.metric_columns:
+        if header not in frame.columns:
+            continue
+        total_value = metric_total(frame[header])
+        if total_value == "":
+            continue
+        cell = ws.cell(row=total_row, column=columns.index(header) + 1, value=total_value)
+        cell.font = Font(bold=True, color=REPORT_ACCENT_TEXT)
+        cell.number_format = "#,##0"
+        cell.alignment = Alignment(horizontal="right")
+
+
+def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100, platform="tiktok"):
+    spec = get_platform(platform)
+    columns = list(spec.report_columns)
+    valid_rows = [
+        row for row in rows
+        if is_exportable_report_row(row, apply_min_views=apply_min_views, min_views=min_views)
+    ]
+    frame = pd.DataFrame(valid_rows)
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Báo cáo"
+    table_header_row = 3
+    data_start_row = table_header_row + 1
+    thin = Side(style="thin", color="D8DEE9")
+    border = Border(left=thin, right=thin, top=thin, bottom=thin)
+
+    write_report_banner(ws, spec, partner, len(frame), columns)
+    for col_index, header in enumerate(columns, start=1):
         cell = ws.cell(row=table_header_row, column=col_index, value=header)
-        cell.fill = header_fill
+        cell.fill = PatternFill("solid", fgColor=REPORT_ACCENT)
         cell.font = Font(color="FFFFFF", bold=True)
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = border
 
-    single_link_fill = PatternFill("solid", fgColor=SINGLE_LINK_FILL_COLOR)
-    video_link_fill = PatternFill("solid", fgColor=VIDEO_LINK_FILL_COLOR)
     for row_index, (_, source_row) in enumerate(frame.iterrows(), start=data_start_row):
-        for col_index, header in enumerate(report_columns, start=1):
-            value = source_row.get(header, "")
-            if header == "LINK AIR":
-                value = clean_text(value)
-            elif header == "TÊN KÊNH":
-                value = clean_text(value)
-            elif header == "NGÀY AIR":
-                if pd.isna(value):
-                    value = ""
-                elif hasattr(value, "to_pydatetime"):
-                    value = value.to_pydatetime()
-                else:
-                    parsed_date = parse_report_date(value)
-                    value = parsed_date.to_pydatetime() if not pd.isna(parsed_date) else clean_text(value)
-            elif header == "TRẠNG THÁI":
-                value = clean_text(value)
-            elif threads and clean_text(value) == "":
-                value = ""
-            else:
-                value = format_metric(value)
-
-            cell = ws.cell(row=row_index, column=col_index)
-            set_cell_literal(cell, value)
+        for col_index, header in enumerate(columns, start=1):
+            value = report_cell_value(header, source_row.get(header, ""))
+            cell = set_cell_literal(ws.cell(row=row_index, column=col_index), value)
             cell.border = border
             cell.alignment = Alignment(vertical="top", wrap_text=(header in {"LINK AIR", "TÊN KÊNH"}))
             if header == "LINK AIR" and isinstance(value, str) and value.startswith("http"):
@@ -662,63 +624,23 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100, 
             elif header == "NGÀY AIR":
                 cell.number_format = "dd/mm/yyyy"
                 cell.alignment = Alignment(horizontal="center", vertical="top")
-            elif header not in {"LINK AIR", "TÊN KÊNH", "TRẠNG THÁI"}:
+            elif header not in REPORT_TEXT_COLUMNS:
                 cell.number_format = "#,##0"
                 cell.alignment = Alignment(horizontal="right", vertical="top")
-
-        row_partners = source_row.get("partners")
-        if not isinstance(row_partners, (list, tuple)):
-            row_partners = []
-        link_for_type = clean_text(source_row.get("LINK AIR", ""))
-        row_fill = None
-        if not threads and should_highlight_video_link(
-            link_for_type,
-            likes=source_row.get("TIM", 0),
-            shares=source_row.get("CHIA SẺ", 0),
-            resolved_url=source_row.get("_resolvedUrl", ""),
-            resolved_source_url=source_row.get("_resolvedSourceUrl", ""),
-            scan_status=source_row.get("_scanStatus", ""),
-        ):
-            row_fill = video_link_fill
-        elif len(row_partners) == 1:
-            row_fill = single_link_fill
+        row_fill = report_row_fill(spec, source_row)
         if row_fill is not None:
-            for col_index in range(1, len(report_columns) + 1):
+            for col_index in range(1, len(columns) + 1):
                 ws.cell(row=row_index, column=col_index).fill = row_fill
 
-    total_row = None
-    if len(frame) > 0:
-        total_row = len(frame) + data_start_row
-        ws.merge_cells(start_row=total_row, start_column=1, end_row=total_row, end_column=3)
-        for col_index in range(1, len(report_columns) + 1):
-            cell = ws.cell(row=total_row, column=col_index)
-            cell.fill = total_fill
-            cell.border = border
-        total_label = ws.cell(row=total_row, column=1, value="TỔNG")
-        total_label.font = Font(bold=True, color="9A3412")
-        total_label.alignment = Alignment(horizontal="center", vertical="center")
-        for header in report_columns[3:]:
-            if header == "TRẠNG THÁI":
-                continue
-            if header not in frame.columns:
-                continue
-            col_index = report_columns.index(header) + 1
-            if threads and any(clean_text(value) == "" for value in frame[header]):
-                continue
-            total_value = int(frame[header].map(metric_number).sum())
-            cell = ws.cell(row=total_row, column=col_index, value=total_value)
-            cell.fill = total_fill
-            cell.font = Font(bold=True, color="9A3412")
-            cell.border = border
-            cell.number_format = "#,##0"
-            cell.alignment = Alignment(horizontal="right")
+    total_row = len(frame) + data_start_row if len(frame) else None
+    if total_row:
+        write_report_total(ws, spec, frame, columns, total_row, border)
 
     ws.freeze_panes = f"A{data_start_row}"
     filter_last_row = (total_row - 1) if total_row else max(data_start_row, table_header_row)
-    ws.auto_filter.ref = f"A{table_header_row}:{last_column}{filter_last_row}"
-    widths = [14, 24, 72, 14, 12, 14, 14, 12] + ([32] if threads else [])
-    for index, width in enumerate(widths, start=1):
-        ws.column_dimensions[get_column_letter(index)].width = width
+    ws.auto_filter.ref = f"A{table_header_row}:{get_column_letter(len(columns))}{filter_last_row}"
+    for index, header in enumerate(columns, start=1):
+        ws.column_dimensions[get_column_letter(index)].width = REPORT_COLUMN_WIDTHS.get(header, 14)
 
     buffer = io.BytesIO()
     wb.save(buffer)
@@ -730,18 +652,27 @@ def content_disposition(filename):
     return f"attachment; filename*=UTF-8''{quote(filename)}"
 
 
-def validate_proxy_start(use_proxy: bool, proxy_text: str, base_dir: str, platform: str = "tiktok", mode: str = "request") -> str | None:
-    if not use_proxy:
-        return None
-    if platform == "threads":
-        try:
-            resolve_threads_proxies(base_dir, proxy_text, mode)
-        except ValueError as error:
-            return str(error)
-        return None
+def tiktok_proxy_error(proxy_text, base_dir, mode):
     if any(config.get("enabled", True) for config in resolve_proxy_configs(base_dir, proxy_text)):
         return None
     return "Bật proxy nhưng chưa có proxy hợp lệ. Mở Cấu hình và dán proxy."
+
+
+def threads_proxy_error(proxy_text, base_dir, mode):
+    try:
+        resolve_threads_proxies(base_dir, proxy_text, mode)
+    except ValueError as error:
+        return str(error)
+    return None
+
+
+PROXY_VALIDATORS = {"tiktok": tiktok_proxy_error, "threads": threads_proxy_error}
+
+
+def validate_proxy_start(use_proxy: bool, proxy_text: str, base_dir: str, platform: str = "tiktok", mode: str = "request") -> str | None:
+    if not use_proxy:
+        return None
+    return PROXY_VALIDATORS[platform](proxy_text, base_dir, mode)
 
 
 def static_asset_version(base_dir: str) -> str:
@@ -798,67 +729,102 @@ class RunEvents:
         await self.manager.broadcast_duplicates(data)
 
 
-async def run_scraper_safely(target_path, worker_count, partner=None, partners=None, create_result_sheet=False, push_to_google=False, sheet_name="", use_request=True, browser_fallback=False, use_proxy=False, proxy_text="", platform="tiktok", run_context=None, threads_cookies=None, threads_proxies=None, threads_generation=None):
-    base_dir = EXCEL_DIR
+async def run_tiktok_scan(target_path, events, options):
+    await run_scraper(
+        target_path,
+        events,
+        worker_count=options["worker_count"],
+        selected_partner=options["partner"],
+        selected_partners=options["partners"],
+        create_result_sheet=options["create_result_sheet"],
+        base_dir=EXCEL_DIR,
+        file_label=options["file_label"],
+        sheet_name=options["sheet_name"],
+        use_request=options["scrape_mode"] != "browser",
+        browser_fallback=options["scrape_mode"] == "hybrid",
+        use_proxy=options["use_proxy"],
+        proxy_text=options["proxy_text"],
+    )
+
+
+async def run_threads_scan(target_path, events, options):
+    session_options = {}
+    if options.get("threads_cookies") is not None:
+        session_options = {"session_cookies": options["threads_cookies"], "proxy_configs": options.get("threads_proxies") or []}
+    await run_threads_scraper(
+        target_path, events, worker_count=options["worker_count"],
+        selected_partners=options["partners"] or ([options["partner"]] if options["partner"] else []),
+        sheet_name=options["sheet_name"], mode=options["scrape_mode"],
+        base_dir=EXCEL_DIR, use_proxy=options["use_proxy"], proxy_text=options["proxy_text"], **session_options,
+    )
+
+
+SCAN_RUNNERS = {"tiktok": run_tiktok_scan, "threads": run_threads_scan}
+
+
+def scan_options(**overrides):
+    """Defaults for one scan; the websocket start handler overrides them from the validated payload."""
+    options = {
+        "platform": "tiktok", "file_id": "", "sheet_name": "", "worker_count": 1, "scrape_mode": "request",
+        "use_proxy": False, "proxy_text": "", "partner": None, "partners": [],
+        "create_result_sheet": False, "push_to_google": False,
+    }
+    unknown = set(overrides) - set(options) - {"threads_cookies", "threads_proxies", "threads_generation"}
+    if unknown:
+        raise TypeError(f"Unknown scan options: {sorted(unknown)}")
+    return {**options, **overrides}
+
+
+async def push_scan_results(target_path, file_id, scan_sheet, platform):
+    spreadsheet_id = google_sheet_source_for_file(EXCEL_DIR, file_id).get("spreadsheetId", "")
+    if not spreadsheet_id:
+        await manager.broadcast_log("BỎ QUA đẩy Google: file hiện tại chưa gắn với Google Sheet gốc.")
+        return
+    try:
+        rows = await asyncio.to_thread(build_workbook_rows, target_path, sheet_name=scan_sheet, platform=platform)
+        values = build_google_push_rows(rows, platform=platform)
+        sheet_title = await complete_blocking(google_io, push_rows_to_new_sheet, EXCEL_DIR, spreadsheet_id, values, source_sheet_name=scan_sheet, platform=platform)
+    except GoogleLoginRequired as error:
+        await manager.broadcast_log(f"Quét đã lưu xong nhưng chưa đẩy lên Google: {error}", level="WARN")
+    except Exception as error:
+        # The scan itself already saved; a push failure must not be reported as a failed scan.
+        await manager.broadcast_log(f"Quét đã lưu xong nhưng đẩy Google Sheet thất bại: {error}", level="WARN")
+    else:
+        await manager.broadcast_log(f"Đã đẩy kết quả lên Google Sheet: {sheet_title}.")
+
+
+async def run_scraper_safely(target_path, options, run_context=None):
+    """Run one scan transaction; `options` holds the validated start payload (see websocket start)."""
+    platform = options["platform"]
     events = RunEvents(manager)
     try:
-        file_id = os.path.relpath(target_path, base_dir).replace("\\", "/")
+        file_id = os.path.relpath(target_path, EXCEL_DIR).replace("\\", "/")
         if run_context is None:
-            manager.begin_run(platform, file_id, sheet_name)
-        source = dict(google_sheet_source_for_file(base_dir, file_id))
-        file_label = file_display_label(file_id)
+            manager.begin_run(platform, file_id, options["sheet_name"])
         sheets = await asyncio.to_thread(find_data_sheet_names, target_path)
-        scan_sheet = clean_text(sheet_name) or (sheets[0] if sheets else "")
+        scan_sheet = clean_text(options["sheet_name"]) or (sheets[0] if sheets else "")
         if not scan_sheet or scan_sheet not in sheets:
             raise ValueError("Sheet không tồn tại trong file đã chọn")
-        if platform == "threads":
-            mode = "browser" if not use_request else ("hybrid" if browser_fallback else "request")
-            session_options = {}
-            if threads_cookies is not None:
-                session_options = {"session_cookies": threads_cookies, "proxy_configs": threads_proxies}
-            await run_threads_scraper(
-                target_path, events, worker_count=worker_count,
-                selected_partners=partners or ([partner] if partner else []),
-                sheet_name=scan_sheet, mode=mode,
-                base_dir=base_dir, use_proxy=use_proxy, proxy_text=proxy_text, **session_options,
-            )
-        else:
-            await run_scraper(
-                target_path,
-                events,
-                worker_count=worker_count,
-                selected_partner=partner,
-                selected_partners=partners,
-                create_result_sheet=create_result_sheet,
-                base_dir=base_dir,
-                file_label=file_label,
-                sheet_name=scan_sheet,
-                use_request=use_request,
-                browser_fallback=browser_fallback,
-                use_proxy=use_proxy,
-                proxy_text=proxy_text,
-            )
-        if push_to_google:
-            spreadsheet_id = source.get("spreadsheetId", "")
-            if spreadsheet_id:
-                rows = await asyncio.to_thread(build_workbook_rows, target_path, sheet_name=scan_sheet, platform=platform)
-                values = build_google_push_rows(rows, platform=platform)
-                sheet_title = await complete_blocking(google_io, push_rows_to_new_sheet, base_dir, spreadsheet_id, values, source_sheet_name=scan_sheet, platform=platform)
-                await manager.broadcast_log(f"Đã đẩy kết quả lên Google Sheet: {sheet_title}.")
-            else:
-                await manager.broadcast_log("BỎ QUA đẩy Google: file hiện tại chưa gắn với Google Sheet gốc.")
+        options = {**options, "sheet_name": scan_sheet, "file_label": file_display_label(file_id)}
+        await SCAN_RUNNERS[platform](target_path, events, options)
+        if options["push_to_google"]:
+            await push_scan_results(target_path, file_id, scan_sheet, platform)
         await manager.broadcast_status({**(events.terminal or manager.last_status), "done": True, "phase": "completed"})
     except asyncio.CancelledError:
         await manager.broadcast_log("Đã hủy phiên quét.")
         await manager.broadcast_status({**manager.last_status, "done": True, "cancelled": True, "phase": "cancelled"})
         raise
     except Exception as error:
-        if threads_cookies is not None:
+        message = str(error)
+        if options.get("threads_cookies") is not None and not isinstance(error, (SessionError, ValueError)):
+            # Unexpected errors from a logged-in run may echo request details; keep them out of the log.
+            message = "Phiên quét Threads đăng nhập gặp lỗi kỹ thuật; cookie vẫn được giữ, hãy thử lại."
+        if isinstance(error, SessionError) and options.get("threads_cookies") is not None:
+            # Only a session failure says anything about the cookies; other errors leave them valid.
             try:
-                await complete_blocking(threads_session_manager().invalidate, threads_generation, error.state if isinstance(error, SessionError) else "unknown")
+                await complete_blocking(threads_session_manager().invalidate, options.get("threads_generation"), error.state)
             except Exception:
                 pass
-        message = str(error) if isinstance(error, SessionError) or threads_cookies is None else "Phiên quét Threads đăng nhập thất bại; kiểm tra cookie và tuyến kết nối."
         await manager.broadcast_log(f"Lỗi quét: {message}")
         await manager.broadcast_status({**manager.last_status, "error": max(1, manager.last_status.get("error", 0)), "done": True, "phase": "failed", "message": message})
 
@@ -875,7 +841,7 @@ def finalize_unstarted_run(task, run_id):
 
 
 def build_google_push_rows(rows, *, platform="tiktok"):
-    threads = platform == "threads"
+    spec = get_platform(platform)
     normalized_rows = []
     max_partner_columns = 1
     for row in rows:
@@ -886,15 +852,14 @@ def build_google_push_rows(rows, *, platform="tiktok"):
         max_partner_columns = max(max_partner_columns, len(partner_names))
         normalized_rows.append((row, partner_names))
 
-    headers = ["Stt", "Ngày", "Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "REPOST" if threads else "LƯỢT LƯU", "CHIA SẺ"]
+    headers = ["Stt", "Ngày", "Link", "Tên Kênh", *spec.metric_columns]
     headers.extend(["Đối tác" if index == 0 else f"Đối tác {index + 1}" for index in range(max_partner_columns)])
-    headers.append("Cập nhật lần cuối")
-    if threads:
-        headers.append("Trạng thái")
+    headers.append(LAST_UPDATE_COLUMN)
 
-    def output_metric(row, header):
-        value = row.get(header, "")
-        return "" if threads and clean_text(value) == "" else metric_number(value)
+    def metric_cell(row, metric):
+        # Unknown metrics stay blank in Google too; only confirmed numbers are written.
+        value = format_metric(row.get(metric, ""))
+        return "" if value is None else value
 
     values = [headers]
     for index, (row, partner_names) in enumerate(normalized_rows, start=1):
@@ -907,27 +872,23 @@ def build_google_push_rows(rows, *, platform="tiktok"):
             spreadsheet_date_text(row.get("NGÀY AIR", "")),
             spreadsheet_hyperlink(row.get("LINK AIR", "")),
             channel_name,
-            output_metric(row, "LƯỢT XEM"),
-            output_metric(row, "TIM"),
-            output_metric(row, "BÌNH LUẬN"),
-            output_metric(row, "REPOST" if threads else "LƯỢT LƯU"),
-            output_metric(row, "CHIA SẺ"),
+            *[metric_cell(row, metric) for metric in spec.metric_columns],
             *padded_partners,
-            format_display_datetime(),
-            *([clean_text(row.get("TRẠNG THÁI", ""))] if threads else []),
+            clean_text(row.get(LAST_UPDATE_COLUMN, "")),
         ])
     if len(values) > 1:
-        total_row_number = len(values) + 1
-        data_last_row = total_row_number - 1
+        data_last_row = len(values)
         total_row = ["", "", "TỔNG", ""]
-        for column_index in range(5, 10):
+        for offset in range(len(spec.metric_columns)):
+            column_index = 5 + offset
             column_name = excel_column_name(column_index)
             metric_values = [row[column_index - 1] for row in values[1:]]
-            total_row.append("" if threads and any(value == "" for value in metric_values) else f"=SUM({column_name}2:{column_name}{data_last_row})")
-        total_row.extend([""] * (max_partner_columns + 1 + int(threads)))
+            # Same rule as the Excel report: sum the known values, blank only when none is known.
+            known = metric_total(metric_values) != ""
+            total_row.append(f"=SUM({column_name}2:{column_name}{data_last_row})" if known else "")
+        total_row.extend([""] * (len(headers) - len(total_row)))
         values.append(total_row)
     return values
-
 
 
 def build_export_payload(target_path, selected_partners, apply_min_views, min_views, requested_sheet_name="", platform="tiktok"):
@@ -940,75 +901,54 @@ def build_export_payload(target_path, selected_partners, apply_min_views, min_vi
 
 
 def _build_export_payload(target_path, selected_partners, apply_min_views, min_views, requested_sheet_name="", platform="tiktok"):
+    spec = get_platform(platform)
     data_sheets = find_data_sheet_names(target_path)
     report_sheet = clean_text(requested_sheet_name) or (data_sheets[0] if data_sheets else "")
     if report_sheet and report_sheet not in data_sheets:
         raise ValueError(f"Sheet {report_sheet} không tồn tại trong file.")
-    available_partners = set(list_workbook_partners(target_path, sheet_name=report_sheet, platform=platform))
-    partners = [clean_text(name) for name in selected_partners if clean_text(name) in available_partners]
+    available_partners = {
+        partner_dedup_key(name): name
+        for name in list_workbook_partners(target_path, sheet_name=report_sheet, platform=spec.key)
+    }
+    partners = list(dict.fromkeys(
+        available_partners[partner_dedup_key(name)]
+        for name in selected_partners
+        if clean_text(name) and partner_dedup_key(name) in available_partners
+    ))
     if not partners:
         raise ValueError("Không tìm thấy đối tác đã chọn trong file")
     export_timestamp = format_filename_datetime()
-    sheet_label = safe_report_name(report_sheet) if report_sheet else ""
+    sheet_tag = safe_report_name(report_sheet) if report_sheet else ""
+    name_tags = [tag for tag in (spec.file_tag, sheet_tag, export_timestamp) if tag]
 
-    def report_base_name(partner_name):
-        parts = [safe_report_name(partner_name)]
-        if platform == "threads":
-            parts.append("Threads")
-        if sheet_label:
-            parts.append(sheet_label)
-        parts.append(export_timestamp)
-        return " ".join(parts)
+    def report_bytes(partner):
+        rows = build_workbook_rows(target_path, selected_partner=partner, sheet_name=report_sheet, platform=spec.key)
+        return build_partner_report(partner, rows, apply_min_views=apply_min_views, min_views=min_views, platform=spec.key)
 
     if len(partners) == 1:
         partner = partners[0]
-        report_rows = build_workbook_rows(target_path, selected_partner=partner, sheet_name=report_sheet, platform=platform)
-        report_bytes = build_partner_report(
-            partner,
-            report_rows,
-            apply_min_views=apply_min_views,
-            min_views=min_views,
-            platform=platform,
-        )
-        filename = f"{report_base_name(partner)}.xlsx"
         return {
-            "content": report_bytes,
+            "content": report_bytes(partner),
             "media_type": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            "filename": filename,
+            "filename": f"{' '.join([safe_report_name(partner), *name_tags])}.xlsx",
         }
 
     archive = io.BytesIO()
     used_names = set()
     with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zip_file:
         for partner in partners:
-            report_rows = build_workbook_rows(target_path, selected_partner=partner, sheet_name=report_sheet, platform=platform)
-            report_bytes = build_partner_report(
-                partner,
-                report_rows,
-                apply_min_views=apply_min_views,
-                min_views=min_views,
-                platform=platform,
-            )
-            base_name = report_base_name(partner)
+            base_name = " ".join([safe_report_name(partner), *name_tags])
             filename = f"{base_name}.xlsx"
             counter = 2
             while filename in used_names:
                 filename = f"{base_name}_{counter}.xlsx"
                 counter += 1
             used_names.add(filename)
-            zip_file.writestr(filename, report_bytes)
-
-    archive.seek(0)
-    zip_parts = ["bao_cao_doi_tac"]
-    if platform == "threads":
-        zip_parts.append("Threads")
-    if sheet_label:
-        zip_parts.append(sheet_label)
-    zip_parts.append(export_timestamp)
+            zip_file.writestr(filename, report_bytes(partner))
     return {
         "content": archive.getvalue(),
         "media_type": "application/zip",
-        "filename": f"{' '.join(zip_parts)}.zip",
+        "filename": f"{' '.join(['bao_cao_doi_tac', *name_tags])}.zip",
     }
 
 
@@ -1250,11 +1190,17 @@ async def upload_google_oauth_client(file: UploadFile = File(...)):
 
 @app.post("/google-oauth-login")
 async def google_oauth_login():
+    # Waits on the user's browser (bounded by a timeout); holding GOOGLE_IO_LOCK here would freeze
+    # previews, pushes and scans until the user finished or abandoned the login tab.
+    if not GOOGLE_LOGIN_LOCK.acquire(blocking=False):
+        return JSONResponse(content={"error": "Đang chờ đăng nhập Google ở cửa sổ trình duyệt khác."}, status_code=409)
     try:
-        await asyncio.to_thread(google_io, authorize_google, EXCEL_DIR)
+        await asyncio.to_thread(authorize_google, EXCEL_DIR)
         return {"success": True}
     except Exception as error:
         return JSONResponse(content={"error": f"Đăng nhập Google thất bại: {str(error)}"}, status_code=500)
+    finally:
+        GOOGLE_LOGIN_LOCK.release()
 
 
 @app.post("/push-google-sheet")
@@ -1361,11 +1307,11 @@ async def download_excel(file_id: str | None = None, platform: str = "tiktok"):
         return error.response()
     if not os.path.exists(target_path):
         return JSONResponse(content={"error": "File không tồn tại"}, status_code=404)
-    download_name = os.path.basename(file_id)
-    return FileResponse(
-        path=target_path,
-        filename=download_name,
+    content = await asyncio.to_thread(Path(target_path).read_bytes)
+    return Response(
+        content=content,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": content_disposition(os.path.basename(file_id))},
     )
 
 
@@ -1494,7 +1440,6 @@ async def upload_excel(
         def validate_and_publish():
             with open(staged_path, "wb") as destination:
                 file.file.seek(0)
-                import shutil
                 shutil.copyfileobj(file.file, destination)
             preview = validate_workbook(staged_path)
             sheets = find_data_sheet_names(staged_path)
@@ -1520,7 +1465,7 @@ def normalize_source_preferences(payload):
     if not isinstance(payload, dict) or not isinstance(payload.get("sources"), dict):
         raise ValueError("Cấu hình nguồn không hợp lệ.")
     sources = {}
-    for platform in ("tiktok", "threads"):
+    for platform in PLATFORMS:
         item = payload["sources"].get(platform, {})
         if not isinstance(item, dict):
             raise ValueError("Cấu hình nguồn không hợp lệ.")
@@ -1564,14 +1509,7 @@ def load_source_preferences():
 def save_source_preferences(payload):
     path = source_preferences_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
-    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", suffix=".json", dir=os.path.dirname(path), delete=False) as stream:
-        temporary = stream.name
-        json.dump(payload, stream, ensure_ascii=False, indent=2)
-    try:
-        os.replace(temporary, path)
-    finally:
-        if os.path.exists(temporary):
-            os.unlink(temporary)
+    write_json_atomic(path, payload)
 
 
 @app.get("/source-preferences")
@@ -1668,9 +1606,68 @@ async def delete_threads_session():
         SOURCE_BUSY = False
 
 
+async def prepare_scan_start(payload):
+    """Validate a start request against the workbook the client names; never the last /select-file."""
+    global SCAN_STARTING
+    platform = validate_platform(payload.get("platform", "tiktok"))
+    if "file_id" in payload and (not isinstance(payload["file_id"], str) or not payload["file_id"]):
+        raise SourceRequestError("Chưa chọn workbook hợp lệ")
+    file_id, target_path, _, platform = resolve_source_file(payload.get("file_id"), platform)
+    if not target_path or not os.path.isfile(target_path):
+        raise SourceRequestError("Chưa chọn workbook hợp lệ")
+    sheets = await asyncio.to_thread(find_data_sheet_names, target_path)
+    if not sheets:
+        raise ValueError("File đã chọn không có sheet dữ liệu để quét")
+    legacy_sheet = source_sheet_default(file_id, scan=True) if "file_id" not in payload else ""
+    sheet_name = clean_text(payload.get("sheet_name", "")) or (legacy_sheet if legacy_sheet in sheets else sheets[0])
+    if sheet_name not in sheets:
+        raise ValueError("Sheet không tồn tại")
+    scrape_mode = clean_text(payload.get("scrape_mode", "")).lower()
+    if scrape_mode not in {"request", "browser", "hybrid"}:
+        scrape_mode = "request"
+    use_proxy = bool(payload.get("use_proxy", False))
+    proxy_text = str(payload.get("proxy_text") or "")
+    proxy_error = validate_proxy_start(use_proxy, proxy_text, EXCEL_DIR, platform=platform, mode=scrape_mode)
+    if proxy_error:
+        raise ValueError(proxy_error)
+    partners_payload = payload.get("partners", [])
+    options = scan_options(
+        platform=platform,
+        file_id=file_id,
+        sheet_name=sheet_name,
+        worker_count=clamp_worker_count(payload.get("workers", 20)),
+        scrape_mode=scrape_mode,
+        use_proxy=use_proxy,
+        proxy_text=proxy_text,
+        partner=clean_text(payload.get("partner", "")) or None,
+        partners=[clean_text(name) for name in partners_payload if clean_text(name)] if isinstance(partners_payload, list) else [],
+        create_result_sheet=bool(payload.get("create_result_sheet", False)),
+        push_to_google=bool(payload.get("push_to_google", False)),
+    )
+    if platform == "threads" and payload.get("use_threads_session") is True:
+        generation = payload.get("threads_session_generation")
+        if not isinstance(generation, str) or not generation:
+            raise ValueError("Tải lại trạng thái cookie Threads trước khi quét.")
+        SCAN_STARTING = True
+        try:
+            options["threads_cookies"] = await complete_blocking(threads_session_manager().snapshot, generation)
+            options["threads_proxies"] = resolve_threads_proxies(EXCEL_DIR, proxy_text, scrape_mode) if use_proxy else []
+            options["threads_generation"] = generation
+            # Cookie sessions are verified through Chromium, which cannot authenticate to SOCKS5.
+            if options["threads_proxies"] and chromium_proxy_unsupported(options["threads_proxies"][0]):
+                raise SessionError("proxy_unsupported")
+        except SessionError as error:
+            raise ValueError(str(error)) from error
+        except Exception as error:
+            raise ValueError("Không nạp được phiên Threads đã lưu.") from error
+        finally:
+            SCAN_STARTING = False
+    return target_path, options
+
+
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    global SCRAPE_TASK, SCAN_STARTING
+    global SCRAPE_TASK
     if not trusted_local_request(websocket, require_origin=True) or not valid_local_session(websocket):
         await websocket.close(code=1008)
         return
@@ -1695,98 +1692,13 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_json({"type": "session", "data": manager.snapshot(), **manager.context})
                     await websocket.send_json({"type": "log", "message": "Đang xử lý dữ liệu hoặc cập nhật ứng dụng. Vui lòng chờ hoàn tất."})
                     continue
-
                 try:
-                    platform = validate_platform(payload.get("platform", "tiktok"))
-                except SourceRequestError as error:
+                    target_path, options = await prepare_scan_start(payload)
+                except (SourceRequestError, ValueError) as error:
                     await reject_start(str(error))
                     continue
-                if "file_id" in payload and (not isinstance(payload["file_id"], str) or not payload["file_id"]):
-                    await reject_start("Chưa chọn workbook hợp lệ")
-                    continue
-                target_path = current_excel_path()
-                file_id = CURRENT_SELECTED_FILE
-                if not target_path or not os.path.isfile(target_path):
-                    await reject_start("Chưa chọn workbook hợp lệ")
-                    continue
-                if "file_id" in payload and payload["file_id"] != file_id:
-                    await reject_start("File đã đổi. Hãy tải lại danh sách và chọn lại file cần quét.")
-                    continue
-                worker_count = payload.get("workers", 20)
-                create_result_sheet = bool(payload.get("create_result_sheet", False))
-                push_to_google = bool(payload.get("push_to_google", False))
-                partner = clean_text(payload.get("partner", ""))
-                sheet_name = clean_text(payload.get("sheet_name", ""))
-                try:
-                    sheet_name, _ = resolve_scan_sheet(sheet_name)
-                except ValueError as error:
-                    await reject_start(str(error))
-                    continue
-                partners_payload = payload.get("partners", [])
-                partners = []
-                if isinstance(partners_payload, list):
-                    partners = [clean_text(name) for name in partners_payload if clean_text(name)]
-                scrape_mode = clean_text(payload.get("scrape_mode", "")).lower()
-                if scrape_mode not in {"request", "browser", "hybrid"}:
-                    scrape_mode = "request"
-                if scrape_mode == "browser":
-                    use_request = False
-                    browser_fallback = False
-                elif scrape_mode == "hybrid":
-                    use_request = True
-                    browser_fallback = True
-                else:
-                    use_request = True
-                    browser_fallback = False
-                use_proxy = bool(payload.get("use_proxy", False))
-                proxy_text = str(payload.get("proxy_text") or "")
-                proxy_error = validate_proxy_start(use_proxy, proxy_text, EXCEL_DIR, platform=platform, mode=scrape_mode)
-                if proxy_error:
-                    await reject_start(proxy_error)
-                    continue
-                from scraper import clamp_worker_count
-                from proxy_utils import resolve_proxy_configs
-                proxy_count = len(resolve_proxy_configs(EXCEL_DIR, proxy_text=proxy_text)) if use_proxy else 0
-                worker_count = clamp_worker_count(worker_count, proxy_count=proxy_count)
-                threads_cookies = None
-                threads_proxies = None
-                generation = None
-                if platform == "threads" and payload.get("use_threads_session") is True:
-                    generation = payload.get("threads_session_generation")
-                    if not isinstance(generation, str) or not generation:
-                        await reject_start("Tải lại trạng thái cookie Threads trước khi quét.")
-                        continue
-                    SCAN_STARTING = True
-                    try:
-                        threads_cookies = await complete_blocking(threads_session_manager().snapshot, generation)
-                        threads_proxies = resolve_threads_proxies(EXCEL_DIR, proxy_text, scrape_mode) if use_proxy else []
-                    except SessionError as error:
-                        await reject_start(str(error))
-                        continue
-                    except Exception:
-                        await reject_start("Không nạp được phiên Threads đã lưu.")
-                        continue
-                    finally:
-                        SCAN_STARTING = False
-                run_context = manager.begin_run(platform, file_id, sheet_name)
-                SCRAPE_TASK = asyncio.create_task(
-                    run_scraper_safely(
-                        target_path,
-                        worker_count,
-                        partner=partner or None,
-                        partners=partners,
-                        create_result_sheet=create_result_sheet,
-                        push_to_google=push_to_google,
-                        sheet_name=sheet_name,
-                        use_request=use_request,
-                        browser_fallback=browser_fallback,
-                        use_proxy=use_proxy,
-                        proxy_text=proxy_text,
-                        platform=platform,
-                        run_context=run_context,
-                        **({"threads_cookies": threads_cookies, "threads_proxies": threads_proxies, "threads_generation": generation} if threads_cookies is not None else {}),
-                    )
-                )
+                run_context = manager.begin_run(options["platform"], options["file_id"], options["sheet_name"])
+                SCRAPE_TASK = asyncio.create_task(run_scraper_safely(target_path, options, run_context=run_context))
                 SCRAPE_TASK.add_done_callback(lambda task, run_id=run_context["runId"]: finalize_unstarted_run(task, run_id))
                 await manager.broadcast_status(manager.last_status)
             elif action == "cancel":

@@ -161,11 +161,18 @@ class _CancelAfterResultLog(_CancelAfterData):
 @pytest.mark.parametrize("manager_type", [_CancelAfterData, _CancelAfterResultLog])
 def test_tiktok_cancel_saves_results_already_sent_to_ui(tmp_path, monkeypatch, manager_type):
     path = _scan_fixture(tmp_path, monkeypatch)
+    book = openpyxl.load_workbook(path)
+    book.active.append(["TỔNG", None, "=SUM(C2:C2)"])
+    book.save(path)
+    book.close()
     manager = manager_type()
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(scraper.run_scraper(path, manager, worker_count=1, retries=0, sheet_name="Data"))
     saved = openpyxl.load_workbook(path)
     assert saved.active["C2"].value == 999
+    # The cancel save must not drop the TỔNG row the scan removed in memory.
+    assert saved.active["A3"].value == "TỔNG"
+    assert saved.active["C3"].value == "=SUM(C2:C2)"
     saved.close()
     assert not any(status.get("done") for status in manager.statuses)
 
@@ -184,6 +191,33 @@ def test_tiktok_cancel_save_failure_surfaces_and_keeps_original(tmp_path, monkey
     assert path.read_bytes() == original
     assert not list(tmp_path.glob("*.tmp"))
     assert not any(status.get("done") for status in manager.statuses)
+
+
+def test_request_scrapes_use_a_per_run_pool_that_is_shut_down(tmp_path, monkeypatch):
+    path = _scan_fixture(tmp_path, monkeypatch)
+    threads = []
+    pools = []
+
+    class TrackedPool(ThreadPoolExecutor):
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            pools.append(self)
+
+    def scrape(*_args, **_kwargs):
+        threads.append(threading.current_thread().name)
+        return (
+            {"Views": "999", "Likes": "10", "Comments": "1", "Saves": "2", "Shares": "3"},
+            "Demo", "Success", 1, "https://www.tiktok.com/@demo/video/123",
+        )
+
+    monkeypatch.setattr(scraper, "ThreadPoolExecutor", TrackedPool, raising=False)
+    monkeypatch.setattr(scraper, "_run_request_scrape", scrape)
+    monkeypatch.setattr(scraper, "append_scrape_history", lambda *_a: None)
+    asyncio.run(scraper.run_scraper(path, worker_count=1, retries=0, sheet_name="Data"))
+
+    # Not the loop's shared default executor, which also runs workbook saves.
+    assert threads and all(name.startswith("riviu-tiktok") for name in threads)
+    assert len(pools) == 1 and pools[0]._max_workers == 1 and pools[0]._shutdown
 
 
 def test_atomic_save_finishes_before_cancellation_returns(tmp_path, monkeypatch):
@@ -406,3 +440,26 @@ def test_threads_failed_final_save_still_closes_browser_and_workbook(tmp_path, m
         asyncio.run(threads_scraper.run_threads_scraper(path, sheet_name="Data", mode="browser"))
     assert path.read_bytes() == original
     assert closed == {"browser": True, "workbook": True}
+
+
+def test_hybrid_does_not_send_confirmed_unavailable_pages_to_the_browser(monkeypatch):
+    import asyncio
+    import scraper
+
+    statuses = {"https://www.tiktok.com/@a/video/1": "Error: Trang TikTok không khả dụng",
+                "https://www.tiktok.com/@a/video/2": "Error: Không đọc được số liệu"}
+    monkeypatch.setattr(scraper, "_run_request_scrape",
+                        lambda _index, url, **_kwargs: (scraper.empty_metrics(), "", statuses[url], 1, ""))
+
+    async def scenario():
+        scrape_queue, browser_queue, result_queue = asyncio.Queue(), asyncio.Queue(), asyncio.Queue()
+        for url in statuses:
+            scrape_queue.put_nowait({"url": url, "row": 2})
+        scrape_queue.put_nowait(None)
+        await scraper.request_worker_loop(1, scrape_queue, browser_queue, result_queue, retries=1, browser_fallback=True)
+        return [item["url"] for item in browser_queue._queue], [item["url"] for item in result_queue._queue]
+
+    to_browser, finished = asyncio.run(scenario())
+    # A deleted/unavailable page is final in Request mode; only unreadable pages get the slow browser retry.
+    assert finished == ["https://www.tiktok.com/@a/video/1"]
+    assert to_browser == ["https://www.tiktok.com/@a/video/2"]

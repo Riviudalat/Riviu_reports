@@ -248,6 +248,53 @@ def test_unavailable_store_no_secret_exception(tmp_path):
     assert SECRET not in str(caught.value)
 
 
+def test_briefly_locked_store_is_retried(tmp_path):
+    vault = Vault([cookie()])
+    vault.fail = True
+    controller = session.ThreadsSession(tmp_path, vault)
+    assert controller.status()["state"] == "storage_unavailable"
+    vault.fail = False  # Keychain unlocked: no restart needed.
+    status = controller.status()
+    assert status["state"] == "unchecked" and status["configured"]
+    assert controller.snapshot()[0]["value"] == SECRET
+
+
+@pytest.mark.parametrize("payload,state", [([cookie(name="csrftoken")], "missing_session"), ([{"domain": 1}], "bad_import"),
+                                           ("x" * (session.MAX_IMPORT_BYTES + 1), "too_large")],
+                         ids=["missing_session", "bad_import", "too_large"])
+def test_import_reports_the_actual_rejection(tmp_path, payload, state):
+    controller = session.ThreadsSession(tmp_path, Vault())
+    result = run(controller.import_cookie(payload))
+    assert not result["success"] and result["check"]["state"] == state
+    assert result["check"]["message"] == session._MESSAGES[state]
+
+
+@pytest.mark.parametrize("stored,state", [(None, "none"), ("unavailable", "storage_unavailable")])
+def test_verify_reports_missing_or_unavailable_store(tmp_path, monkeypatch, stored, state):
+    vault = Vault([cookie()] if stored else None)
+    vault.fail = stored == "unavailable"
+    controller = session.ThreadsSession(tmp_path, vault)
+    async def forbidden(*_args, **_kwargs):
+        raise AssertionError("nothing to verify")
+    monkeypatch.setattr(session, "verify_cookies", forbidden)
+    result = run(controller.verify())
+    assert not result["success"] and result["check"]["state"] == state
+
+
+def test_socks5_auth_route_is_reported_without_browser_or_cookie_blame(tmp_path, monkeypatch):
+    def forbidden():
+        raise AssertionError("Chromium cannot authenticate SOCKS5")
+    monkeypatch.setattr(session, "_playwright_factory", forbidden)
+    proxy = {"enabled": True, "type": "socks5", "host": "proxy.invalid", "port": 1080, "socks_port": 1080,
+             "username": "synthetic-user", "password": "synthetic-password"}
+    result = run(session.verify_cookies([cookie()], proxy))
+    assert result["state"] == "proxy_unsupported" and "synthetic" not in json.dumps(result)
+    controller = session.ThreadsSession(tmp_path, Vault([cookie()]))
+    before = controller.status()
+    # A route the browser cannot use says nothing about the saved cookie.
+    assert controller.invalidate(before["generation"], "proxy_unsupported") == before
+
+
 def fake_result(state):
     return {"state": state, "checkedAt": "2026-01-01T00:00:00+00:00", "route": "direct", "message": session._MESSAGES[state]}
 

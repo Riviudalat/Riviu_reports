@@ -221,8 +221,80 @@ def test_build_partner_report_filters_by_min_views():
 
 
 def test_export_date_keeps_vietnamese_day_month_year_order():
-    assert spreadsheet_date_text("02/06/2026") == "'02/06/2026"
-    assert spreadsheet_date_text("02-06-2026") == "'02/06/2026"
+    # Pushed with valueInputOption=RAW, which stores text as-is: an apostrophe prefix would be visible.
+    assert spreadsheet_date_text("02/06/2026") == "02/06/2026"
+    assert spreadsheet_date_text("02-06-2026") == "02/06/2026"
+
+
+def unknown_metric_row(**overrides):
+    return {
+        "NGÀY AIR": "", "TÊN KÊNH": "Channel A", "LINK AIR": "https://www.tiktok.com/@a/video/1",
+        "LƯỢT XEM": 200, "TIM": "", "BÌNH LUẬN": None, "LƯỢT LƯU": "", "CHIA SẺ": "1.234",
+        "Cập nhật lần cuối": "05/10/2026-09:30", "partners": ["Partner A"], **overrides,
+    }
+
+
+def test_tiktok_exports_keep_unknown_metrics_blank():
+    report = load_workbook(io.BytesIO(build_partner_report("Partner A", [unknown_metric_row()], apply_min_views=False))).active
+    assert [report.cell(row=4, column=column).value for column in range(4, 9)] == [200, None, None, None, 1234]
+    total = [report.cell(row=5, column=column).value for column in range(4, 9)]
+    assert total == [200, None, None, None, 1234]
+
+    pushed = build_google_push_rows([unknown_metric_row()])
+    assert pushed[1][4:9] == [200, "", "", "", 1234]
+
+
+def test_google_push_uses_each_rows_last_update_and_platform_columns():
+    values = build_google_push_rows([unknown_metric_row(), unknown_metric_row(**{"Cập nhật lần cuối": ""})])
+    update_column = values[0].index("Cập nhật lần cuối")
+    assert [row[update_column] for row in values[1:3]] == ["05/10/2026-09:30", ""]
+
+    threads_row = unknown_metric_row(**{"LINK AIR": "https://www.threads.com/@a/post/ABC", "REPOST": 2})
+    threads = build_google_push_rows([threads_row, {**threads_row, "TIM": 5}], platform="threads")
+    # Same columns as TikTok with REPOST in the fourth metric slot and no status column.
+    assert threads[0] == ["Stt", "Ngày", "Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "REPOST", "CHIA SẺ", "Đối tác", "Cập nhật lần cuối"]
+    # Totals sum the known values like TikTok; only a column with nothing known stays blank.
+    assert threads[-1][5] == "=SUM(F2:F3)" and threads[-1][6] == ""
+
+
+def test_threads_partner_export_matches_tiktok_report_contract(tmp_path):
+    from openpyxl import Workbook
+    from app import build_export_payload
+
+    path = tmp_path / "threads.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["Ngày", "Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "REPOST", "CHIA SẺ", "Đối tác"])
+    sheet.append(["14/9/2026", "https://www.threads.com/@miri_viu/post/AAA", "", 500, 3, 1, "", 2, "Cafe A"])
+    sheet.append(["14/9/2026", "https://www.threads.com/@cafe/post/BBB", "Cafe B", 200, 1, 0, 4, "", "Cafe A"])
+    sheet.append(["14/9/2026", "https://www.threads.com/@zero/post/CCC", "zero", 0, 0, 0, 0, 0, "Cafe A"])
+    sheet.append(["14/9/2026", "https://www.threads.com/@unknown/post/DDD", "unknown", "", "", "", "", "", "Cafe A"])
+    sheet.append(["14/9/2026", "https://www.threads.com/share/EEE", "", 900, 1, 1, 1, 1, "Cafe A"])
+    book.save(path)
+
+    def report(apply_min_views):
+        payload = build_export_payload(path, ["Cafe A"], apply_min_views, 100, "Data", "threads")
+        return load_workbook(io.BytesIO(payload["content"])).active
+
+    sheet = report(True)
+    assert [cell.value for cell in sheet[3]] == ["NGÀY AIR", "TÊN KÊNH", "LINK AIR", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "REPOST", "CHIA SẺ"]
+    # 0/unknown views and the unreadable channel (share link, no username) are not reported.
+    assert [sheet.cell(row=row, column=2).value for row in (4, 5)] == ["@miri_viu", "Cafe B"]
+    assert sheet["A6"].value == "TỔNG"
+    # Totals sum the known values; REPOST and CHIA SẺ each have one unknown row.
+    assert [sheet.cell(row=6, column=column).value for column in range(4, 9)] == [700, 4, 1, 4, 2]
+    assert "A2:G2" in {str(merge) for merge in sheet.merged_cells.ranges}
+
+    # The same toggle as TikTok: with the threshold off, zero/unknown-view rows are reported too.
+    assert report(False)["A8"].value == "TỔNG"
+
+
+def test_backend_platform_tables_cover_every_registered_platform():
+    import app
+    from workbook_utils import PLATFORMS
+
+    assert set(app.SCAN_RUNNERS) == set(app.PROXY_VALIDATORS) == set(PLATFORMS)
 
 
 def test_build_partner_report_total_row_has_numeric_sums():
@@ -522,3 +594,18 @@ def test_build_export_payload_filename_includes_sheet_and_timestamp(tmp_path):
         )
 
     assert payload["filename"] == "1-2 Circle Coffee Tháng 7 09-07-2026-13-47.xlsx"
+
+
+def test_export_matches_partner_names_like_the_partner_list(tmp_path):
+    import openpyxl
+    from app import build_export_payload
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(["LINK AIR", "TÊN KÊNH", "Đối tác", "LƯỢT XEM"])
+    sheet.append(["https://www.tiktok.com/@a/video/1", "Channel A", "Tầm Bóp Lẩu Nướng", 500])
+    path = tmp_path / "report.xlsx"
+    workbook.save(path)
+    payload = build_export_payload(str(path), ["tầm bóp lẩu nướng"], False, 100, "Data")
+    assert payload["filename"].startswith("Tầm Bóp Lẩu Nướng")
