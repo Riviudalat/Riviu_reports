@@ -110,6 +110,22 @@ its first WebSocket session snapshot, and then every five minutes. A check is
 skipped while a scan runs. When a newer release is available, it downloads,
 installs, and restarts automatically.
 
+### Pull request check
+
+Pull requests into `main` run `.github/workflows/pr-check.yml`. It runs the same
+tests and builds every target above, but never creates a release, so a broken
+platform shows up on the PR instead of in a half-published release. Release
+builds run the same smoke step before packaging.
+
+Both workflows run `desktop/smoke_sidecar.py` after building the server:
+
+- `riviu-server --self-check` launches the bundled headless Chromium once;
+- the server starts with a temp data dir and serves `/`, `/static/app.js` and `/logo.png`;
+- the token-protected `/_desktop/shutdown` stops it.
+
+PR builds are unsigned and skip updater artifacts (`desktop/tauri-pr-check.json`),
+so they need no release secrets.
+
 ## Sidecar lifecycle
 
 - At launch the Tauri shell generates a random 256-bit shutdown token (OS

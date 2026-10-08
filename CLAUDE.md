@@ -21,7 +21,7 @@ git diff --check
 
 Opt-in tests are skipped unless you set env vars: `THREADS_LIVE_URL`, `THREADS_SHARE_URL` (live Threads scans), and `RIVIU_TEST_URL` (UI against a running server). Frontend regression tests in `tests/test_ui_review_fixes.py` and related files run `riviu/web/static/app.js` inside a Node `vm` harness with stubbed DOM, `fetch`, and `WebSocket`. The harness turns the source-row markup that app.js renders into the stub elements, and it fails if any `PLATFORMS[*].dom` id was not rendered. They skip if `node` is not on PATH. The DPAPI tests run only on Windows.
 
-The CI release workflow (`.github/workflows/desktop-release.yml`) runs pytest (`pyproject.toml` sets `testpaths = ["tests"]` and puts the repo root on `sys.path`) and `node --check`, then builds and publishes installers on **every push to `main`** (version `0.1.<run number>`). Installed apps auto-update from that release, so a push to `main` ships to users.
+The CI release workflow (`.github/workflows/desktop-release.yml`) runs pytest (`pyproject.toml` sets `testpaths = ["tests"]` and puts the repo root on `sys.path`) and `node --check`, then builds and publishes installers on **every push to `main`** (version `0.1.<run number>`). Installed apps auto-update from that release, so a push to `main` ships to users. Pull requests into `main` run `.github/workflows/pr-check.yml` instead: the same tests plus an unsigned build and sidecar smoke test (`desktop/smoke_sidecar.py`) on every target, with no release. Merge only when it is green.
 
 ## Architecture
 

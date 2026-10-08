@@ -1,0 +1,103 @@
+name: PR check
+
+# Builds and smoke-tests every desktop target for a pull request into main,
+# without creating a release: nothing here is published or seen by users.
+on:
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality checks
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip -r requirements.txt
+          npm ci
+
+      - name: Install browser test runtime
+        run: python -m playwright install chromium
+
+      - name: Run Python tests
+        run: python -m pytest -q
+
+      - name: Check browser JavaScript syntax
+        run: node --check riviu/web/static/app.js
+
+  build:
+    name: Build ${{ matrix.name }}
+    needs: quality
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows x64
+            os: windows-2022
+            target: x86_64-pc-windows-msvc
+          - name: macOS Intel
+            os: macos-15-intel
+            target: x86_64-apple-darwin
+          - name: macOS Apple Silicon
+            os: macos-14
+            target: aarch64-apple-darwin
+          - name: Linux x64
+            os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install Linux packaging dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y build-essential curl wget file libssl-dev libxdo-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf rpm
+
+      - name: Install Python dependencies
+        run: python -m pip install --upgrade pip -r requirements.txt
+
+      - name: Install desktop dependencies
+        run: npm ci
+
+      - name: Build bundled server
+        run: python desktop/build_sidecar.py --target ${{ matrix.target }}
+
+      - name: Smoke-test bundled server
+        run: python desktop/smoke_sidecar.py --target ${{ matrix.target }}
+
+      # Unsigned build without updater artifacts: proves the installers build
+      # on every target without needing the release signing secrets.
+      - name: Build installers
+        run: npx tauri build --target ${{ matrix.target }} --config desktop/tauri-pr-check.json
