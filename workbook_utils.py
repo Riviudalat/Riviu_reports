@@ -4,6 +4,7 @@ import html
 import io
 import json
 import os
+import posixpath
 import re
 import tempfile
 import threading
@@ -16,8 +17,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Callable, Iterable
 from urllib.parse import urlparse
+from xml.etree import ElementTree
 
 import pandas as pd
+from openpyxl.formula.translate import Translator
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 from openpyxl.packaging.custom import StringProperty
@@ -215,6 +218,13 @@ def set_cell_literal(cell, value):
     return cell
 
 
+def preview_datetime_text(value):
+    """A date-only cell (midnight) shows as dd/mm/yyyy; a time is shown only when there is one."""
+    if (value.hour, value.minute, value.second, value.microsecond) == (0, 0, 0, 0):
+        return value.strftime("%d/%m/%Y")
+    return value.strftime(DISPLAY_DATETIME_FORMAT)
+
+
 def clean_preview_value(value):
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
@@ -237,6 +247,7 @@ def parse_google_spreadsheet_id(source_url):
 def extract_tiktok_username(url):
     match = re.search(r"tiktok\.com/@([^/?]+)", str(url or ""), re.IGNORECASE)
     return match.group(1).strip() if match else ""
+
 
 
 def safe_workbook_filename(name, *, max_length=80):
@@ -355,6 +366,7 @@ def google_sheet_sync_timestamp_display(moment=None):
     return format_display_datetime(moment)
 
 
+
 def google_sheet_sync_label(title, timestamp_display=None):
     sheet_title = clean_text(title)
     stamp = clean_text(timestamp_display or google_sheet_sync_timestamp_display())
@@ -380,6 +392,7 @@ def google_sheet_filename_to_label(filename):
         stamp = "-".join(legacy.groups()[1:])
         return f"{title} {parse_filename_datetime_stamp(stamp)}"
     return base
+
 
 
 def google_sheet_registry_path(base_dir):
@@ -505,6 +518,7 @@ def format_metric(value):
     if re.fullmatch(r"[\d.,\s]+", text) and re.search(r"\d", text):
         return metric_number(text)
     return text
+
 
 
 def google_sheet_export_url(source_url):
@@ -652,10 +666,15 @@ class WorkbookSnapshot:
         """The sheet parsed by pandas (header on row 1), as a copy the caller may modify."""
         return self.cached(("frame", sheet_name), lambda: self.excel().parse(sheet_name)).copy()
 
+    # Only the cached preview needs these two, so they are not cached on their own.
     def header_row(self, sheet_name):
         """Raw header cells, without pandas' "Unnamed: N" / "X.1" renaming (reads one row)."""
         header_frame = self.excel().parse(sheet_name, header=None, nrows=1)
         return header_frame.iloc[0].tolist() if len(header_frame.index) else []
+
+    def column_formulas(self, sheet_name, column_letter):
+        """{sheet row: formula text} for one column; data_only parsing hides formulas."""
+        return worksheet_column_formulas(self.content, sheet_name, column_letter)
 
 
 @contextmanager
@@ -667,9 +686,76 @@ def open_workbook_snapshot(source):
         yield snapshot
 
 
+XLSX_MAIN_NS = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+XLSX_REL_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+XLSX_PACKAGE_REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
+_XML_FORMULA_RE = re.compile(r"<(?:[\w.-]+:)?f\b([^>]*?)(?:/>|>(.*?)</(?:[\w.-]+:)?f>)", re.S)
+_XML_ATTRIBUTE_RE = re.compile(r'([\w:.-]+)\s*=\s*"([^"]*)"')
+
+
+def worksheet_xml_part(archive, sheet_name):
+    workbook_xml = ElementTree.fromstring(archive.read("xl/workbook.xml"))
+    relation_id = next(
+        (
+            sheet.get(f"{{{XLSX_REL_NS}}}id")
+            for sheet in workbook_xml.iter(f"{{{XLSX_MAIN_NS}}}sheet")
+            if sheet.get("name") == sheet_name
+        ),
+        None,
+    )
+    if not relation_id:
+        return None
+    relations = ElementTree.fromstring(archive.read("xl/_rels/workbook.xml.rels"))
+    for relation in relations.iter(f"{{{XLSX_PACKAGE_REL_NS}}}Relationship"):
+        if relation.get("Id") == relation_id:
+            target = relation.get("Target", "")
+            return target.lstrip("/") if target.startswith("/") else posixpath.normpath(posixpath.join("xl", target))
+    return None
+
+
+def worksheet_column_formulas(content, sheet_name, column_letter):
+    """Formulas of one column, read straight from the sheet XML ({row: "=..."}).
+
+    pandas reads cached values only, and openpyxl-saved workbooks carry no cached values, so a
+    formula column looks blank. Shared formulas are expanded like openpyxl does on load.
+    """
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            part = worksheet_xml_part(archive, sheet_name)
+            if not part:
+                return {}
+            sheet_xml = archive.read(part).decode("utf-8")
+    except (KeyError, zipfile.BadZipFile, ElementTree.ParseError, UnicodeDecodeError):
+        return {}
+    cell_pattern = re.compile(
+        r'<(?:[\w.-]+:)?c\s[^>]*?\br="' + re.escape(column_letter) + r'(\d+)"[^>]*?(?:/>|>(.*?)</(?:[\w.-]+:)?c>)',
+        re.S,
+    )
+    formulas = {}
+    shared = {}
+    for match in cell_pattern.finditer(sheet_xml):
+        formula_match = _XML_FORMULA_RE.search(match.group(2) or "")
+        if not formula_match:
+            continue
+        row = int(match.group(1))
+        attributes = dict(_XML_ATTRIBUTE_RE.findall(formula_match.group(1)))
+        text = html.unescape(formula_match.group(2) or "").strip()
+        if attributes.get("t") == "shared" and "si" in attributes:
+            if text:
+                shared[attributes["si"]] = (f"={text}", f"{column_letter}{row}")
+            elif attributes["si"] in shared:
+                formula, origin = shared[attributes["si"]]
+                formulas[row] = Translator(formula, origin=origin).translate_formula(f"{column_letter}{row}")
+                continue
+        if text:
+            formulas[row] = f"={text}"
+    return formulas
+
+
 def workbook_sheet_names(file_path):
     with open_workbook_snapshot(file_path) as snapshot:
         return snapshot.sheet_names
+
 
 
 def summary_sheet_title_for_data_sheet(data_sheet_name, platform="tiktok"):
@@ -846,6 +932,7 @@ def is_tiktok_video_link(url, *, resolved_url=""):
     return detect_tiktok_media_type(url, resolved_url=resolved_url) == TIKTOK_MEDIA_VIDEO
 
 
+
 def should_highlight_video_link(
     url,
     *,
@@ -996,6 +1083,69 @@ def fill_missing_dates_from_previous(frame, date_column, link_column):
     return frame
 
 
+def evaluate_sequence_formula(formula, row, column_letter, known):
+    """Value of a numbering formula such as =ROW()-1 or =A2+1 at `row`; None if not supported.
+
+    `known` maps sheet rows of the same column to their numbers.
+    """
+    text = re.sub(r"\s+", "", str(formula or "").lstrip("=")).upper()
+    match = re.fullmatch(
+        r"(?:ROW\(\)|\$?" + re.escape(column_letter.upper()) + r"\$?(\d+))(?:([+-])(\d+))?",
+        text,
+    )
+    if not match:
+        return None
+    base = row if match.group(1) is None else known.get(int(match.group(1)))
+    if base is None:
+        return None
+    offset = int(match.group(3) or 0)
+    return base - offset if match.group(2) == "-" else base + offset
+
+
+def _sequence_number(value):
+    if isinstance(value, (int, float)) and not pd.isna(value) and float(value).is_integer():
+        return int(value)
+    text = clean_text(value)
+    return int(text) if re.fullmatch(r"\d+", text) else None
+
+
+def fill_formula_sequence_numbers(frame, snapshot, sheet_name):
+    """Show STT numbers that come from formulas without a cached value.
+
+    Workbooks saved by openpyxl (every scan) keep formulas but drop their cached values, so a
+    "=A2+1" or "=ROW()-1" STT column reads as blank. Cached values stay as they are.
+    """
+    column = find_column_name(frame, ["STT"])
+    if column is None:
+        return frame
+    values = frame[column].tolist()
+    if all(clean_text(value) for value in values):
+        return frame
+    position = frame.columns.get_loc(column)
+    column_letter = get_column_letter(position + 1)
+    formulas = snapshot.column_formulas(sheet_name, column_letter)
+    if not formulas:
+        return frame
+    known = {}
+    filled = {}
+    for index, value in enumerate(values):
+        row = index + 2  # pandas takes the header from sheet row 1 and keeps blank rows
+        if clean_text(value):
+            number = _sequence_number(value)
+            if number is not None:
+                known[row] = number
+            continue
+        number = evaluate_sequence_formula(formulas.get(row), row, column_letter, known) if row in formulas else None
+        if number is not None:
+            known[row] = number
+            filled[index] = number
+    if filled:
+        frame[column] = frame[column].astype(object)
+        for index, number in filled.items():
+            frame.iat[index, position] = number
+    return frame
+
+
 def preview_column_labels(frame, raw_headers):
     """Display label per frame column, replacing pandas placeholder headers.
 
@@ -1050,6 +1200,7 @@ def build_sheet_preview(snapshot, current_sheet, limit=None, *, platform=None):
     frame = snapshot.frame(current_sheet)
     raw_headers = snapshot.header_row(current_sheet)
     column_labels = preview_column_labels(frame, raw_headers)
+    frame = fill_formula_sequence_numbers(frame, snapshot, current_sheet)
     link_column = find_link_column_name(frame)
     channel_column = find_column_name(frame, COLUMN_ALIASES["TÊN KÊNH"])
     date_column = find_column_name(frame, COLUMN_ALIASES["date"])
@@ -1078,7 +1229,7 @@ def build_sheet_preview(snapshot, current_sheet, limit=None, *, platform=None):
     ]
     frame = fill_missing_dates_from_previous(frame, date_column, link_column)
     for column in frame.select_dtypes(include=["datetime"]).columns:
-        frame[column] = frame[column].dt.strftime(DISPLAY_DATETIME_FORMAT)
+        frame[column] = frame[column].map(lambda value: None if pd.isna(value) else preview_datetime_text(value))
     spec = PLATFORMS.get(platform or "")
     if spec and link_column and not is_summary_sheet_name(current_sheet):
         frame = frame[frame[link_column].map(lambda value: spec.is_link(value) or is_total_label(value))].copy()
@@ -1627,6 +1778,7 @@ def worksheet_find_last_update_column_index(worksheet):
     return worksheet_find_column_index(worksheet, COLUMN_ALIASES[LAST_UPDATE_COLUMN])
 
 
+
 def workbook_data_sheet_names(workbook):
     return [
         sheet for sheet in workbook.sheetnames
@@ -1797,6 +1949,9 @@ def build_partner_summary_rows(
         row["Stt"] = index
         result.append(row)
     return result
+
+
+
 
 
 def rebuild_summary_sheet(

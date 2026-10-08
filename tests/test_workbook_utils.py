@@ -978,3 +978,44 @@ def test_unchanged_workbook_reads_are_cached_until_an_atomic_save(tmp_path, monk
     assert read_sheet_preview(str(path), "Data", platform="tiktok")["data"][0]["LƯỢT XEM"] == "222"
     assert build_workbook_rows(str(path), sheet_name="Data")[0]["LƯỢT XEM"] == 222
     assert parses == ["Data", "Data"]
+
+
+def test_preview_shows_formula_stt_numbers_without_cached_values(tmp_path):
+    import openpyxl
+
+    path = tmp_path / "stt.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["   STT", "Link"])
+    sheet.append([1, "https://www.tiktok.com/@a/video/1"])
+    sheet.append(["=A2+1", "https://www.tiktok.com/@a/video/2"])
+    sheet.append(["=A3+1", "https://www.tiktok.com/@a/video/3"])
+    sheet.append(["=row()-1", "https://www.tiktok.com/@a/video/4"])
+    sheet.append(["=ROW()-3", "https://www.tiktok.com/@a/video/5"])
+    sheet.append([None, "https://www.tiktok.com/@a/video/6"])
+    # openpyxl stores formulas without cached values, as every scan save does.
+    book.save(path)
+
+    preview = read_sheet_preview(str(path), "Data", platform="tiktok")
+
+    assert [row["   STT"] for row in preview["data"]] == ["1", "2", "3", "4", "3", ""]
+
+
+def test_preview_drops_midnight_time_from_date_only_cells(tmp_path):
+    from datetime import datetime
+    import openpyxl
+
+    path = tmp_path / "dates.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["Ngày", "Link", "Cập nhật"])
+    sheet.append([datetime(2026, 8, 1), "https://www.tiktok.com/@a/video/1", datetime(2026, 8, 2, 14, 30)])
+    sheet.append([None, "https://www.tiktok.com/@a/video/2", datetime(2026, 8, 3)])
+    book.save(path)
+
+    rows = read_sheet_preview(str(path), "Data", platform="tiktok")["data"]
+
+    assert [row["Ngày"] for row in rows] == ["01/08/2026", "01/08/2026"]
+    assert [row["Cập nhật"] for row in rows] == ["02/08/2026-14:30", "03/08/2026"]
