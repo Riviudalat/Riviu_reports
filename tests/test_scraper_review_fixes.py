@@ -402,6 +402,32 @@ def test_threads_cancellation_joins_autosave_before_cleanup_save(tmp_path, monke
     saved.close()
 
 
+def _needs_browser_fallback(monkeypatch):
+    """Request fails retryably, so the link goes to a (fake) browser worker that succeeds."""
+    monkeypatch.setattr(scraper, "_run_request_scrape", lambda *_a, **_kw: (
+        scraper.empty_metrics(), "", "Error: HTTP 500", 1, "",
+    ))
+
+    class Context:
+        async def new_page(self):
+            return object()
+
+        async def close(self):
+            pass
+
+    async def make_context(browser, proxy_configs=None):
+        assert browser is not None
+        return Context()
+
+    async def browser_scrape(_page, url, _retries, channel_cache=None):
+        return {"Views": "999", "Likes": "10", "Comments": "1", "Saves": "2", "Shares": "3"}, "Demo", "Success", 1, url
+
+    monkeypatch.setattr(scraper, "make_browser_context", make_context)
+    monkeypatch.setattr(scraper, "scrape_with_retries", browser_scrape)
+    # Skip the polite pause between browser links.
+    monkeypatch.setattr(scraper.random, "uniform", lambda _low, _high: 0)
+
+
 class _SlowExitPlaywright:
     """Chromium whose exit outlasts the scan, as seen live on a busy Windows host.
 
@@ -458,6 +484,8 @@ def test_finished_scan_does_not_wait_for_slow_chromium_exit(tmp_path, monkeypatc
     fake = _SlowExitPlaywright()
     if platform == "tiktok":
         path = _scan_fixture(tmp_path, monkeypatch)
+        # Hybrid starts Chromium only for a fallback, so make this link need one.
+        _needs_browser_fallback(monkeypatch)
         monkeypatch.setattr(scraper, "async_playwright", fake)
         scan = lambda: scraper.run_scraper(path, worker_count=1, retries=0, sheet_name="Data",
                                            use_request=True, browser_fallback=True)
@@ -561,3 +589,210 @@ def test_hybrid_does_not_send_confirmed_unavailable_pages_to_the_browser(monkeyp
     assert finished == ["https://www.tiktok.com/@a/video/1"]
     assert to_browser == ["https://www.tiktok.com/@a/video/2", "https://www.tiktok.com/@a/video/3",
                           "https://www.tiktok.com/@a/video/4"]
+
+
+def _rows_fixture(tmp_path, count):
+    path = tmp_path / "rows.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"])
+    for index in range(count):
+        sheet.append([f"https://www.tiktok.com/@demo/video/{100 + index}", "Demo", 10, 1, 0, 0, 0])
+    book.save(path)
+    book.close()
+    return path
+
+
+def _success_for_url(_index, url, **_kwargs):
+    return {"Views": "999", "Likes": "10", "Comments": "1", "Saves": "2", "Shares": "3"}, "Demo", "Success", 1, url
+
+
+def test_total_row_placement_does_constant_whole_sheet_scans(monkeypatch):
+    # max_row/max_column walk every cell; one walk per row made TỔNG placement
+    # quadratic (minutes on a 3,674 x 68 workbook, all of it on the event loop).
+    from openpyxl.worksheet.worksheet import Worksheet
+
+    scans = []
+    for name in ("max_row", "max_column"):
+        getter = getattr(Worksheet, name).fget
+
+        def counted(sheet, _getter=getter):
+            scans.append(1)
+            return _getter(sheet)
+
+        monkeypatch.setattr(Worksheet, name, property(counted))
+
+    def scans_for(rows):
+        book = openpyxl.Workbook()
+        sheet = book.active
+        sheet.title = "Data"
+        sheet.append(["Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ", *[f"X{i}" for i in range(30)]])
+        for index in range(rows):
+            sheet.append([f"https://www.tiktok.com/@demo/video/{index + 1}", "Demo", 10, 1, 0, 0, 0])
+        sheet.append(["Ghi chú", "footer"])
+        # Styled but empty rows below the data must not push TỔNG further down.
+        sheet.cell(row=rows + 5, column=3).fill = openpyxl.styles.PatternFill("solid", fgColor="FFFF00")
+        scans.clear()
+        scraper.append_sheet_total_rows(book, sheet_name="Data")
+        assert sheet.cell(row=rows + 3, column=1).value == "TỔNG"
+        assert sheet.cell(row=rows + 3, column=3).value == f"=SUM(C2:C{rows + 1})"
+        return len(scans)
+
+    small, large = scans_for(50), scans_for(400)
+    assert small == large
+    assert large < 100  # the old per-row walk made 400+ here
+
+
+def test_scan_setup_and_finish_keep_the_event_loop_responsive(tmp_path, monkeypatch):
+    path = _rows_fixture(tmp_path, 3)
+    monkeypatch.setattr(scraper, "async_playwright", _NoBrowser)
+    monkeypatch.setattr(scraper, "_run_request_scrape", _success_for_url)
+    clear_totals, rebuild_summary = scraper.clear_existing_total_rows, scraper.rebuild_summary_sheet
+
+    # Stand-ins for a large workbook's slow setup and finish steps.
+    def slow_clear(*args, **kwargs):
+        time.sleep(0.6)
+        return clear_totals(*args, **kwargs)
+
+    def slow_summary(*args, **kwargs):
+        time.sleep(0.6)
+        return rebuild_summary(*args, **kwargs)
+
+    monkeypatch.setattr(scraper, "clear_existing_total_rows", slow_clear)
+    monkeypatch.setattr(scraper, "rebuild_summary_sheet", slow_summary)
+
+    async def check():
+        lags = []
+        scan = asyncio.create_task(scraper.run_scraper(path, worker_count=1, retries=0, sheet_name="Data", base_dir=tmp_path))
+        while not scan.done():
+            started = time.perf_counter()
+            await asyncio.sleep(0.01)
+            lags.append(time.perf_counter() - started)
+        await scan
+        return max(lags)
+
+    assert asyncio.run(check()) < 0.3
+    saved = openpyxl.load_workbook(path)
+    try:
+        assert [saved["Data"].cell(row, 3).value for row in range(2, 5)] == [999] * 3
+        assert saved["Data"]["A5"].value == "TỔNG"
+    finally:
+        saved.close()
+
+
+@pytest.mark.parametrize("links, expected_saves", [(3, 1), (5, 1), (7, 2)])
+def test_completed_scan_writes_the_workbook_once_at_the_end(tmp_path, monkeypatch, links, expected_saves):
+    # links=5: an autosave due on the last result would only repeat the final save.
+    # links=7: the autosave at 5/7 stays for crash safety, then one final save.
+    path = _rows_fixture(tmp_path, links)
+    monkeypatch.setattr(scraper, "async_playwright", _NoBrowser)
+    monkeypatch.setattr(scraper, "_run_request_scrape", _success_for_url)
+    saves = []
+    save = scraper.save_workbook_atomic
+
+    def counted_save(workbook, destination):
+        saves.append(destination)
+        return save(workbook, destination)
+
+    monkeypatch.setattr(scraper, "save_workbook_atomic", counted_save)
+    asyncio.run(scraper.run_scraper(path, worker_count=1, retries=0, save_every=5, sheet_name="Data", base_dir=tmp_path))
+    assert len(saves) == expected_saves
+    saved = openpyxl.load_workbook(path)
+    try:
+        assert [saved["Data"].cell(row, 3).value for row in range(2, links + 2)] == [999] * links
+        assert saved["Data"].cell(links + 2, 1).value == "TỔNG"
+    finally:
+        saved.close()
+
+
+def test_scan_stopped_during_cleanup_after_last_result_still_saves(tmp_path, monkeypatch):
+    path = _rows_fixture(tmp_path, 2)
+    monkeypatch.setattr(scraper, "_run_request_scrape", _success_for_url)
+    stopping = asyncio.Event()
+
+    class StuckStop:
+        async def __aenter__(self):
+            return object()
+
+        async def __aexit__(self, *_args):
+            stopping.set()
+            await asyncio.sleep(5)
+
+    monkeypatch.setattr(scraper, "async_playwright", StuckStop)
+    monkeypatch.setattr(scraper, "PLAYWRIGHT_STOP_TIMEOUT", 5)
+
+    async def check():
+        task = asyncio.create_task(scraper.run_scraper(path, worker_count=1, retries=0, sheet_name="Data", base_dir=tmp_path))
+        await stopping.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(check())
+    saved = openpyxl.load_workbook(path)
+    try:
+        assert [saved["Data"].cell(row, 3).value for row in (2, 3)] == [999, 999]
+        assert saved["Data"]["A4"].value == "TỔNG"
+    finally:
+        saved.close()
+
+
+class _CountingPlaywright:
+    def __init__(self):
+        self.launches = 0
+        fake = self
+
+        class Browser:
+            contexts = []
+
+            async def close(self):
+                pass
+
+        class Chromium:
+            async def launch(self, **_kwargs):
+                fake.launches += 1
+                await asyncio.sleep(0.05)
+                return Browser()
+
+        self.chromium = Chromium()
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        return False
+
+
+def test_hybrid_without_fallback_never_launches_chromium(tmp_path, monkeypatch):
+    path = _rows_fixture(tmp_path, 4)
+    fake = _CountingPlaywright()
+    monkeypatch.setattr(scraper, "async_playwright", fake)
+    monkeypatch.setattr(scraper, "_run_request_scrape", _success_for_url)
+    asyncio.run(scraper.run_scraper(path, worker_count=4, retries=0, sheet_name="Data", base_dir=tmp_path,
+                                    use_request=True, browser_fallback=True))
+    assert fake.launches == 0
+    saved = openpyxl.load_workbook(path)
+    try:
+        assert [saved["Data"].cell(row, 3).value for row in range(2, 6)] == [999] * 4
+    finally:
+        saved.close()
+
+
+def test_hybrid_fallback_workers_share_one_lazily_launched_chromium(tmp_path, monkeypatch):
+    path = _rows_fixture(tmp_path, 4)
+    fake = _CountingPlaywright()
+    monkeypatch.setattr(scraper, "async_playwright", fake)
+    _needs_browser_fallback(monkeypatch)
+    asyncio.run(scraper.run_scraper(path, worker_count=4, retries=0, sheet_name="Data", base_dir=tmp_path,
+                                    use_request=True, browser_fallback=True))
+    # Four fallback links reach three browser workers; they start one Chromium together.
+    assert fake.launches == 1
+    saved = openpyxl.load_workbook(path)
+    try:
+        assert [saved["Data"].cell(row, 3).value for row in range(2, 6)] == [999] * 4
+    finally:
+        saved.close()

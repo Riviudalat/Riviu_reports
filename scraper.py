@@ -623,6 +623,22 @@ def clear_existing_total_rows(workbook, sheet_name=None):
     return cleared
 
 
+def last_occupied_row(sheet):
+    """Last row below the header with any value, or 1.
+
+    max_row/max_column scan every cell on each access, so read them once and
+    walk up from the bottom: one pass at most, usually a single row.
+    """
+    max_column = sheet.max_column
+    for row_index in range(sheet.max_row, 1, -1):
+        row_values = next(sheet.iter_rows(
+            min_row=row_index, max_row=row_index, max_col=max_column, values_only=True,
+        ))
+        if any(value is not None for value in row_values):
+            return row_index
+    return 1
+
+
 def append_sheet_total_rows(workbook, sheet_name=None):
     for sheet_name in selected_data_sheet_names(workbook, sheet_name):
         sheet = workbook[sheet_name]
@@ -638,11 +654,7 @@ def append_sheet_total_rows(workbook, sheet_name=None):
         if not link_rows:
             continue
         columns = ensure_columns(sheet)
-        occupied_rows = [
-            row_index for row_index in range(2, sheet.max_row + 1)
-            if any(cell.value is not None for cell in sheet[row_index])
-        ]
-        total_row = max(occupied_rows, default=1) + 1
+        total_row = last_occupied_row(sheet) + 1
         sheet.cell(row=total_row, column=url_column).value = "TỔNG"
         # Sum only TikTok rows; contiguous ranges keep large-sheet formulas short.
         ranges = []
@@ -2338,32 +2350,50 @@ async def worker_loop(
     proxy_config=None,
     proxy_configs=None,
     executor=None,
+    open_on_first_link=False,
 ):
+    """Scrape queued links in Chromium; `browser` is the run's _SharedBrowser.
+
+    With open_on_first_link (hybrid fallback) the context opens when the first
+    link arrives, so a run whose Request results all stand never starts Chromium.
+    """
     RECYCLE_AFTER = 100
     loop = asyncio.get_running_loop()
     display_worker = worker_label if worker_label is not None else worker_id
     browser_proxy_configs = proxy_configs if proxy_configs is not None else ([proxy_config] if proxy_config else [])
 
     async def make_context():
-        return await make_browser_context(browser, proxy_configs=browser_proxy_configs)
+        return await make_browser_context(await browser.get(), proxy_configs=browser_proxy_configs)
+
+    async def open_first_context():
+        if startup_semaphore is None:
+            new_context = await make_context()
+        else:
+            async with startup_semaphore:
+                await asyncio.sleep(min(worker_id - 1, 10) * 0.25)
+                new_context = await make_context()
+        try:
+            return new_context, await new_context.new_page()
+        except BaseException:
+            await asyncio.gather(new_context.close(), return_exceptions=True)
+            raise
+
+    async def report_start_failure(error):
+        if websocket_manager:
+            await websocket_manager.broadcast_log(f"Worker {display_worker} không khởi tạo được context: {str(error)}")
 
     current_item = None
-
-    if startup_semaphore is not None:
-        async with startup_semaphore:
-            await asyncio.sleep(min(worker_id - 1, 10) * 0.25)
-            try:
-                context = await make_context()
-                page = await context.new_page()
-            except Exception as error:
-                if websocket_manager:
-                    await websocket_manager.broadcast_log(f"Worker {display_worker} không khởi tạo được context: {str(error)}")
-                return
-    else:
-        context = await make_context()
-        page = await context.new_page()
-
+    context = None
+    page = None
+    browser_unavailable = False
     links_in_current_context = 0
+
+    if not open_on_first_link:
+        try:
+            context, page = await open_first_context()
+        except Exception as error:
+            await report_start_failure(error)
+            return
 
     try:
         while True:
@@ -2373,6 +2403,30 @@ async def worker_loop(
                 scrape_queue.task_done()
                 current_item = None
                 break
+
+            if context is None and not browser_unavailable:
+                try:
+                    context, page = await open_first_context()
+                except Exception as error:
+                    browser_unavailable = True
+                    await report_start_failure(error)
+            if context is None:
+                # No browser for the fallback: keep the Request verdict for this link.
+                result_item = {key: value for key, value in item.items() if key != "_request_result"}
+                await result_queue.put({
+                    **result_item,
+                    "worker": display_worker,
+                    "data": empty_metrics(),
+                    "channel_name": "",
+                    "status": f"Error: Worker {display_worker} không mở được trình duyệt",
+                    "attempts": 0,
+                    "elapsed": 0.0,
+                    "resolved_url": "",
+                    **(item.get("_request_result") or {}),
+                })
+                scrape_queue.task_done()
+                current_item = None
+                continue
 
             started_at = time.perf_counter()
             try:
@@ -2455,10 +2509,11 @@ async def worker_loop(
             await scrape_queue.put(current_item)
             scrape_queue.task_done()
     finally:
-        try:
-            await context.close()
-        except Exception:
-            pass
+        if context is not None:
+            try:
+                await context.close()
+            except Exception:
+                pass
 
 
 def _run_request_scrape(
@@ -2939,6 +2994,9 @@ class _TikTokScan:
     async def autosave_if_due(self):
         if self.pending_save_count < self.save_every or self.save_skip_until_processed > self.processed:
             return
+        if self.processed >= self.total:
+            # The final save follows at once; a second full write here only doubles the wait.
+            return
         saved, _reason = await save_workbook(self.workbook, self.file_path, self.manager)
         if saved:
             self.pending_save_count = 0
@@ -3017,6 +3075,43 @@ async def _launch_browser(playwright):
     )
 
 
+class _SharedBrowser:
+    """The run's one Chromium, launched when the first browser worker needs it.
+
+    A hybrid run whose Request results all stand never starts Chromium (~650 MB).
+    """
+
+    def __init__(self, playwright, websocket_manager=None, launch_notice=""):
+        self._playwright = playwright
+        self._manager = websocket_manager
+        self._launch_notice = launch_notice
+        self._launch = None
+
+    @property
+    def launched(self):
+        return self._launch is not None
+
+    async def get(self):
+        if self._launch is None:
+            self._launch = asyncio.ensure_future(_launch_browser(self._playwright))
+            if self._manager and self._launch_notice:
+                await self._manager.broadcast_log(self._launch_notice)
+        # Shielded: one worker's cancellation must not abort the launch the others share.
+        return await asyncio.shield(self._launch)
+
+    async def close(self):
+        launch = self._launch
+        if launch is None:
+            return
+        if not launch.done():
+            # Stopping the Playwright driver afterwards kills a half-started Chromium.
+            launch.cancel()
+            await asyncio.gather(launch, return_exceptions=True)
+        if launch.cancelled() or launch.exception() is not None:
+            return
+        await close_browser_bounded(launch.result())
+
+
 def _start_scan_workers(
     scan,
     *,
@@ -3062,6 +3157,7 @@ def _start_scan_workers(
             websocket_manager=scan.manager,
             worker_label=f"B{index + 1}" if use_request else None,
             proxy_configs=proxy_configs,
+            open_on_first_link=use_request,
             **shared,
         ))
         for index in range(browser_worker_count)
@@ -3158,8 +3254,22 @@ async def playwright_session(factory):
             stop.result()
 
 
-async def _shutdown_scan(scan, workers, finalize_task, browser, executor):
-    """Stop workers, persist unsaved results, then release browser, threads and proxies."""
+async def save_pending_results(scan):
+    """Write results not yet on disk (a stopped run gets no final save)."""
+    if not scan.pending_save_count:
+        return
+    saved, _reason = await save_workbook(scan.workbook, scan.file_path, scan.manager)
+    if not saved:
+        raise RuntimeError("Lưu file Excel khi dừng quét thất bại; kết quả mới chưa được lưu.")
+    scan.pending_save_count = 0
+
+
+async def _shutdown_scan(scan, workers, finalize_task, browser, executor, *, save_pending):
+    """Stop workers, then release browser, threads and proxies.
+
+    save_pending: persist unsaved results here (interrupted runs). A completed
+    run leaves them to _finish_scan, so the workbook is written once.
+    """
     if finalize_task is not None and not finalize_task.done():
         finalize_task.cancel()
     for task in workers:
@@ -3169,32 +3279,32 @@ async def _shutdown_scan(scan, workers, finalize_task, browser, executor):
     # the shared proxy pool while that HTTP work is alive.
     await asyncio.gather(*workers, *([finalize_task] if finalize_task is not None else []), return_exceptions=True)
     try:
-        if scan.pending_save_count:
-            saved, _reason = await save_workbook(scan.workbook, scan.file_path, scan.manager)
-            if not saved:
-                raise RuntimeError("Lưu file Excel khi dừng quét thất bại; kết quả mới chưa được lưu.")
+        if save_pending:
+            await save_pending_results(scan)
     finally:
         # File errors must not skip browser/thread/proxy cleanup.
-        await close_browser_bounded(browser)
+        await browser.close()
         executor.shutdown(wait=False, cancel_futures=True)
         set_session_proxies([])
-        # Allow the Playwright Node transport to drain.
-        await asyncio.sleep(0.3)
+        if browser.launched:
+            # Allow the Playwright Node transport to drain.
+            await asyncio.sleep(0.3)
 
 
-async def _finish_scan(scan, *, create_result_sheet, file_label, base_dir):
-    """Result tab, summary, highlights, final save, history and the completion messages."""
-    manager = scan.manager
+def _prepare_final_workbook(scan, *, create_result_sheet, summary_update_time):
+    """Result tab, summary and highlights. Blocking workbook work: run it off the event loop.
+
+    Returns the log lines to broadcast afterwards.
+    """
+    notes = []
     workbook = scan.workbook
-    summary_update_time = format_display_datetime()
     if create_result_sheet:
         try:
             created_sheet_name = build_result_sheet(workbook, scan.rows_to_process, summary_update_time)
-            if manager and created_sheet_name:
-                await manager.broadcast_log(f"Đã tạo sheet kết quả mới: {created_sheet_name}.")
+            if created_sheet_name:
+                notes.append(f"Đã tạo sheet kết quả mới: {created_sheet_name}.")
         except Exception as error:
-            if manager:
-                await manager.broadcast_log(f"CẢNH BÁO: Không tạo được sheet kết quả ({str(error)})")
+            notes.append(f"CẢNH BÁO: Không tạo được sheet kết quả ({str(error)})")
     try:
         summary_count = rebuild_summary_sheet(
             workbook,
@@ -3202,33 +3312,28 @@ async def _finish_scan(scan, *, create_result_sheet, file_label, base_dir):
             selected_partners=scan.selected_names,
             data_sheet_name=scan.scan_sheet,
         )
-        if manager and scan.scan_sheet:
+        if scan.scan_sheet:
             summary_title = summary_sheet_title_for_data_sheet(scan.scan_sheet)
-            await manager.broadcast_log(f"Đã cập nhật {summary_title} ({summary_count} đối tác).")
+            notes.append(f"Đã cập nhật {summary_title} ({summary_count} đối tác).")
     except Exception as error:
-        if manager:
-            await manager.broadcast_log(f"CẢNH BÁO: Không cập nhật được sheet Tổng kết ({str(error)})")
+        notes.append(f"CẢNH BÁO: Không cập nhật được sheet Tổng kết ({str(error)})")
 
     try:
         if scan.scan_sheet:
             highlighted_count = highlight_single_partner_link_rows(workbook, scan.scan_sheet)
-            if manager and highlighted_count:
-                await manager.broadcast_log(
-                    f"Đã bôi cam {highlighted_count} dòng link 1 đối tác chưa đủ điều kiện xanh."
-                )
+            if highlighted_count:
+                notes.append(f"Đã bôi cam {highlighted_count} dòng link 1 đối tác chưa đủ điều kiện xanh.")
             video_highlighted = highlight_video_link_rows(workbook, scan.scan_sheet)
-            if manager and video_highlighted:
-                await manager.broadcast_log(f"Đã bôi xanh {video_highlighted} dòng video có hoạt động.")
+            if video_highlighted:
+                notes.append(f"Đã bôi xanh {video_highlighted} dòng video có hoạt động.")
     except Exception as error:
-        if manager:
-            await manager.broadcast_log(f"CẢNH BÁO: Không bôi cam được dòng link 1 đối tác ({str(error)})")
+        notes.append(f"CẢNH BÁO: Không bôi cam được dòng link 1 đối tác ({str(error)})")
+    return notes
 
-    final_saved, final_save_reason = await save_workbook(workbook, scan.file_path, manager)
-    if not final_saved:
-        workbook.close()
-        if final_save_reason == "permission":
-            raise RuntimeError("Lưu file Excel thất bại vì file đang mở.")
-        raise RuntimeError("Lưu file Excel thất bại.")
+
+def _record_scan_history(scan, *, file_label, base_dir):
+    """Close the saved workbook and append the run to the scrape history (blocking)."""
+    workbook = scan.workbook
     history_entry = {
         "timestamp": format_display_datetime(),
         "fileLabel": file_label or os.path.basename(scan.file_path),
@@ -3245,6 +3350,45 @@ async def _finish_scan(scan, *, create_result_sheet, file_label, base_dir):
     }
     workbook.close()
     append_scrape_history(base_dir or os.path.dirname(os.path.abspath(scan.file_path)), history_entry)
+
+
+async def _finish_scan(scan, *, create_result_sheet, file_label, base_dir):
+    """Result tab, summary, highlights, final save, history and the completion messages.
+
+    Workers are stopped by now, so the worker thread below is the workbook's
+    only user; finish_pending_task makes a cancellation wait for it.
+    """
+    manager = scan.manager
+    workbook = scan.workbook
+    prepare = asyncio.create_task(asyncio.to_thread(
+        _prepare_final_workbook,
+        scan,
+        create_result_sheet=create_result_sheet,
+        summary_update_time=format_display_datetime(),
+    ))
+    try:
+        notes = await finish_pending_task(prepare)
+    except asyncio.CancelledError:
+        # Stopped while the summary was rebuilt: the scanned results still reach the file.
+        try:
+            await save_pending_results(scan)
+        finally:
+            workbook.close()
+        raise
+    if manager:
+        for note in notes:
+            await manager.broadcast_log(note)
+
+    final_saved, final_save_reason = await save_workbook(workbook, scan.file_path, manager)
+    if not final_saved:
+        workbook.close()
+        if final_save_reason == "permission":
+            raise RuntimeError("Lưu file Excel thất bại vì file đang mở.")
+        raise RuntimeError("Lưu file Excel thất bại.")
+    scan.pending_save_count = 0
+    await finish_pending_task(asyncio.create_task(asyncio.to_thread(
+        _record_scan_history, scan, file_label=file_label, base_dir=base_dir,
+    )))
     if not manager:
         return
     await manager.broadcast_status(scan.progress(done=True, phase="done"))
@@ -3283,7 +3427,11 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     # (browser runs still use HTTP for channel lookups).
     configure_request_concurrency(worker_count)
 
-    scan = _TikTokScan(
+    # Loading a large workbook and placing its TỔNG rows takes seconds; keep the
+    # server responsive meanwhile. Nothing else holds this workbook yet, so a
+    # cancellation may return at once and drop the thread's read-only result.
+    scan = await asyncio.to_thread(
+        _TikTokScan,
         file_path,
         websocket_manager,
         sheet_name=sheet_name,
@@ -3336,69 +3484,77 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
     for _ in range(request_worker_count if use_request else browser_worker_count):
         await work_queue.put(None)
 
-    async with playwright_session(async_playwright) as playwright:
-        # One pool per run, sized to its workers: request scrapes and profile
-        # lookups never queue behind other runs or behind workbook saves.
-        executor = ThreadPoolExecutor(max_workers=max(scan.active_worker_count, 1), thread_name_prefix="riviu-tiktok")
-        browser = None
-        workers = []
-        finalize_task = None
-        interrupted = False
-        try:
-            set_session_proxies(proxy_configs if use_proxy else [])
-            if websocket_manager:
-                if use_request and browser_fallback:
-                    startup_message = f"Đang khởi tạo {request_worker_count} luồng Request và {browser_worker_count} luồng trình duyệt fallback..."
-                elif use_request:
-                    startup_message = f"Đang khởi tạo {request_worker_count} luồng Request..."
-                else:
-                    startup_message = f"Đang khởi tạo trình duyệt và {browser_worker_count} luồng..."
-                await websocket_manager.broadcast_log(startup_message)
-            if browser_worker_count > 0:
-                browser = await _launch_browser(playwright)
-            workers = _start_scan_workers(
-                scan,
-                browser=browser,
-                work_queue=work_queue,
-                browser_queue=browser_queue,
-                result_queue=result_queue,
-                retries=retries,
-                use_request=use_request,
-                browser_fallback=browser_fallback,
-                request_worker_count=request_worker_count,
-                browser_worker_count=browser_worker_count,
-                proxy_configs=proxy_configs,
-                executor=executor,
+    # True once every link has a result: the final save in _finish_scan then
+    # writes them, so shutdown does not save the same workbook first.
+    scan_complete = False
+    try:
+        async with playwright_session(async_playwright) as playwright:
+            # One pool per run, sized to its workers: request scrapes and profile
+            # lookups never queue behind other runs or behind workbook saves.
+            executor = ThreadPoolExecutor(max_workers=max(scan.active_worker_count, 1), thread_name_prefix="riviu-tiktok")
+            browser = _SharedBrowser(
+                playwright,
+                websocket_manager,
+                launch_notice="Khởi động trình duyệt cho link cần fallback..." if use_request else "",
             )
-            if websocket_manager:
-                await websocket_manager.broadcast_status(scan.progress())
-            if use_request and browser_fallback and browser_worker_count > 0:
-                finalize_task = asyncio.create_task(
-                    _finalize_hybrid_workers(workers, request_worker_count, browser_worker_count, browser_queue)
-                )
-
-            await _consume_scan_results(scan, result_queue, workers)
-
-            if finalize_task is not None:
-                await finalize_task
-            else:
-                try:
-                    await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=20.0)
-                except asyncio.TimeoutError:
-                    pass
-        except BaseException:
-            interrupted = True
-            raise
-        finally:
+            workers = []
+            finalize_task = None
             try:
-                await finish_pending_task(asyncio.create_task(
-                    _shutdown_scan(scan, workers, finalize_task, browser, executor)
-                ))
-            except BaseException:
-                interrupted = True
-                raise
+                set_session_proxies(proxy_configs if use_proxy else [])
+                if websocket_manager:
+                    if use_request and browser_fallback:
+                        startup_message = f"Đang khởi tạo {request_worker_count} luồng Request và {browser_worker_count} luồng trình duyệt fallback..."
+                    elif use_request:
+                        startup_message = f"Đang khởi tạo {request_worker_count} luồng Request..."
+                    else:
+                        startup_message = f"Đang khởi tạo trình duyệt và {browser_worker_count} luồng..."
+                    await websocket_manager.broadcast_log(startup_message)
+                if not use_request:
+                    # Browser mode needs Chromium for every link: fail the run now if it cannot start.
+                    await browser.get()
+                workers = _start_scan_workers(
+                    scan,
+                    browser=browser,
+                    work_queue=work_queue,
+                    browser_queue=browser_queue,
+                    result_queue=result_queue,
+                    retries=retries,
+                    use_request=use_request,
+                    browser_fallback=browser_fallback,
+                    request_worker_count=request_worker_count,
+                    browser_worker_count=browser_worker_count,
+                    proxy_configs=proxy_configs,
+                    executor=executor,
+                )
+                if websocket_manager:
+                    await websocket_manager.broadcast_status(scan.progress())
+                if use_request and browser_fallback and browser_worker_count > 0:
+                    finalize_task = asyncio.create_task(
+                        _finalize_hybrid_workers(workers, request_worker_count, browser_worker_count, browser_queue)
+                    )
+
+                await _consume_scan_results(scan, result_queue, workers)
+
+                if finalize_task is not None:
+                    await finalize_task
+                else:
+                    try:
+                        await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=20.0)
+                    except asyncio.TimeoutError:
+                        pass
+                scan_complete = True
             finally:
-                if interrupted:
-                    scan.workbook.close()
+                await finish_pending_task(asyncio.create_task(
+                    _shutdown_scan(scan, workers, finalize_task, browser, executor, save_pending=not scan_complete)
+                ))
+    except BaseException:
+        try:
+            if scan_complete:
+                # Stopped during cleanup, after the last result: the final save will
+                # not run, so keep the results now.
+                await finish_pending_task(asyncio.create_task(save_pending_results(scan)))
+        finally:
+            scan.workbook.close()
+        raise
 
     await _finish_scan(scan, create_result_sheet=create_result_sheet, file_label=file_label, base_dir=base_dir)
