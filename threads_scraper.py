@@ -24,7 +24,9 @@ from workbook_utils import (
     format_display_datetime,
     is_threads_link,
     normalize_threads_url,
+    rebuild_summary_sheet,
     save_workbook_atomic,
+    summary_sheet_title_for_data_sheet,
     workbook_data_sheet_names,
     worksheet_ensure_column,
     worksheet_find_link_column_index,
@@ -782,6 +784,25 @@ async def _broadcast_result(websocket_manager, item, result, status, source, pro
     })
 
 
+async def _rebuild_threads_summary(workbook, sheet_name, selected_partners, websocket_manager):
+    """Refresh the sheet's Threads summary tab (never the TikTok one); failure is only a warning."""
+    try:
+        count = rebuild_summary_sheet(
+            workbook,
+            summary_update_time=format_display_datetime(),
+            selected_partners=selected_partners,
+            data_sheet_name=sheet_name,
+            platform="threads",
+        )
+    except Exception as error:
+        if websocket_manager:
+            await websocket_manager.broadcast_log(f"CẢNH BÁO: Không cập nhật được sheet Tổng kết ({error})")
+        return
+    if websocket_manager:
+        title = summary_sheet_title_for_data_sheet(sheet_name, "threads")
+        await websocket_manager.broadcast_log(f"Đã cập nhật {title} ({count} đối tác).")
+
+
 async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3, selected_partners=None,
                                sheet_name="", mode="hybrid", base_dir="", use_proxy=False, proxy_text="", diagnostics=None,
                                session_cookies=None, proxy_configs=None):
@@ -894,6 +915,9 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                     })
                 if processed % 5 == 0:
                     await finish_pending_task(asyncio.create_task(save_pending()))
+            if sheet_name:
+                await _rebuild_threads_summary(workbook, sheet_name, selected_partners, websocket_manager)
+                dirty = True
             completed = True
         finally:
             async def cleanup():

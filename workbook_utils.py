@@ -45,7 +45,6 @@ TTBD_INTERNAL_HEADERS = {
     TTBD_SOURCE_URL_HEADER,
     "__THREADS_SCAN_STATUS",
 }
-METRIC_COLUMNS = ["LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ"]
 PARTNER_HEADING_MARKERS = ("DANH SÁCH", "DANH SACH", "BỘ ẢNH", "BO ANH")
 CHANNEL_OVERRIDE_FILENAME = "channel_name_overrides.json"
 RESULT_SHEET_PREFIX = "report seeding tiktok"
@@ -532,12 +531,19 @@ def workbook_sheet_names(file_path):
 
 
 
-def summary_sheet_title_for_data_sheet(data_sheet_name):
-    """Build a stable per-source summary title without truncation collisions."""
+def summary_sheet_title_for_data_sheet(data_sheet_name, platform="tiktok"):
+    """Build a stable per-source, per-platform summary title without truncation collisions.
+
+    Each platform owns its own tab ("Tổng kết <sheet>" for TikTok, the legacy title;
+    "Tổng kết Threads <sheet>" for Threads), so scanning one platform of a sheet that holds
+    both kinds of links never overwrites the other platform's summary.
+    """
+    tag = get_platform(platform).summary_tag
+    prefix = f"{SUMMARY_SHEET_TITLE_PREFIX}{tag} " if tag else SUMMARY_SHEET_TITLE_PREFIX
     label = clean_text(data_sheet_name).lower()
     if not label:
-        return SUMMARY_SHEET_NAME
-    title = f"{SUMMARY_SHEET_TITLE_PREFIX}{label}"
+        return prefix.strip() if tag else SUMMARY_SHEET_NAME
+    title = f"{prefix}{label}"
     if len(title) <= 31:
         return title
     digest = hashlib.sha256(label.encode("utf-8")).hexdigest()[:8]
@@ -555,23 +561,30 @@ def month_label_for_sheet_name(sheet_name):
     return f"T{month}"
 
 
-def data_sheet_name_for_summary_title(workbook_sheet_names, summary_sheet_name):
-    """Resolve the source data sheet name from a per-sheet summary tab title."""
+def resolve_summary_sheet(workbook_sheet_names, summary_sheet_name):
+    """(data sheet, platform key) owning a per-sheet summary tab.
+
+    The legacy bare "Tổng kết" tab and tabs whose data sheet is gone resolve to ("", "tiktok"):
+    every summary written before platform-specific tabs existed was a TikTok summary.
+    """
     text = clean_text(summary_sheet_name)
     if normalize_key(text) == normalize_key(SUMMARY_SHEET_NAME):
-        return ""
+        return "", "tiktok"
     prefix_folded = SUMMARY_SHEET_TITLE_PREFIX.casefold()
-    if not text.casefold().startswith(prefix_folded):
-        return ""
-    suffix = text[len(SUMMARY_SHEET_TITLE_PREFIX) :].strip()
-    if not suffix:
-        return ""
+    if not text.casefold().startswith(prefix_folded) or not text[len(SUMMARY_SHEET_TITLE_PREFIX) :].strip():
+        return "", "tiktok"
     for candidate in workbook_sheet_names:
         if is_summary_sheet_name(candidate) or is_result_sheet_name(candidate):
             continue
-        if summary_sheet_title_for_data_sheet(candidate).lower() == text.lower():
-            return candidate
-    return ""
+        for key in PLATFORMS:
+            if summary_sheet_title_for_data_sheet(candidate, key).lower() == text.lower():
+                return candidate, key
+    return "", "tiktok"
+
+
+def data_sheet_name_for_summary_title(workbook_sheet_names, summary_sheet_name):
+    """Resolve the source data sheet name from a per-sheet summary tab title."""
+    return resolve_summary_sheet(workbook_sheet_names, summary_sheet_name)[0]
 
 
 def is_summary_sheet_name(sheet_name):
@@ -734,10 +747,17 @@ class PlatformSpec:
     lists_partners_without_links: bool = False
     file_tag: str = ""
     google_sheet_prefix: str = ""
+    # Inserted into the per-sheet "Tổng kết" tab title; TikTok keeps the legacy untagged title.
+    summary_tag: str = ""
 
     @property
     def metric_columns(self):
         return tuple(column for column in self.report_columns if column in ALL_METRIC_COLUMNS)
+
+    @property
+    def summary_columns(self):
+        """Summary tab layout: the report's metrics in report order (REPOST in the LƯỢT LƯU slot)."""
+        return ("Stt", "ĐỐI TÁC", "TỔNG LINK", *(f"TỔNG {metric}" for metric in self.metric_columns), LAST_UPDATE_COLUMN)
 
 
 ALL_METRIC_COLUMNS = ("LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "REPOST", "CHIA SẺ")
@@ -762,6 +782,7 @@ PLATFORMS = {
         display_channel=lambda link, raw: display_threads_channel(link, raw),
         file_tag="Threads",
         google_sheet_prefix="Report Seeding Threads",
+        summary_tag="Threads",
     ),
 }
 
@@ -968,23 +989,50 @@ def read_sheet_preview(file_path, sheet_name=None, limit=None, *, platform=None)
         workbook.close()
 
 
-def read_summary_dashboard(file_path, data_sheet_name=None):
+SUMMARY_TOTAL_KEYS = {
+    "LƯỢT XEM": "views",
+    "TIM": "likes",
+    "BÌNH LUẬN": "comments",
+    "LƯỢT LƯU": "saves",
+    "REPOST": "reposts",
+    "CHIA SẺ": "shares",
+}
+
+
+def read_summary_dashboard(file_path, data_sheet_name=None, *, platform="tiktok"):
+    """Read the platform's summary tab for a data sheet.
+
+    data_sheet_name may also be a summary tab title (a tab the user opened); that tab is read
+    as-is, with the platform that owns it, so a Threads tab opened from the TikTok view still
+    shows Threads totals.
+    """
+    spec = get_platform(platform)
     workbook = load_excel_file(file_path)
     try:
         sheet_names = list(workbook.sheet_names)
         requested_data_sheet = clean_text(data_sheet_name)
-        if requested_data_sheet:
-            summary_sheet = summary_sheet_title_for_data_sheet(requested_data_sheet)
+        if requested_data_sheet and requested_data_sheet in sheet_names and is_summary_sheet_name(requested_data_sheet):
+            summary_sheet = requested_data_sheet
+            requested_data_sheet, owner = resolve_summary_sheet(sheet_names, summary_sheet)
+            spec = get_platform(owner)
+        elif requested_data_sheet:
+            summary_sheet = summary_sheet_title_for_data_sheet(requested_data_sheet, spec.key)
             if summary_sheet not in sheet_names:
                 summary_sheet = ""
         else:
-            summary_sheet = next((sheet for sheet in sheet_names if is_summary_sheet_name(sheet)), "")
+            summary_sheet = next(
+                (
+                    sheet for sheet in sheet_names
+                    if is_summary_sheet_name(sheet) and resolve_summary_sheet(sheet_names, sheet)[1] == spec.key
+                ),
+                "",
+            )
         if not summary_sheet:
             label = requested_data_sheet or "sheet này"
             return {
                 "sheet": "",
                 "dataSheet": requested_data_sheet,
-                "columns": SUMMARY_COLUMNS,
+                "columns": list(spec.summary_columns),
                 "rows": [],
                 "totals": {},
                 "message": f"Workbook chưa có tổng kết cho {label}. Quét sheet đó để tạo.",
@@ -1004,16 +1052,13 @@ def read_summary_dashboard(file_path, data_sheet_name=None):
     partner_column = find_column_name(frame, ["ĐỐI TÁC", "Đối tác"])
     total_link_column = find_column_name(frame, ["TỔNG LINK", "Tổng link"])
     summary_metric_map = {
-        "views": find_column_name(frame, ["TỔNG LƯỢT XEM", "LƯỢT XEM"]),
-        "likes": find_column_name(frame, ["TỔNG TIM", "TIM"]),
-        "comments": find_column_name(frame, ["TỔNG BÌNH LUẬN", "BÌNH LUẬN"]),
-        "saves": find_column_name(frame, ["TỔNG LƯỢT LƯU", "LƯỢT LƯU"]),
-        "shares": find_column_name(frame, ["TỔNG CHIA SẺ", "CHIA SẺ"]),
+        SUMMARY_TOTAL_KEYS[metric]: find_column_name(frame, [f"TỔNG {metric}", metric])
+        for metric in spec.metric_columns
     }
 
     numeric_summary_keys = {
         normalize_key(item)
-        for item in SUMMARY_COLUMNS
+        for item in spec.summary_columns
         if normalize_key(item) not in {"doi tac", normalize_key(LAST_UPDATE_COLUMN)}
     }
     def summary_value(column, value):
@@ -1475,7 +1520,10 @@ def build_partner_summary_rows(
     selected_partners=None,
     previous_updates=None,
     data_sheet_name=None,
+    platform="tiktok",
 ):
+    # Only this platform's links count, so a mixed sheet yields one summary per platform.
+    spec = get_platform(platform)
     selected_keys = normalize_selected_partner_keys(selected_partner, selected_partners)
     previous_updates = previous_updates or {}
     summary = {}
@@ -1495,13 +1543,13 @@ def build_partner_summary_rows(
 
         metric_columns = {
             header: worksheet_find_column_index(worksheet, [header])
-            for header in METRIC_COLUMNS
+            for header in spec.metric_columns
         }
         last_update_column = worksheet_find_last_update_column_index(worksheet)
 
         for row_index in range(2, (worksheet.max_row or 0) + 1):
             link = clean_text(worksheet.cell(row=row_index, column=link_column).value)
-            if not is_tiktok_link(link):
+            if not spec.is_link(link):
                 continue
 
             partners = worksheet_row_partners(worksheet, row_index, partner_columns)
@@ -1517,7 +1565,7 @@ def build_partner_summary_rows(
                         "ĐỐI TÁC": partner,
                         "TỔNG LINK": 0,
                         # Blank until a known value arrives: a partner whose links are all unknown is not 0.
-                        **{f"TỔNG {metric}": "" for metric in METRIC_COLUMNS},
+                        **{f"TỔNG {metric}": "" for metric in spec.metric_columns},
                         LAST_UPDATE_COLUMN: previous_updates.get(key, ""),
                     },
                 )
@@ -1552,15 +1600,26 @@ def rebuild_summary_sheet(
     selected_partner=None,
     selected_partners=None,
     data_sheet_name=None,
+    platform="tiktok",
 ):
+    spec = get_platform(platform)
     source_sheet = clean_text(data_sheet_name)
     if not source_sheet or source_sheet not in workbook.sheetnames:
         return 0
 
-    summary_sheet = summary_sheet_title_for_data_sheet(source_sheet)
+    summary_sheet = summary_sheet_title_for_data_sheet(source_sheet, spec.key)
     existing_worksheet = workbook[summary_sheet] if summary_sheet in workbook.sheetnames else None
     previous_updates = read_existing_summary_updates(existing_worksheet)
-    insert_index = workbook.sheetnames.index(source_sheet) + 1
+    # Sit right after the data sheet, behind the summaries of platforms listed earlier in the
+    # registry, so rebuilding one platform's tab never reorders the other's.
+    anchor = source_sheet
+    for key in PLATFORMS:
+        if key == spec.key:
+            break
+        sibling = summary_sheet_title_for_data_sheet(source_sheet, key)
+        if sibling in workbook.sheetnames:
+            anchor = sibling
+    insert_index = workbook.sheetnames.index(anchor) + 1
     if summary_sheet in workbook.sheetnames:
         worksheet = workbook[summary_sheet]
         worksheet.delete_rows(1, max(worksheet.max_row or 1, 1))
@@ -1579,16 +1638,18 @@ def rebuild_summary_sheet(
         selected_partners=selected_partners,
         previous_updates=previous_updates,
         data_sheet_name=source_sheet,
+        platform=spec.key,
     )
+    summary_columns = spec.summary_columns
     header_fill = PatternFill("solid", fgColor="0B5ED7")
-    for column_index, header in enumerate(SUMMARY_COLUMNS, start=1):
+    for column_index, header in enumerate(summary_columns, start=1):
         cell = worksheet.cell(row=1, column=column_index, value=header)
         cell.fill = header_fill
         cell.font = Font(color="FFFFFF", bold=True)
         cell.alignment = Alignment(horizontal="center")
 
     for row_index, row in enumerate(rows, start=2):
-        for column_index, header in enumerate(SUMMARY_COLUMNS, start=1):
+        for column_index, header in enumerate(summary_columns, start=1):
             value = row.get(header, "")
             cell = set_cell_literal(worksheet.cell(row=row_index, column=column_index), None if value == "" else value)
             if header == "ĐỐI TÁC":
@@ -1601,7 +1662,7 @@ def rebuild_summary_sheet(
 
     last_row = max(len(rows) + 1, 1)
     worksheet.freeze_panes = "A2"
-    worksheet.auto_filter.ref = f"A1:{get_column_letter(len(SUMMARY_COLUMNS))}{last_row}"
+    worksheet.auto_filter.ref = f"A1:{get_column_letter(len(summary_columns))}{last_row}"
     widths = [8, 38, 12, 16, 12, 16, 16, 14, 20]
     for index, width in enumerate(widths, start=1):
         worksheet.column_dimensions[get_column_letter(index)].width = width

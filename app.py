@@ -909,7 +909,7 @@ async def summary_dashboard(sheet_name: str = "", file_id: str | None = None, pl
         return JSONResponse(content={"error": "File không tồn tại"}, status_code=404)
     try:
         requested_sheet = clean_text(sheet_name) or source_sheet_default(file_id, scan=True, explicit=explicit)
-        summary = await asyncio.to_thread(read_summary_dashboard, target_path, requested_sheet or None)
+        summary = await asyncio.to_thread(read_summary_dashboard, target_path, requested_sheet or None, platform=platform)
         summary["file"] = file_id
         summary["file_id"] = file_id
         summary["fileLabel"] = file_label

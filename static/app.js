@@ -1631,9 +1631,9 @@ async function loadPreview(sheetName = '') {
 
         applyPreviewSource(data);
         if (isSummarySheetName(currentSheetName)) {
-            await renderSummaryDashboard(
-                data.summarySource || dataSheetNameForSummaryTab(currentSheetName, data.sheets || [])
-            );
+            // Ask for the opened tab itself: a data sheet can have one summary tab per
+            // platform, and the server reads that tab with the platform that owns it.
+            await renderSummaryDashboard(currentSheetName);
             return;
         }
 
