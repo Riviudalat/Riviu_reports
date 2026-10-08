@@ -5,6 +5,7 @@
 - `app.py` serves the FastAPI API and WebSocket scan events; `desktop_server.py` integrates the desktop backend.
 - `scraper.py` handles TikTok; `threads_scraper.py` and `threads_session.py` handle Threads metrics and authenticated sessions.
 - `workbook_utils.py`, `google_sheets_sync.py`, and `proxy_utils.py` own workbook operations, Google integration, and proxy transport.
+- `reports.py` builds partner Excel reports, export payloads, and Google push rows; it must not import `app.py`.
 - `templates/index.html` and `static/` contain the HTML, JavaScript, CSS, and icons.
 - `src-tauri/` contains the Rust desktop shell; `desktop/` contains sidecar packaging scripts. Tests live in `tests/`; architecture and release notes live in `docs/`.
 

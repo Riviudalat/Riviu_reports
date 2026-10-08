@@ -9,7 +9,7 @@ import openpyxl
 import pytest
 from playwright.async_api import async_playwright
 
-from app import build_export_payload, build_google_push_rows, build_partner_report
+from reports import build_export_payload, build_google_push_rows, build_partner_report
 from google_sheets_sync import create_result_sheet_title
 
 from threads_scraper import (

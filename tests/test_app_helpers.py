@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from openpyxl import load_workbook
 
-from app import build_google_push_rows, build_partner_report, spreadsheet_date_text
+from reports import build_google_push_rows, build_partner_report, spreadsheet_date_text
 from workbook_utils import SINGLE_LINK_FILL_COLOR, VIDEO_LINK_FILL_COLOR, is_failed_channel_name, metric_number
 
 
@@ -259,7 +259,7 @@ def test_google_push_uses_each_rows_last_update_and_platform_columns():
 
 def test_threads_partner_export_matches_tiktok_report_contract(tmp_path):
     from openpyxl import Workbook
-    from app import build_export_payload
+    from reports import build_export_payload
 
     path = tmp_path / "threads.xlsx"
     book = Workbook()
@@ -565,7 +565,7 @@ def test_build_partner_report_works_when_logo_image_unavailable():
             "CHIA SẺ": 4,
         }
     ]
-    with patch("app.ExcelImage", side_effect=ImportError("You must install Pillow to fetch image objects")):
+    with patch("reports.ExcelImage", side_effect=ImportError("You must install Pillow to fetch image objects")):
         report_bytes = build_partner_report("Partner", rows, apply_min_views=False)
     assert isinstance(report_bytes, bytes)
     assert len(report_bytes) > 0
@@ -573,7 +573,7 @@ def test_build_partner_report_works_when_logo_image_unavailable():
 
 def test_build_export_payload_filename_includes_sheet_and_timestamp(tmp_path):
     import openpyxl
-    from app import build_export_payload
+    from reports import build_export_payload
 
     file_path = tmp_path / "report.xlsx"
     wb = openpyxl.Workbook()
@@ -584,7 +584,7 @@ def test_build_export_payload_filename_includes_sheet_and_timestamp(tmp_path):
     wb.save(file_path)
     wb.close()
 
-    with patch("app.format_filename_datetime", return_value="09-07-2026-13-47"):
+    with patch("reports.format_filename_datetime", return_value="09-07-2026-13-47"):
         payload = build_export_payload(
             str(file_path),
             ["1/2 Circle Coffee"],
@@ -598,7 +598,7 @@ def test_build_export_payload_filename_includes_sheet_and_timestamp(tmp_path):
 
 def test_export_matches_partner_names_like_the_partner_list(tmp_path):
     import openpyxl
-    from app import build_export_payload
+    from reports import build_export_payload
 
     workbook = openpyxl.Workbook()
     sheet = workbook.active

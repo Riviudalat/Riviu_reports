@@ -7,7 +7,7 @@ import openpyxl
 from PIL import Image
 import pytest
 
-import app as backend
+import reports
 from test_ui_review_fixes import run_js
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -18,7 +18,7 @@ def test_partner_report_embeds_platform_icon_and_keeps_table(platform):
     url = "https://www.threads.com/@demo/post/Fixture" if platform == "threads" else "https://www.tiktok.com/@demo/video/123"
     rows = [{"NGÀY AIR": "01/10/2026", "TÊN KÊNH": "demo", "LINK AIR": url, "LƯỢT XEM": 314,
              "TIM": 2, "BÌNH LUẬN": 6, "REPOST": 0, "LƯỢT LƯU": 0, "CHIA SẺ": "", "partners": ["Fixture"]}]
-    payload = backend.build_partner_report("Fixture", rows, platform=platform, apply_min_views=False)
+    payload = reports.build_partner_report("Fixture", rows, platform=platform, apply_min_views=False)
     expected_image = (ROOT / "static/platform-icons" / f"{platform}.png").read_bytes()
     with zipfile.ZipFile(io.BytesIO(payload)) as archive:
         media = [archive.read(name) for name in archive.namelist() if name.startswith("xl/media/")]

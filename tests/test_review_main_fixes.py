@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 import app as backend
 import proxy_utils
+import reports
 import threads_scraper as threads
 from test_backend_review_fixes import isolated_backend
 
@@ -18,7 +19,7 @@ from test_backend_review_fixes import isolated_backend
 def test_report_untrusted_strings_are_literal_excel_text():
     row = {'NGÀY AIR':'=1+1','TÊN KÊNH':'=HYPERLINK("https://example.invalid","x")',
            'LINK AIR':'=1+1','LƯỢT XEM':100,'TIM':0,'BÌNH LUẬN':0,'REPOST':0,'CHIA SẺ':''}
-    payload = backend.build_partner_report('Fixture', [row], platform='threads')
+    payload = reports.build_partner_report('Fixture', [row], platform='threads')
     book = openpyxl.load_workbook(io.BytesIO(payload))
     try:
         sheet = book.active
@@ -38,14 +39,14 @@ def test_multi_partner_export_uses_single_snapshot(tmp_path, monkeypatch):
         book.active.append(['https://www.threads.com/@demo/post/Fixture','demo',views,0,'A','B'])
         book.save(path); book.close()
     write(10)
-    original = backend.build_workbook_rows
+    original = reports.build_workbook_rows
     calls=[]
     def read(snapshot, **kwargs):
         calls.append(snapshot)
         if len(calls)==1: write(999)
         return original(snapshot, **kwargs)
-    monkeypatch.setattr(backend,'build_workbook_rows',read)
-    result = backend.build_export_payload(path,['A','B'],False,0,'Data','threads')
+    monkeypatch.setattr(reports,'build_workbook_rows',read)
+    result = reports.build_export_payload(path,['A','B'],False,0,'Data','threads')
     with zipfile.ZipFile(io.BytesIO(result['content'])) as archive:
         values=[]
         for name in archive.namelist():
