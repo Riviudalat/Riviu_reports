@@ -1,12 +1,14 @@
 """Public Threads post checks, kept separate from TikTok's scraper."""
 
 import asyncio
+import contextlib
 import json
 import os
 import re
 import time
 import urllib.error
 import urllib.request
+from collections import deque
 from decimal import Decimal
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -56,6 +58,13 @@ THREADS_HOSTS = {"threads.com", "www.threads.com", "threads.net", "www.threads.n
 AUTH_FAILURE_MESSAGE = "Phiên Threads không còn hợp lệ; kiểm tra cookie lại."
 BROWSER_POLL_SECONDS = 10
 BROWSER_POLL_INTERVAL = 0.25
+# Metrics whose absence after HTTP justifies a Hybrid browser fallback. Shares
+# are not one: Threads sends reshare_count null to Chromium as well, and the
+# rendered Share button then shows no number (docs/threads-scanning.md).
+CORE_METRICS = ("views", "likes", "comments", "reposts")
+# Hybrid browser fallbacks open at once. Each also takes a route slot, so HTTP
+# keeps the other slots while slow Chromium pages load.
+BROWSER_FALLBACK_LIMIT = 2
 
 
 def resolve_threads_proxies(base_dir, proxy_text="", mode="request"):
@@ -352,6 +361,10 @@ def parse_threads_http(content, requested_url, final_url, documents=None):
     return result
 
 
+def missing_core_metrics(result):
+    return any(result["metrics"].get(key) is None for key in CORE_METRICS)
+
+
 def missing_metric_labels(result):
     return [label for key, label in METRICS.items() if result["metrics"].get(key) is None]
 
@@ -600,8 +613,7 @@ async def fetch_threads_browser(browser, url, proxy_config=None, session_cookies
             # Wait for core evidence, including a header that may hydrate later.
             if extracted is not None and (not session or verified):
                 navigation = merge_results(navigation, _dom_result(identity, extracted))
-            usable = all(navigation["metrics"].get(key) is not None for key in ("views", "likes", "comments", "reposts"))
-            if usable or time.monotonic() >= deadline:
+            if not missing_core_metrics(navigation) or time.monotonic() >= deadline:
                 break
             await asyncio.sleep(BROWSER_POLL_INTERVAL)
         if session and not verified:
@@ -742,31 +754,77 @@ async def _request_once(url, config, session_cookies):
     return await finish_pending_task(asyncio.create_task(asyncio.to_thread(fetch_threads_http, url, **options)))
 
 
-async def _check_url(url, config, mode, session_cookies, get_browser):
-    """HTTP with at most one retry, then an optional Chromium fallback on the same route."""
-    request_result = await _request_once(url, config, session_cookies) if mode != "browser" else None
-    if request_result and request_result.get("error_kind") not in TERMINAL_ERRORS:
-        missing_core = any(request_result["metrics"].get(key) is None for key in ("views", "likes", "comments", "reposts"))
-        if (missing_core and not request_result.get("error")) or request_result.get("error_kind") == "transport":
+async def _request_check(url, config, session_cookies):
+    """HTTP with at most one retry for a transport error or missing core metrics."""
+    request_result = await _request_once(url, config, session_cookies)
+    if request_result.get("error_kind") not in TERMINAL_ERRORS:
+        if (missing_core_metrics(request_result) and not request_result.get("error")) or request_result.get("error_kind") == "transport":
             await asyncio.sleep(0.5)
             retried = await _request_once(url, config, session_cookies)
             request_result = merge_results(request_result, retried)
             if retried.get("error_kind") in TERMINAL_ERRORS:
                 request_result["error_kind"] = retried["error_kind"]
-    if mode == "request" or (request_result and (not missing_metric_labels(request_result) or request_result.get("error_kind") in TERMINAL_ERRORS)):
-        return request_result, "Request"
+    return request_result
+
+
+def needs_browser_fallback(request_result):
+    """Hybrid opens Chromium only for a missing core metric; never for shares alone."""
+    return request_result.get("error_kind") not in TERMINAL_ERRORS and missing_core_metrics(request_result)
+
+
+async def _browser_check(url, config, session_cookies, get_browser):
+    """One Chromium load on the URL's own route (never another proxy or direct)."""
     options = {"proxy_config": config} if config else {}
     if session_cookies is not None:
         options["session_cookies"] = session_cookies
     try:
         active_browser = await get_browser()
     except Exception:
-        browser_result = failure("Không khởi chạy được Chromium cho Threads", "browser_start")
-    else:
-        browser_result = await fetch_threads_browser(active_browser, url, **options)
-    if request_result:
-        return merge_results(request_result, browser_result), "Hybrid"
-    return browser_result, "Browser"
+        return failure("Không khởi chạy được Chromium cho Threads", "browser_start")
+    return await fetch_threads_browser(active_browser, url, **options)
+
+
+class _RouteSlots:
+    """Page loads in flight for one scan (HTTP and Chromium share the limit).
+
+    Item tasks queue here in sheet order. A Hybrid browser fallback is served
+    before queued HTTP work so it never waits behind the rest of the sheet; the
+    caller caps fallbacks below the slot count, so HTTP keeps draining.
+    """
+
+    def __init__(self, size):
+        self._free = size
+        self._waiters = {True: deque(), False: deque()}
+
+    @contextlib.asynccontextmanager
+    async def hold(self, *, fallback=False):
+        if self._free and not any(self._waiters.values()):
+            self._free -= 1
+        else:
+            future = asyncio.get_running_loop().create_future()
+            queue = self._waiters[fallback]
+            queue.append(future)
+            try:
+                await future
+            except asyncio.CancelledError:
+                if future in queue:
+                    queue.remove(future)
+                elif not future.cancelled():
+                    self._release()  # Granted, then cancelled before it ran.
+                raise
+        try:
+            yield
+        finally:
+            self._release()
+
+    def _release(self):
+        self._free += 1
+        for queue in (self._waiters[True], self._waiters[False]):
+            while self._free and queue:
+                future = queue.popleft()
+                if not future.done():
+                    self._free -= 1
+                    future.set_result(None)
 
 
 async def _broadcast_result(websocket_manager, item, result, status, source, processed, total):
@@ -850,7 +908,9 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
         workbook.close()
         return
 
-    semaphore = asyncio.Semaphore(workers)
+    slots = _RouteSlots(workers)
+    # Hybrid fallbacks never take every slot while HTTP work is queued.
+    fallback_slots = asyncio.Semaphore(max(1, min(BROWSER_FALLBACK_LIMIT, workers - 1)))
     processed = success = hidden = errors = 0
     dirty = False
     completed = False
@@ -874,13 +934,23 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
             dirty = False
 
         async def check(index, item):
-            async with semaphore:
-                # A cookie session keeps one route for the whole run; anonymous runs round-robin.
-                config = proxies[0 if session_cookies is not None else index % len(proxies)] if proxies else None
-                result, source = await _check_url(item["url"], config, mode, session_cookies, get_browser)
-                return item, result, source
+            # A cookie session keeps one route for the whole run; anonymous runs round-robin.
+            # HTTP, its retry and any browser fallback of a URL use the same route.
+            config = proxies[0 if session_cookies is not None else index % len(proxies)] if proxies else None
+            if mode == "browser":
+                async with slots.hold():
+                    return item, await _browser_check(item["url"], config, session_cookies, get_browser), "Browser"
+            async with slots.hold():
+                request_result = await _request_check(item["url"], config, session_cookies)
+            if mode == "request" or not needs_browser_fallback(request_result):
+                return item, request_result, "Request"
+            # The HTTP slot is released first: a slow page never holds it.
+            async with fallback_slots, slots.hold(fallback=True):
+                browser_result = await _browser_check(item["url"], config, session_cookies, get_browser)
+            return item, merge_results(request_result, browser_result), "Hybrid"
 
         tasks = [asyncio.create_task(check(index, item)) for index, item in enumerate(items)]
+        closing = None
         try:
             for task in asyncio.as_completed(tasks):
                 item, result, source = await task
@@ -915,6 +985,8 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                     })
                 if processed % 5 == 0:
                     await finish_pending_task(asyncio.create_task(save_pending()))
+            # Every page load is done: Chromium closes while the workbook is finalized.
+            closing = asyncio.ensure_future(close_browser_bounded(browser))
             if sheet_name:
                 await _rebuild_threads_summary(workbook, sheet_name, selected_partners, websocket_manager)
                 dirty = True
@@ -930,9 +1002,9 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                         await save_pending()
                 finally:
                     try:
-                        # Bounded: a slow Chromium exit is force-killed when
-                        # playwright_session stops the driver.
-                        await close_browser_bounded(browser)
+                        # Bounded: a slow Chromium exit is force-killed, and
+                        # playwright_session waits only briefly for the driver.
+                        await (closing if closing is not None else close_browser_bounded(browser))
                     finally:
                         workbook.close()
 

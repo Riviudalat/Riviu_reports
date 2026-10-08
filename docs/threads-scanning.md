@@ -3,9 +3,13 @@
 ## Chế độ quét
 - **Request** gửi HTTP với `Accept` HTML và đọc JSON thống kê gắn đúng permalink. Không cần Chromium để lấy số được nhúng trong response.
 - **Browser** chạy Chromium headless, đọc cả navigation response và JSON/DOM đã render của đúng bài.
-- **Hybrid** lấy HTTP trước, chỉ khởi chạy Chromium khi cần bổ sung. Giá trị HTTP đã xác nhận (kể cả 0) được giữ nguyên.
+- **Hybrid** lấy HTTP trước, chỉ khởi chạy Chromium khi HTTP (sau lần thử lại) vẫn thiếu một chỉ số core (lượt xem, tim, bình luận, repost) hoặc lỗi không thuộc nhóm terminal. Giá trị HTTP đã xác nhận (kể cả 0) được giữ nguyên.
 
-HTTP có tối đa một lần thử lại cho lỗi kết nối tạm thời hoặc thiếu chỉ số core; headless bổ sung tối đa một lần. Không thử lại chỉ vì chia sẻ chưa có số. Không đổi proxy để vượt 403/429 hoặc giới hạn người xem.
+HTTP có tối đa một lần thử lại cho lỗi kết nối tạm thời hoặc thiếu chỉ số core; headless bổ sung tối đa một lần. Không thử lại và không mở Chromium chỉ vì chia sẻ chưa có số: khi `reshare_count` của bài là null, trang Chromium render cũng null và nút Share không hiện số (kiểm live 08/10/2026: 0/4 lần fallback có thêm chia sẻ, mỗi lần 7,7–21 s). Chia sẻ thiếu vẫn để trống. Không đổi proxy để vượt 403/429 hoặc giới hạn người xem.
+
+Số luồng là giới hạn chung cho mọi tải trang của phiên (HTTP và Chromium cộng lại), nên một tuyến proxy/phiên cookie không nhận nhiều yêu cầu đồng thời hơn số luồng. Ở Hybrid, browser fallback trả slot HTTP trước khi chờ Chromium, được tối đa 2 trang cùng lúc (luôn ít hơn số luồng khi có từ 2 luồng) và được ưu tiên slot trống trước link HTTP đang chờ; HTTP giữ các slot còn lại nên không bị fallback chậm chặn.
+
+Hết link thì Chromium được đóng ngay trong lúc lưu workbook: chờ thoát tối đa 0,5 s, sau đó buộc dừng cả cây tiến trình Chromium (Windows), và chỉ chờ driver Playwright thêm tối đa 0,5 s; phần dọn dẹp chậm hơn chạy nền, cập nhật app vẫn chờ nó xong. Trên máy Windows đang tải nặng, tiến trình Chromium đã bị dừng vẫn có thể mất vài giây đến hơn một phút mới biến khỏi danh sách tiến trình; đó là thời gian hệ điều hành dọn tiến trình, không giữ phiên quét.
 
 Số thiếu/null giữ trống, không phải 0. Query views chính xác trả null/mâu thuẫn sẽ xóa số views cũ (đặc biệt số header rút gọn) để không xuất số chưa còn được xác nhận; các metric khác thiếu tạm thời vẫn giữ quy tắc bảo toàn ô hiện có. Không lấy số trong caption, bài gợi ý hoặc Home sau chuyển hướng. Một biến thể JSON có số nhưng ngoài format đã xác minh có thể vẫn cần browser fallback; chỉ bổ sung parser format mới khi có fixture thể hiện provenance.
 
@@ -37,7 +41,7 @@ Một bài có thể trả geoblock trong phiên không đăng nhập nhưng m�
 - **Giới hạn theo vị trí**: root route Threads xác nhận geoblock **trong phiên hiện tại**. Mục See Why có thể giải thích yêu cầu pháp lý theo địa điểm. Mở trang thông báo không phải mở nội dung; đăng nhập có thể thay đổi kết quả ở một số bài đã kiểm, không bảo đảm giải quyết tất cả. Không tự đổi proxy/vị trí để vượt chặn.
 - **Giới hạn người xem**: thông báo audience chung nhưng chưa xác nhận geoblock. Không đồng nghĩa bài đã xóa hoặc nhất thiết do chưa đăng nhập.
 - **invalid_post**: URL chuyển về lỗi invalid_post; không lấy số của Home thay thế. Kiểm lại permalink từ bài mở được.
-- **OK / Success**: đọc được ít nhất một số liệu đã xác nhận, kể cả **0**. Không yêu cầu đủ5 chỉ số để quét thành công. Ô nguồn chưa trả vẫn để trống, có chi tiết `missingMetrics` trong tooltip/log; không suy null thành0. Hybrid vẫn bổ sung số thiếu, không dừng sớm chỉ vì trạng thái OK.
+- **OK / Success**: đọc được ít nhất một số liệu đã xác nhận, kể cả **0**. Không yêu cầu đủ5 chỉ số để quét thành công. Ô nguồn chưa trả vẫn để trống, có chi tiết `missingMetrics` trong tooltip/log; không suy null thành0. Hybrid vẫn bổ sung chỉ số core còn thiếu, không dừng sớm chỉ vì trạng thái OK; thiếu riêng chia sẻ không mở Chromium.
 - **Không số liệu**: không có chỉ số nào được xác nhận. **Lỗi**: đọc bài/truy cập/phiên thất bại. Nhãn Partial cũ được hiển thị OK trong Live nếu có số đã xác nhận, không sửa ngược workbook cũ.
 - **Link hồ sơ**: chỉ có `/@username`, không có `/post/<shortcode>`; log vị trí cần sửa link và không thay số của dòng đó.
 - **Link Threads không hợp lệ** (ví dụ `/@user/post/` thiếu mã bài, `/post/<code>/media`, link cũ `/t/<code>`): log rõ sheet/dòng để sửa link, được tính vào tổng kết phiên và không ghi số vào dòng đó.

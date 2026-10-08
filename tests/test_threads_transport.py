@@ -2,6 +2,7 @@
 import asyncio
 import json
 import threading
+import time
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -397,12 +398,13 @@ def test_browser_launch_failure_keeps_http_metrics(tmp_path, monkeypatch):
     class Playwright(NoBrowser):
         chromium = Chromium()
     monkeypatch.setattr(threads, "async_playwright", Playwright)
-    monkeypatch.setattr(threads, "fetch_threads_http", lambda url: metrics(views=15, likes=0, comments=0, reposts=0))
+    # A missing core metric (REPOST) sends the URL to Chromium; shares alone would not.
+    monkeypatch.setattr(threads, "fetch_threads_http", lambda url: metrics(views=15, likes=0, comments=0))
     events = Events()
     asyncio.run(threads.run_threads_scraper(path, events, mode="hybrid"))
     assert events.data[0]["views"] == 15
     assert events.data[0]["status"] == "Success"
-    assert events.data[0]["missingMetrics"] == ["CHIA SẺ"]
+    assert events.data[0]["missingMetrics"] == ["REPOST", "CHIA SẺ"]
     assert any("Không khởi chạy được Chromium" in line for line in events.logs)
 
 
@@ -437,3 +439,103 @@ def test_cancel_waits_for_owned_http_thread(tmp_path, monkeypatch):
         assert finished.is_set()
     try: asyncio.run(check())
     finally: release.set()
+
+
+class LaunchableChromium:
+    """A browser that launches: a Hybrid fallback really reaches fetch_threads_browser."""
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        pass
+
+    @property
+    def chromium(self):
+        return self
+
+    async def launch(self, **_kwargs):
+        return self
+
+    async def close(self):
+        pass
+
+
+def test_hybrid_shares_only_gap_stays_on_http(tmp_path, monkeypatch):
+    # Live (2026-10-08): when HTTP has reshare_count null, the rendered page has it null
+    # too and the Share button shows no number; 0 of 4 fallbacks ever added shares.
+    path = workbook(tmp_path)
+    calls = []
+    monkeypatch.setattr(threads, "async_playwright", LaunchableChromium())
+    monkeypatch.setattr(threads, "fetch_threads_http", lambda url: calls.append("http") or metrics(views=15, likes=0, comments=0, reposts=0))
+
+    async def browser(*_args, **_kwargs):
+        calls.append("browser")
+        return metrics(views=15, likes=0, comments=0, reposts=0)
+
+    monkeypatch.setattr(threads, "fetch_threads_browser", browser)
+    events = Events()
+    asyncio.run(threads.run_threads_scraper(path, events, mode="hybrid"))
+    assert calls == ["http"]
+    assert events.data[0]["worker"] == "Request"
+    assert events.data[0]["status"] == "Success"
+    assert events.data[0]["missingMetrics"] == ["CHIA SẺ"]
+
+
+def test_slow_hybrid_fallbacks_leave_http_slots_draining(tmp_path, monkeypatch):
+    # Live profile: 4 slow fallbacks held 4 of 5 slots and HTTP ran one at a time.
+    path = workbook(tmp_path, count=12)
+    gaps = {URL + str(index) for index in range(4)}  # sheet order: the fallbacks come first
+    lock = threading.Lock()
+    flight = {"gap": 0, "plain": 0, "browser": 0}
+    peak = {"plain_beside_browser": 0, "browser": 0, "total": 0}
+    http_done = threading.Event()
+    plain_left = [12 - len(gaps)]
+
+    def move(kind, delta):
+        with lock:
+            flight[kind] += delta
+            if flight["browser"]:
+                peak["plain_beside_browser"] = max(peak["plain_beside_browser"], flight["plain"])
+            peak["browser"] = max(peak["browser"], flight["browser"])
+            peak["total"] = max(peak["total"], sum(flight.values()))
+            if kind == "plain" and delta < 0:
+                plain_left[0] -= 1
+                if not plain_left[0]:
+                    http_done.set()
+
+    def http(url):
+        kind = "gap" if url in gaps else "plain"
+        move(kind, 1)
+        try:
+            if kind == "gap":
+                return threads.failure("HTTP 500", "http")  # not terminal, no retry: needs the browser
+            time.sleep(0.1)
+            return metrics(views=1, likes=1, comments=1, reposts=1, shares=1)
+        finally:
+            move(kind, -1)
+
+    async def browser(_browser, url):
+        move("browser", 1)
+        try:
+            # Slow Chromium: it waits until every plain HTTP URL is done (or gives up).
+            await asyncio.to_thread(http_done.wait, 10)
+            return metrics(likes=2, comments=0, reposts=0)
+        finally:
+            move("browser", -1)
+
+    monkeypatch.setattr(threads, "async_playwright", LaunchableChromium())
+    monkeypatch.setattr(threads, "fetch_threads_http", http)
+    monkeypatch.setattr(threads, "fetch_threads_browser", browser)
+    events = Events()
+    started = time.monotonic()
+    asyncio.run(threads.run_threads_scraper(path, events, worker_count=5, mode="hybrid"))
+    assert http_done.is_set()
+    assert peak["plain_beside_browser"] == 3  # HTTP kept the other slots while the browsers waited
+    assert peak["browser"] == 2  # BROWSER_FALLBACK_LIMIT
+    assert peak["total"] <= 5  # one route never carries more than the worker count
+    assert time.monotonic() - started < 5
+    assert sorted(item["worker"] for item in events.data) == ["Hybrid"] * 4 + ["Request"] * 8
