@@ -6,10 +6,9 @@ Pure workbook/report building: no FastAPI, scan state, locks or WebSocket code.
 import io
 import os
 import re
-import shutil
 import sys
-import tempfile
 import zipfile
+from copy import copy
 from datetime import datetime
 
 import pandas as pd
@@ -26,7 +25,8 @@ from workbook_utils import (
     LAST_UPDATE_COLUMN,
     SINGLE_LINK_FILL_COLOR,
     VIDEO_LINK_FILL_COLOR,
-    build_workbook_rows,
+    WorkbookSnapshot,
+    build_partner_report_rows,
     clean_text,
     find_data_sheet_names,
     format_display_datetime,
@@ -258,14 +258,27 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100, 
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = border
 
+    # A data cell's finished style depends only on (column, hyperlink, row fill). openpyxl
+    # registers each style object on assignment, which dominated large exports, so the first
+    # cell of each kind is styled in full and the others copy its style ids.
+    style_templates = {}
     for row_index, (_, source_row) in enumerate(frame.iterrows(), start=data_start_row):
+        row_fill = report_row_fill(spec, source_row)
+        fill_key = row_fill.fgColor.rgb if row_fill is not None else None
         for col_index, header in enumerate(columns, start=1):
             value = report_cell_value(header, source_row.get(header, ""))
             cell = set_cell_literal(ws.cell(row=row_index, column=col_index), value)
+            is_hyperlink = header == "LINK AIR" and isinstance(value, str) and value.startswith("http")
+            if is_hyperlink:
+                cell.hyperlink = value
+            style_key = (header, is_hyperlink, fill_key)
+            template = style_templates.get(style_key)
+            if template is not None:
+                cell._style = copy(template)
+                continue
             cell.border = border
             cell.alignment = Alignment(vertical="top", wrap_text=(header in {"LINK AIR", "TÊN KÊNH"}))
-            if header == "LINK AIR" and isinstance(value, str) and value.startswith("http"):
-                cell.hyperlink = value
+            if is_hyperlink:
                 cell.style = "Hyperlink"
             elif header == "NGÀY AIR":
                 cell.number_format = "dd/mm/yyyy"
@@ -273,10 +286,9 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100, 
             elif header not in REPORT_TEXT_COLUMNS:
                 cell.number_format = "#,##0"
                 cell.alignment = Alignment(horizontal="right", vertical="top")
-        row_fill = report_row_fill(spec, source_row)
-        if row_fill is not None:
-            for col_index in range(1, len(columns) + 1):
-                ws.cell(row=row_index, column=col_index).fill = row_fill
+            if row_fill is not None:
+                cell.fill = row_fill
+            style_templates[style_key] = copy(cell._style)
 
     total_row = len(frame) + data_start_row if len(frame) else None
     if total_row:
@@ -346,23 +358,21 @@ def build_google_push_rows(rows, *, platform="tiktok"):
 
 
 def build_export_payload(target_path, selected_partners, apply_min_views, min_views, requested_sheet_name="", platform="tiktok"):
-    # One immutable copy feeds discovery and every partner report in this export.
+    # One in-memory snapshot feeds discovery and every partner report in this export.
     # Atomic scan saves may replace the source while this function is running.
-    with tempfile.TemporaryDirectory(prefix="riviu-export-") as directory:
-        snapshot = os.path.join(directory, os.path.basename(target_path))
-        shutil.copyfile(target_path, snapshot)
+    with WorkbookSnapshot(target_path) as snapshot:
         return _build_export_payload(snapshot, selected_partners, apply_min_views, min_views, requested_sheet_name, platform)
 
 
-def _build_export_payload(target_path, selected_partners, apply_min_views, min_views, requested_sheet_name="", platform="tiktok"):
+def _build_export_payload(snapshot, selected_partners, apply_min_views, min_views, requested_sheet_name="", platform="tiktok"):
     spec = get_platform(platform)
-    data_sheets = find_data_sheet_names(target_path)
+    data_sheets = find_data_sheet_names(snapshot)
     report_sheet = clean_text(requested_sheet_name) or (data_sheets[0] if data_sheets else "")
     if report_sheet and report_sheet not in data_sheets:
         raise ValueError(f"Sheet {report_sheet} không tồn tại trong file.")
     available_partners = {
         partner_dedup_key(name): name
-        for name in list_workbook_partners(target_path, sheet_name=report_sheet, platform=spec.key)
+        for name in list_workbook_partners(snapshot, sheet_name=report_sheet, platform=spec.key)
     }
     partners = list(dict.fromkeys(
         available_partners[partner_dedup_key(name)]
@@ -374,9 +384,11 @@ def _build_export_payload(target_path, selected_partners, apply_min_views, min_v
     export_timestamp = format_filename_datetime()
     sheet_tag = safe_report_name(report_sheet) if report_sheet else ""
     name_tags = [tag for tag in (spec.file_tag, sheet_tag, export_timestamp) if tag]
+    # The sheet is read once for all partners, not once per partner.
+    rows_by_partner = build_partner_report_rows(snapshot, sheet_name=report_sheet, platform=spec.key)
 
     def report_bytes(partner):
-        rows = build_workbook_rows(target_path, selected_partner=partner, sheet_name=report_sheet, platform=spec.key)
+        rows = rows_by_partner.get(partner_dedup_key(partner), [])
         return build_partner_report(partner, rows, apply_min_views=apply_min_views, min_views=min_views, platform=spec.key)
 
     if len(partners) == 1:

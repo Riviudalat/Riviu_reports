@@ -620,3 +620,47 @@ def test_export_matches_partner_names_like_the_partner_list(tmp_path):
     workbook.save(path)
     payload = build_export_payload(str(path), ["tầm bóp lẩu nướng"], False, 100, "Data")
     assert payload["filename"].startswith("Tầm Bóp Lẩu Nướng")
+
+
+def test_multi_partner_export_parses_the_sheet_once(tmp_path, monkeypatch):
+    import zipfile
+
+    import openpyxl
+    import pandas as pd
+    from reports import build_export_payload
+
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.title = "Data"
+    sheet.append(["LINK AIR", "TÊN KÊNH", "Đối tác", "Đối tác 2", "LƯỢT XEM"])
+    sheet.append(["https://www.tiktok.com/@a/video/1", "Kênh A", "Partner A", "", 500])
+    sheet.append(["https://www.tiktok.com/@b/video/2", "Kênh B", "Partner A", "Partner B", 600])
+    sheet.append(["https://www.tiktok.com/@c/video/3", "Kênh C", "Partner C", "", 700])
+    path = tmp_path / "report.xlsx"
+    workbook.save(path)
+
+    parses = []
+    original_parse = pd.ExcelFile.parse
+
+    def counting_parse(self, sheet_name=0, *args, **kwargs):
+        parses.append(sheet_name)
+        return original_parse(self, sheet_name, *args, **kwargs)
+
+    monkeypatch.setattr(pd.ExcelFile, "parse", counting_parse)
+    payload = build_export_payload(str(path), ["Partner A", "Partner B", "Partner C"], False, 0, "Data")
+
+    # Partner discovery and all three reports share one parse instead of one per partner.
+    assert parses == ["Data"]
+    links = {}
+    with zipfile.ZipFile(io.BytesIO(payload["content"])) as archive:
+        for name in archive.namelist():
+            report = load_workbook(io.BytesIO(archive.read(name)))
+            links[name.split(" Data ")[0]] = [
+                row[0] for row in report.active.iter_rows(min_row=4, min_col=3, max_col=3, values_only=True)
+            ]
+    # Each report keeps its partner's rows in sheet order, then the TỔNG row.
+    assert links == {
+        "Partner A": ["https://www.tiktok.com/@a/video/1", "https://www.tiktok.com/@b/video/2", None],
+        "Partner B": ["https://www.tiktok.com/@b/video/2", None],
+        "Partner C": ["https://www.tiktok.com/@c/video/3", None],
+    }

@@ -938,3 +938,43 @@ def test_data_sheet_defaults_skip_hidden_months(tmp_path):
     assert find_data_sheet_names(path) == ["Tháng 8", "Tháng 6"]
     # A malformed host must be "not a Threads link", never an exception that aborts a scan or export.
     assert is_threads_link("https://[threads.com/@a/post/ABC") is False
+
+
+def count_sheet_parses(monkeypatch):
+    """Record each full pandas parse of a sheet (the 1-row raw-header read is not a parse)."""
+    parses = []
+    original = pd.ExcelFile.parse
+
+    def parse(self, sheet_name=0, *args, **kwargs):
+        if kwargs.get("nrows") is None:
+            parses.append(sheet_name)
+        return original(self, sheet_name, *args, **kwargs)
+
+    monkeypatch.setattr(pd.ExcelFile, "parse", parse)
+    return parses
+
+
+def test_unchanged_workbook_reads_are_cached_until_an_atomic_save(tmp_path, monkeypatch):
+    import openpyxl
+    from workbook_utils import list_workbook_partners_with_link_counts, save_workbook_atomic
+
+    path = tmp_path / "cached.xlsx"
+    book = openpyxl.Workbook()
+    book.active.title = "Data"
+    book.active.append(["Link", "Tên Kênh", "LƯỢT XEM", "Đối tác"])
+    book.active.append(["https://www.tiktok.com/@a/video/1", "Kênh A", 111, "Partner A"])
+    book.save(path)
+    parses = count_sheet_parses(monkeypatch)
+
+    assert read_sheet_preview(str(path), "Data", platform="tiktok")["data"][0]["LƯỢT XEM"] == "111"
+    list_workbook_partners_with_link_counts(str(path), "Data")
+    assert read_sheet_preview(str(path), "Data", platform="tiktok")["data"][0]["LƯỢT XEM"] == "111"
+    assert parses == ["Data"]
+
+    # A scan writes its results through save_workbook_atomic; the next read must see them.
+    book = openpyxl.load_workbook(path)
+    book["Data"]["C2"] = 222
+    save_workbook_atomic(book, str(path))
+    assert read_sheet_preview(str(path), "Data", platform="tiktok")["data"][0]["LƯỢT XEM"] == "222"
+    assert build_workbook_rows(str(path), sheet_name="Data")[0]["LƯỢT XEM"] == 222
+    assert parses == ["Data", "Data"]
