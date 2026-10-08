@@ -6,6 +6,7 @@ import io
 import json
 import socket
 import threading
+import time
 import urllib.request
 
 import openpyxl
@@ -399,6 +400,98 @@ def test_threads_cancellation_joins_autosave_before_cleanup_save(tmp_path, monke
     saved = openpyxl.load_workbook(path)
     assert [saved.active.cell(row, 3).value for row in range(2, 7)] == [999] * 5
     saved.close()
+
+
+class _SlowExitPlaywright:
+    """Chromium whose exit outlasts the scan, as seen live on a busy Windows host.
+
+    A graceful browser.close() takes SLOW_EXIT seconds unless stopping the driver
+    force-kills Chromium first, and the killed process then keeps the driver stop
+    waiting up to SLOW_EXIT more.
+    """
+
+    SLOW_EXIT = 5.0
+
+    def __init__(self):
+        self.events = []
+        self.killed = asyncio.Event()
+        self.exited = asyncio.Event()
+        fake = self
+
+        class Browser:
+            contexts = []
+
+            async def close(self):
+                fake.events.append("close")
+                try:
+                    await asyncio.wait_for(fake.killed.wait(), fake.SLOW_EXIT)
+                except asyncio.TimeoutError:
+                    return
+                raise RuntimeError("fixture: target closed")
+
+        class Chromium:
+            async def launch(self, **_kwargs):
+                return Browser()
+
+        self.chromium = Chromium()
+
+    def __call__(self):
+        return self
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *_args):
+        # Closing the driver's stdin makes it force-kill every browser.
+        self.events.append("stop")
+        self.killed.set()
+        try:
+            await asyncio.wait_for(self.exited.wait(), self.SLOW_EXIT)
+        except asyncio.TimeoutError:
+            pass
+
+
+@pytest.mark.parametrize("platform", ["tiktok", "threads"])
+def test_finished_scan_does_not_wait_for_slow_chromium_exit(tmp_path, monkeypatch, platform):
+    monkeypatch.setattr(scraper, "BROWSER_CLOSE_TIMEOUT", 0.2)
+    monkeypatch.setattr(scraper, "PLAYWRIGHT_STOP_TIMEOUT", 0.2)
+    fake = _SlowExitPlaywright()
+    if platform == "tiktok":
+        path = _scan_fixture(tmp_path, monkeypatch)
+        monkeypatch.setattr(scraper, "async_playwright", fake)
+        scan = lambda: scraper.run_scraper(path, worker_count=1, retries=0, sheet_name="Data",
+                                           use_request=True, browser_fallback=True)
+    else:
+        path = _threads_scan_fixture(tmp_path, monkeypatch)
+        monkeypatch.setattr(threads_scraper, "async_playwright", fake)
+
+        async def browser_result(_browser, _url):
+            return {"channel": "demo", "metrics": {"views": 999, "likes": 1, "comments": 0, "reposts": 0, "shares": 0}, "error": ""}
+
+        monkeypatch.setattr(threads_scraper, "fetch_threads_browser", browser_result)
+        scan = lambda: threads_scraper.run_threads_scraper(path, sheet_name="Data", mode="hybrid")
+
+    async def check():
+        started = time.monotonic()
+        await scan()
+        # Old code awaited both slow exits in full (~2 x SLOW_EXIT) before returning.
+        assert time.monotonic() - started < 2.5
+        # The kill was requested before the scan reported completion.
+        assert fake.events == ["close", "stop"]
+        assert scraper.browser_cleanup_pending()
+        fake.exited.set()
+        for _ in range(100):
+            if not scraper.browser_cleanup_pending():
+                break
+            await asyncio.sleep(0.01)
+        assert not scraper.browser_cleanup_pending()
+
+    asyncio.run(check())
+    saved = openpyxl.load_workbook(path)
+    try:
+        assert saved.active["C2"].value == 999
+    finally:
+        saved.close()
 
 
 def test_threads_failed_final_save_still_closes_browser_and_workbook(tmp_path, monkeypatch):

@@ -514,6 +514,9 @@ def test_desktop_update_gate_rejects_busy_and_unauthenticated_requests(monkeypat
     monkeypatch.setattr(app_state, 'SOURCE_BUSY', True)
     assert client.post('/_desktop/prepare-update', headers=headers).status_code == 409
     monkeypatch.setattr(app_state, 'SOURCE_BUSY', False)
+    monkeypatch.setattr(desktop_server.scraper, 'browser_cleanup_pending', lambda: True)
+    assert client.post('/_desktop/prepare-update', headers=headers).status_code == 409
+    monkeypatch.setattr(desktop_server.scraper, 'browser_cleanup_pending', lambda: False)
     assert client.post('/_desktop/prepare-update', headers=headers).status_code == 200
     assert app_state.DESKTOP_UPDATE_PENDING is True
     assert client.post('/_desktop/cancel-update', headers=headers).status_code == 200

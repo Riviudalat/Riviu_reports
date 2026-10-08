@@ -16,7 +16,7 @@ import openpyxl
 import threads_session
 from playwright.async_api import async_playwright
 
-from scraper import finish_pending_task
+from scraper import close_browser_bounded, finish_pending_task, playwright_session
 from workbook_utils import (
     LAST_UPDATE_COLUMN,
     THREADS_SCAN_STATUS_HEADER,
@@ -856,7 +856,7 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
     completed = False
     started = time.monotonic()
 
-    async with async_playwright() as playwright:
+    async with playwright_session(async_playwright) as playwright:
         browser = None
         browser_lock = asyncio.Lock()
 
@@ -930,8 +930,9 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                         await save_pending()
                 finally:
                     try:
-                        if browser:
-                            await browser.close()
+                        # Bounded: a slow Chromium exit is force-killed when
+                        # playwright_session stops the driver.
+                        await close_browser_bounded(browser)
                     finally:
                         workbook.close()
 
