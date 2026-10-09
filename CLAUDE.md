@@ -9,15 +9,19 @@ The contributor rules above (style, commit format, testing and data-handling pol
 ## Commands (PowerShell, repo root)
 
 ```powershell
-.venv\Scripts\python.exe -m riviu                               # web app on http://127.0.0.1:1231 (`python app.py` is a shim for the same)
-.venv\Scripts\python.exe -m pytest -q tests                        # full suite; always pass `tests` so scratch copies under output/ are not collected
-.venv\Scripts\python.exe -m pytest -q tests/test_threads.py::test_name   # single test
-.venv\Scripts\python.exe -m pytest -q tests -k "proxy and threads"       # by keyword
+uv sync                                                            # .venv from uv.lock, dev group (pytest, PyInstaller, httpx2) included
+uv run python -m riviu                                             # web app on http://127.0.0.1:1231 (`python app.py` is a shim for the same)
+uv run pytest -q tests                                             # full suite; always pass `tests` so scratch copies under output/ are not collected
+uv run pytest -q tests/test_threads.py::test_name                  # single test
+uv run pytest -q tests -k "proxy and threads"                      # by keyword
 node --check riviu/web/static/app.js                               # JS syntax check (also run in CI)
+uv lock --check                                                    # uv.lock matches pyproject.toml (also run in CI)
 npm run desktop:dev                                                # build PyInstaller sidecar, then `tauri dev`
 npm run desktop:build                                              # sidecar + installers (needs Rust toolchain)
 git diff --check
 ```
+
+**Dependencies.** `pyproject.toml` declares them (runtime in `dependencies`, test and build tools in the `dev` group; `[tool.uv] package = false`, so the project itself is never installed and runs from the repo root) and `uv.lock` pins them for every CI target. After changing a dependency, run `uv lock` and regenerate the pip fallback with `uv export --format requirements.txt --no-dev --locked -o requirements.txt`; `tests/test_dependency_lock.py` fails if `requirements.txt` drifts from the lock. End users never run uv by hand: `setup.bat`, `capnhat.bat` and `Khoidong.bat` call `thuvien.bat`, which installs uv if needed and runs `uv sync --locked --no-dev`, or falls back to pip with `requirements.txt`. `capnhat.bat` replaces itself through `git reset --hard` while cmd is still reading it: read the comments above its `:` landing zone and `OLD_CAPNHAT_RESUME_OFFSETS` in `tests/test_batch_scripts.py` before editing it.
 
 Opt-in tests are skipped unless you set env vars: `THREADS_LIVE_URL`, `THREADS_SHARE_URL` (live Threads scans), and `RIVIU_TEST_URL` (UI against a running server). Frontend regression tests in `tests/test_ui_review_fixes.py` and related files run `riviu/web/static/app.js` inside a Node `vm` harness with stubbed DOM, `fetch`, and `WebSocket`. The harness turns the source-row markup that app.js renders into the stub elements, and it fails if any `PLATFORMS[*].dom` id was not rendered. They skip if `node` is not on PATH. The DPAPI tests run only on Windows.
 

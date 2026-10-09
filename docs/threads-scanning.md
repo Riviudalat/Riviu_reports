@@ -60,4 +60,4 @@ Các phiên mới lưu tối đa 50 bản tóm tắt trong `data/threads_scan_hi
 ## Kiểm chứng
 Test transport: `tests/test_threads_transport.py` kiểm Accept, retry, terminal errors, route consistency, cleanup/cancellation và HTTP+Chromium thật qua proxy loopback giả. Test UI/backend nằm trong `tests/test_ui_review_fixes.py` và `tests/test_backend_review_fixes.py`.
 
-Chạy bộ test bằng `python -m pytest -q tests` để không thu thập các bản sao test trong thư mục output. Test nguồn/live không thay kiểm installer/Tauri. Không dùng proxy production hoặc ghi Google Sheets khi chạy fixture.
+Chạy bộ test bằng `uv run pytest -q tests` để không thu thập các bản sao test trong thư mục output. Test nguồn/live không thay kiểm installer/Tauri. Không dùng proxy production hoặc ghi Google Sheets khi chạy fixture.
