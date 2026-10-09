@@ -18,20 +18,22 @@ The Python code is the `riviu` package; run it with `python -m riviu` (the root 
 Run from the repository root in PowerShell:
 
 ```powershell
-python -m venv .venv
-.venv\Scripts\python.exe -m pip install -r requirements.txt
+uv sync
 npm install
-.venv\Scripts\python.exe -m playwright install chromium
-.venv\Scripts\python.exe -m riviu
+uv run playwright install chromium
+uv run python -m riviu
 ```
+
+Dependencies live in `pyproject.toml` and `uv.lock`. `requirements.txt` is generated from the lock (`uv export --format requirements.txt --no-dev --locked -o requirements.txt`) as the pip fallback for source-mode machines without uv; never edit it by hand.
 
 The web app listens on `http://127.0.0.1:1231`.
 
 - `npm run desktop:dev`: build the Python sidecar and start Tauri development.
 - `npm run desktop:build`: build the sidecar and desktop application; requires Rust and platform build tools.
-- `.venv\Scripts\python.exe -m pytest -q tests`: run repository tests, excluding archived copies under `output/` (`pyproject.toml` also limits plain `pytest` to `tests/`).
+- `uv run pytest -q tests`: run repository tests, excluding archived copies under `output/` (`pyproject.toml` also limits plain `pytest` to `tests/`).
 - `node --check riviu/web/static/app.js`: check JavaScript syntax.
-- `.venv\Scripts\python.exe -m pip check`: check installed dependency compatibility.
+- `uv lock --check`: check that `uv.lock` matches `pyproject.toml`.
+- `uvx pip-audit -r requirements.txt --disable-pip --no-deps`: check the locked runtime dependencies for known vulnerabilities.
 
 ## Coding Style & Naming Conventions
 

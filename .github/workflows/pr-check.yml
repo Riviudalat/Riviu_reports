@@ -15,6 +15,12 @@ concurrency:
   group: pr-check-${{ github.ref }}
   cancel-in-progress: true
 
+# uv runs on the interpreter from actions/setup-python (the one the sidecar
+# builds were proven with), never a uv-managed download.
+env:
+  UV_PYTHON: '3.12'
+  UV_PYTHON_PREFERENCE: only-system
+
 jobs:
   quality:
     name: Quality checks
@@ -31,16 +37,27 @@ jobs:
         with:
           python-version: '3.12'
 
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.13'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Check that uv.lock matches pyproject.toml
+        run: uv lock --check
+
+      # tests/test_dependency_lock.py also fails if requirements.txt (the pip
+      # fallback for source-mode machines) is not the export of uv.lock.
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip -r requirements.txt
+          uv sync --locked
           npm ci
 
       - name: Install browser test runtime
-        run: python -m playwright install chromium
+        run: uv run --locked playwright install chromium
 
       - name: Run Python tests
-        run: python -m pytest -q
+        run: uv run --locked pytest -q
 
       - name: Check browser JavaScript syntax
         run: node --check riviu/web/static/app.js
@@ -77,6 +94,12 @@ jobs:
         with:
           python-version: '3.12'
 
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          version: '0.12.13'
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -86,16 +109,16 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y build-essential curl wget file libssl-dev libxdo-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf rpm
 
       - name: Install Python dependencies
-        run: python -m pip install --upgrade pip -r requirements.txt
+        run: uv sync --locked
 
       - name: Install desktop dependencies
         run: npm ci
 
       - name: Build bundled server
-        run: python desktop/build_sidecar.py --target ${{ matrix.target }}
+        run: uv run --locked python desktop/build_sidecar.py --target ${{ matrix.target }}
 
       - name: Smoke-test bundled server
-        run: python desktop/smoke_sidecar.py --target ${{ matrix.target }}
+        run: uv run --locked python desktop/smoke_sidecar.py --target ${{ matrix.target }}
 
       # Unsigned build without updater artifacts: proves the installers build
       # on every target without needing the release signing secrets.

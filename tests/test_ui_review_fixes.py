@@ -1,12 +1,10 @@
 """Regression checks execute the browser script with controlled DOM/network edges."""
 
 import json
-import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
-import sys
 
 import pytest
 
@@ -564,25 +562,6 @@ def test_desktop_startup_update_check_runs_once_the_first_session_snapshot_arriv
         assert.deepEqual(calls,['check_for_update']);
       })()
     """)
-
-
-@pytest.mark.skipif(os.name != "nt", reason="Windows batch expansion regression")
-def test_update_batch_finds_venv_python_in_a_fresh_shell(tmp_path):
-    source = (ROOT / "capnhat.bat").read_text(encoding="utf-8")
-    block = source[source.index('echo %UI_ORANGE%[4/4]'):source.index('for /f "delims=" %%H')]
-    # Execute the real block, substituting only the external pip install with a read-only probe.
-    block = block.replace('-m pip install -r requirements.txt --upgrade --quiet', '--version')
-    python_path = tmp_path / ".venv" / "Scripts" / "python.exe"
-    python_path.parent.mkdir(parents=True)
-    shutil.copy2(sys.executable, python_path)
-    (python_path.parent.parent / 'pyvenv.cfg').write_text(f'home = {sys.base_prefix}\n', encoding='utf-8')
-    script = tmp_path / "check.bat"
-    script.write_text("@echo off\n" + block, encoding="utf-8")
-    env = dict(os.environ)
-    env.pop("VENV_PY", None)
-    env["PYTHONHOME"] = sys.base_prefix
-    result = subprocess.run(["cmd", "/d", "/c", str(script)], cwd=tmp_path, env=env, capture_output=True, text=True)
-    assert "Python 3." in result.stdout, result.stdout + result.stderr
 
 
 def test_desktop_update_gate_rejects_busy_and_unauthenticated_requests(monkeypatch):

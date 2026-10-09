@@ -9,13 +9,16 @@ without a separate Playwright browser install.
 ## Local development
 
 ```bash
-python3 -m venv .venv
-.venv/bin/python -m pip install -r requirements.txt
+uv sync          # .venv from uv.lock, including the dev group (PyInstaller)
 npm install
 npm run desktop:dev
 ```
 
-On Windows, use `.venv\\Scripts\\python.exe` in place of `.venv/bin/python`.
+`npm run desktop:sidecar` (`desktop/run-sidecar-build.mjs`) builds through
+`uv run --locked python desktop/build_sidecar.py` when uv is on PATH, so the
+sidecar bundles exactly the locked packages. Set `PYTHON` to use another
+interpreter; without uv it falls back to the `.venv` interpreter. CI builds the
+same way and then runs `uv run --locked python desktop/smoke_sidecar.py`.
 
 `desktop:dev` first builds the current platform's `riviu-server` sidecar. Data
 created through the desktop app is stored in the operating system's app-data

@@ -22,23 +22,74 @@ set "UI_DIM=%UI_ESC%[90m"
 set "UI_RESET=%UI_ESC%[0m"
 
 :ui_ready
+if /i "%~1"=="--after-update" goto :after_update
 call :render_banner "CAP NHAT PHIEN BAN"
 if /i "%~1"=="--ui-check" exit /b 0
 goto :main
 
-:render_banner
-cls
-echo %UI_ORANGE%========================================================================%UI_RESET%
-echo %UI_ORANGE%   RIVIU REPORTS%UI_RESET%
-echo %UI_TEXT%   %~1%UI_RESET%
-echo %UI_ORANGE%========================================================================%UI_RESET%
-echo.
-exit /b 0
+REM cmd doc file .bat tung lenh theo vi tri byte. "git reset --hard" thay file nay
+REM giua chung, nen capnhat.bat cu doc tiep file MOI tu vi tri cu. Vung ":" ben duoi
+REM phu cac vi tri do cua moi ban cu (test_batch_scripts.py giu danh sach), roi chay
+REM lai file moi voi --after-update. Khong them/bot dong phia tren vung nay.
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+call "%~f0" --after-update
+exit /b
 
 :main
 
 REM Git for Windows: prompt "Unlink ... Should I try again? (y/n)"
-REM GIT_ASK_YESNO=false = luon tra loi "n" ^(bo qua, khong kẹt^).
+REM GIT_ASK_YESNO=false = luon tra loi "n" ^(bo qua, khong ket^).
 set "GIT_ASK_YESNO=false"
 set "GIT_TERMINAL_PROMPT=0"
 set "GCM_INTERACTIVE=Never"
@@ -124,23 +175,35 @@ for /f "delims=" %%B in ('git rev-parse --abbrev-ref HEAD') do set "CUR_BRANCH=%
 echo %UI_OK%[OK]%UI_TEXT% Branch hien tai: %CUR_BRANCH%%UI_RESET%
 
 echo %UI_TEXT%Dang dong bo ve origin/%CUR_BRANCH%...%UI_RESET%
-git -c core.longpaths=true -c gc.auto=0 reset --hard "origin/%CUR_BRANCH%"
-if errorlevel 1 (
-    echo %UI_WARN%[CANH BAO]%UI_TEXT% Reset lan 1 that bai. Dang don lock va thu lai...%UI_RESET%
-    call :cleanup_git_locks
-    git -c core.longpaths=true -c gc.auto=0 -c gc.autopacklimit=0 fetch origin "%CUR_BRANCH%"
+REM Reset va moi buoc sau no nam trong MOT khoi ( ): cmd doc het khoi truoc khi chay,
+REM nen reset thay capnhat.bat khong lam lech lenh dang doc. Trong khoi khong dung
+REM call/goto toi nhan cua file nay; buoc sau cap nhat chay bang file MOI (--after-update).
+(
     git -c core.longpaths=true -c gc.auto=0 reset --hard "origin/%CUR_BRANCH%"
     if errorlevel 1 (
-        echo %UI_ERROR%[LOI]%UI_TEXT% Cap nhat that bai do file .git dang bi khoa.%UI_RESET%
-        echo %UI_TEXT%      Tat Khoidong.bat, dong Cursor/antivirus tam, roi chay lai.%UI_RESET%
-        if "%DID_STASH%"=="1" git -c gc.auto=0 stash pop
-        echo.
-        pause
-        exit /b 1
+        echo %UI_WARN%[CANH BAO]%UI_TEXT% Reset lan 1 that bai. Dang don lock va thu lai...%UI_RESET%
+        if exist ".git\index.lock" del /f /q ".git\index.lock" >nul 2>&1
+        for %%F in (".git\objects\pack\*.lock") do del /f /q "%%~fF" >nul 2>&1
+        git -c core.longpaths=true -c gc.auto=0 -c gc.autopacklimit=0 fetch origin "%CUR_BRANCH%"
+        git -c core.longpaths=true -c gc.auto=0 reset --hard "origin/%CUR_BRANCH%"
+        if errorlevel 1 (
+            echo %UI_ERROR%[LOI]%UI_TEXT% Cap nhat that bai do file .git dang bi khoa.%UI_RESET%
+            echo %UI_TEXT%      Tat Khoidong.bat, dong Cursor/antivirus tam, roi chay lai.%UI_RESET%
+            if "%DID_STASH%"=="1" git -c gc.auto=0 stash pop
+            echo.
+            pause
+            exit /b 1
+        )
     )
+    echo %UI_OK%[OK]%UI_TEXT% Ma nguon da dong bo.%UI_RESET%
+    call "%~f0" --after-update
+    exit /b
 )
-echo %UI_OK%[OK]%UI_TEXT% Ma nguon da dong bo.%UI_RESET%
 
+:after_update
+REM Chay bang capnhat.bat MOI sau reset (ke ca khi capnhat.bat cu dap vao vung ":" o tren).
+setlocal EnableExtensions
+cd /d "%~dp0"
 if "%DID_STASH%"=="1" (
     echo.
     echo %UI_TEXT%Dang khoi phuc thay doi cuc bo da stash...%UI_RESET%
@@ -152,20 +215,15 @@ if "%DID_STASH%"=="1" (
 
 echo.
 echo %UI_ORANGE%[4/4] CAP NHAT THU VIEN%UI_RESET%
-set "VENV_PY=%~dp0.venv\Scripts\python.exe"
-if exist ".venv\Scripts\python.exe" (
-    echo %UI_TEXT%Dang kiem tra requirements.txt...%UI_RESET%
-    "%VENV_PY%" -m pip install -r requirements.txt --upgrade --quiet
-    if errorlevel 1 (
-        echo %UI_WARN%[CANH BAO]%UI_TEXT% Cap nhat thu vien that bai. Chay setup.bat de sua.%UI_RESET%
-    ) else (
-        echo %UI_OK%[OK]%UI_TEXT% Thu vien da cap nhat.%UI_RESET%
-    )
+call "%~dp0thuvien.bat" --called
+if errorlevel 1 (
+    echo %UI_WARN%[CANH BAO]%UI_TEXT% Cap nhat thu vien that bai. Chay setup.bat de sua.%UI_RESET%
 ) else (
-    echo %UI_WARN%[CANH BAO]%UI_TEXT% Chua co .venv. Hay chay setup.bat.%UI_RESET%
+    echo %UI_OK%[OK]%UI_TEXT% Thu vien da cap nhat.%UI_RESET%
 )
 
-for /f "delims=" %%H in ('git rev-parse --short HEAD') do set "HEAD_SHA=%%H"
+set "HEAD_SHA="
+for /f "delims=" %%H in ('git rev-parse --short HEAD 2^>nul') do set "HEAD_SHA=%%H"
 echo.
 echo %UI_ORANGE%========================================================================%UI_RESET%
 echo %UI_OK%   CAP NHAT HOAN TAT%UI_RESET%
@@ -177,6 +235,15 @@ echo %UI_TEXT%3. F5 trang web.%UI_RESET%
 echo.
 pause
 endlocal
+exit /b 0
+
+:render_banner
+cls
+echo %UI_ORANGE%========================================================================%UI_RESET%
+echo %UI_ORANGE%   RIVIU REPORTS%UI_RESET%
+echo %UI_TEXT%   %~1%UI_RESET%
+echo %UI_ORANGE%========================================================================%UI_RESET%
+echo.
 exit /b 0
 
 :cleanup_git_locks

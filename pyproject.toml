@@ -1,3 +1,60 @@
+[project]
+name = "riviu-reports"
+version = "0.1.0"
+description = "Riviu Reports: local FastAPI app that scans TikTok and Threads metrics into partner workbooks."
+readme = "AGENTS.md"
+# CI tests and builds on 3.12. setup.bat finds 3.11-3.14, and the suite passes on
+# 3.11 and 3.14. 3.15 is excluded until the binary dependencies ship wheels for it.
+requires-python = ">=3.11,<3.15"
+dependencies = [
+    "fastapi>=0.135",
+    # fastapi picks a compatible starlette; this floor keeps the starlette security fixes
+    # that the old <0.39 cap blocked (multipart DoS, FileResponse Range, and later ones).
+    "starlette>=1.3.1",
+    # [standard] brings the websockets implementation that the /ws scan channel needs.
+    "uvicorn[standard]>=0.30",
+    # Exact: the desktop sidecar bundles the Chromium revision of this release.
+    "playwright==1.59.0",
+    "openpyxl>=3.1.2",
+    # openpyxl needs Pillow to embed the logo and platform icons in partner reports.
+    "Pillow>=10.0.0",
+    "pandas>=2.1.0",
+    # Jinja2Templates (index page).
+    "jinja2>=3.1.2",
+    # UploadFile / Form routes.
+    "python-multipart>=0.0.18",
+    "google-api-python-client>=2.151.0",
+    "google-auth>=2.35.0",
+    "google-auth-oauthlib>=1.2.1",
+    # google_sheets_sync imports google.auth.transport.requests; google-auth lists
+    # requests only as an extra, so it must not be left to arrive transitively.
+    "requests>=2.32",
+    "PySocks>=1.7.1",
+    "keyring>=25.6,<26; sys_platform != 'win32'",
+    # cryptography 49+ ships no macOS x86_64 wheel; pip then builds it against Homebrew
+    # OpenSSL, and the frozen sidecar crashes on import (libssl clash with Python's own).
+    "cryptography>=46,<49; sys_platform == 'darwin' and platform_machine == 'x86_64'",
+    # google-auth needs cryptography on every platform. Without this line uv would lock
+    # the Intel Mac version above for all of them; with it the rest get fixed releases.
+    "cryptography>=49; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+]
+
+[dependency-groups]
+# Tests and the desktop sidecar build. Not installed by setup.bat / capnhat.bat
+# (`uv sync --no-dev`) and not in requirements.txt.
+dev = [
+    "pytest>=8.0.0",
+    # fastapi.testclient.TestClient. fastapi stopped installing httpx after 0.111, and
+    # starlette 1.x deprecates httpx for its test client in favour of httpx2.
+    "httpx2>=2.13",
+    "pyinstaller>=6.12,<7",
+]
+
+[tool.uv]
+# An application run from the repository root (`python -m riviu`, `app.py`), not a
+# library: uv installs only the dependencies, never the project itself.
+package = false
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["."]
