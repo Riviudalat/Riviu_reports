@@ -67,12 +67,17 @@ if not exist "%VENV_PY%" (
     exit /b 1
 )
 
+:: thuvien.bat chep requirements.txt vao .venv sau moi lan cai thanh cong. Khac nhau
+:: nghia la code da cap nhat (git pull, capnhat.bat cu...) ma thu vien chua theo kip.
+set "NEED_SYNC="
+fc /b "requirements.txt" ".venv\.riviu-requirements.txt" >nul 2>&1
+if errorlevel 1 set "NEED_SYNC=1"
 "%VENV_PY%" -c "import fastapi, uvicorn" >nul 2>&1
-if errorlevel 1 (
-    echo %UI_WARN%[CANH BAO]%UI_TEXT% Thieu FastAPI hoac Uvicorn.%UI_RESET%
-    echo %UI_TEXT%            Dang cai lai thu vien tu requirements.txt...%UI_RESET%
-    call .venv\Scripts\activate.bat
-    "%VENV_PY%" -m pip install -r requirements.txt
+if errorlevel 1 set "NEED_SYNC=1"
+if defined NEED_SYNC (
+    echo %UI_WARN%[CANH BAO]%UI_TEXT% Thu vien chua khop voi ban code hien tai.%UI_RESET%
+    echo %UI_TEXT%            Dang cai/cap nhat thu vien...%UI_RESET%
+    call "%~dp0thuvien.bat" --called
     if errorlevel 1 (
         echo.
         echo %UI_ERROR%[LOI]%UI_TEXT% Cai lai thu vien that bai.%UI_RESET%
