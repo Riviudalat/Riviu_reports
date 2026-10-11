@@ -154,8 +154,8 @@ def test_proxy_request_budget_keeps_photo_r1_candidate(monkeypatch):
         fetched_urls.append(url)
         return url, success_content if url == r1_url else "<html></html>"
 
-    monkeypatch.setattr(scraper, "session_uses_proxy", lambda: True)
-    monkeypatch.setattr(scraper, "fetch_tiktok_html", fake_fetch)
+    monkeypatch.setattr(scraper.throttle, "session_uses_proxy", lambda: True)
+    monkeypatch.setattr(scraper.fetch_html, "fetch_tiktok_html", fake_fetch)
 
     data, _channel, status, _hints, _resolved = scraper._scrape_link_request_impl(source_url)
 
@@ -702,12 +702,12 @@ def test_fetch_profile_channel_name_request_allows_user_id_accounts():
     """
     from riviu.platforms import tiktok as scraper_module
 
-    original = scraper_module.fetch_tiktok_html
-    scraper_module.fetch_tiktok_html = lambda url, timeout=30: (url, profile_html)
+    original = scraper_module.fetch_html.fetch_tiktok_html
+    scraper_module.fetch_html.fetch_tiktok_html = lambda url, timeout=30: (url, profile_html)
     try:
         assert fetch_profile_channel_name_request("user2657244715931") == "Lê Việt Khoa"
     finally:
-        scraper_module.fetch_tiktok_html = original
+        scraper_module.fetch_html.fetch_tiktok_html = original
 
 
 def test_enrich_channel_name_uses_cache_for_generated_user_accounts():
@@ -734,7 +734,7 @@ def test_enrich_channel_name_dedupes_lookups_with_initially_empty_shared_state(m
             "</script>"
         )
 
-    monkeypatch.setattr(scraper, "fetch_tiktok_html", fake_fetch)
+    monkeypatch.setattr(scraper.fetch_html, "fetch_tiktok_html", fake_fetch)
     # run_scraper passes these freshly created (empty) objects.
     cache, attempted = {}, set()
     for media_id in ("1", "2"):
@@ -754,7 +754,7 @@ def test_enrich_channel_name_dedupes_lookups_with_initially_empty_shared_state(m
 def test_enrich_channel_name_skips_profile_fetch_when_sheet_has_real_name(monkeypatch):
     from riviu.platforms import tiktok as scraper
 
-    monkeypatch.setattr(scraper, "fetch_tiktok_html", lambda *_a, **_kw: pytest.fail("profile fetched"))
+    monkeypatch.setattr(scraper.fetch_html, "fetch_tiktok_html", lambda *_a, **_kw: pytest.fail("profile fetched"))
 
     assert enrich_channel_name(
         "https://vt.tiktok.com/ZSdemo/",
@@ -775,13 +775,13 @@ def test_enrich_channel_name_uses_resolved_url_for_short_links():
     """
     from riviu.platforms import tiktok as scraper_module
 
-    original = scraper_module.fetch_tiktok_html
-    scraper_module.fetch_tiktok_html = lambda url, timeout=30: (url, profile_html)
+    original = scraper_module.fetch_html.fetch_tiktok_html
+    scraper_module.fetch_html.fetch_tiktok_html = lambda url, timeout=30: (url, profile_html)
     try:
         name = enrich_channel_name(short_url, "", resolved_url=resolved, profile_lookup_attempted=set())
         assert name == "Uyển Như"
     finally:
-        scraper_module.fetch_tiktok_html = original
+        scraper_module.fetch_html.fetch_tiktok_html = original
 
 
 def test_format_scrape_result_log_error():
@@ -933,8 +933,8 @@ def _patch_browser_navigation(monkeypatch, scraper):
     async def no_sleep(*_args, **_kwargs):
         return None
 
-    monkeypatch.setattr(scraper, "navigate_tiktok_page", fake_navigate)
-    monkeypatch.setattr(scraper.asyncio, "sleep", no_sleep)
+    monkeypatch.setattr(scraper.fetch_browser, "navigate_tiktok_page", fake_navigate)
+    monkeypatch.setattr(scraper.fetch_browser.asyncio, "sleep", no_sleep)
 
 
 def test_browser_scan_rendered_deleted_post_is_unconfirmed_until_oembed_agrees(monkeypatch):
@@ -952,7 +952,7 @@ def test_browser_scan_rendered_deleted_post_is_unconfirmed_until_oembed_agrees(m
     assert page_url == url
 
     asked = []
-    monkeypatch.setattr(scraper, "confirm_tiktok_post_gone", lambda link, *_a, **_k: asked.append(link) or True)
+    monkeypatch.setattr(scraper.gone, "confirm_tiktok_post_gone", lambda link, *_a, **_k: asked.append(link) or True)
     page = _RenderedPage([DELETED_POST_RENDERED])
     _data, _channel, status, attempts, _resolved = asyncio.run(scraper.scrape_with_retries(page, url, retries=2))
     # Page and oEmbed agree: confirmed gone, no further retries.
@@ -967,7 +967,7 @@ def test_browser_transient_not_found_page_is_retried_not_final(monkeypatch):
 
     url = "https://www.tiktok.com/@a/video/7673695796168084756"
     _patch_browser_navigation(monkeypatch, scraper)
-    monkeypatch.setattr(scraper, "confirm_tiktok_post_gone", lambda *_a, **_k: False, raising=False)
+    monkeypatch.setattr(scraper.gone, "confirm_tiktok_post_gone", lambda *_a, **_k: False, raising=False)
 
     page = _RenderedPage([DELETED_POST_RENDERED, LIVE_POST_RENDERED])
     data, _channel, status, attempts, _resolved = asyncio.run(scraper.scrape_with_retries(page, url, retries=2))
@@ -1173,7 +1173,7 @@ def test_configure_request_concurrency_never_reduces_worker_count():
     from riviu.platforms.tiktok import configure_request_concurrency
 
     configure_request_concurrency(20)
-    assert scraper._request_semaphore._value == 20
+    assert scraper.throttle._request_semaphore._value == 20
 
 
 def test_clamp_worker_count_keeps_requested_and_ignores_proxy_count():
@@ -1260,8 +1260,8 @@ def test_scrape_link_retries_transient_network_errors(monkeypatch):
         empty = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
         return empty, "", "Error: [Errno 11001] getaddrinfo failed", False, ""
 
-    monkeypatch.setattr(scraper, "_scrape_link_request_impl", fake_impl)
-    monkeypatch.setattr(scraper.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper.fetch_request, "_scrape_link_request_impl", fake_impl)
+    monkeypatch.setattr(scraper.fetch_request.time, "sleep", lambda *_args, **_kwargs: None)
 
     _data, _channel, status, attempts, _resolved = scraper.scrape_link_with_retries_request(
         "https://www.tiktok.com/@demo/video/1",
@@ -1282,8 +1282,8 @@ def test_scrape_link_retries_metrics_unreadable_without_hints(monkeypatch):
         empty = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
         return empty, "", scraper.STATUS_METRICS_UNREADABLE, False, ""
 
-    monkeypatch.setattr(scraper, "_scrape_link_request_impl", fake_impl)
-    monkeypatch.setattr(scraper.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper.fetch_request, "_scrape_link_request_impl", fake_impl)
+    monkeypatch.setattr(scraper.fetch_request.time, "sleep", lambda *_args, **_kwargs: None)
 
     _data, _channel, status, attempts, _resolved = scraper.scrape_link_with_retries_request(
         "https://www.tiktok.com/@demo/video/1",
@@ -1342,11 +1342,11 @@ def test_request_redirect_to_different_media_does_not_expose_target_url(monkeypa
     """
 
     monkeypatch.setattr(
-        scraper,
+        scraper.fetch_html,
         "fetch_tiktok_html",
         lambda *_args, **_kwargs: ("https://www.tiktok.com/@target/video/999", content),
     )
-    monkeypatch.setattr(scraper, "request_candidate_limit", lambda: 1)
+    monkeypatch.setattr(scraper.throttle, "request_candidate_limit", lambda: 1)
 
     _data, _channel, status, _hints, resolved_url = scraper._scrape_link_request_impl(
         "https://www.tiktok.com/@source/video/123"
@@ -1368,9 +1368,9 @@ def test_request_candidate_terminal_status_is_not_overwritten_by_later_transient
             raise urllib.error.HTTPError(candidate, 404, "Not Found", None, None)
         raise TimeoutError("timed out")
 
-    monkeypatch.setattr(scraper, "fetch_tiktok_html", fake_fetch)
-    monkeypatch.setattr(scraper, "request_candidate_limit", lambda: 2)
-    monkeypatch.setattr(scraper, "note_network_failure", lambda: None)
+    monkeypatch.setattr(scraper.fetch_html, "fetch_tiktok_html", fake_fetch)
+    monkeypatch.setattr(scraper.throttle, "request_candidate_limit", lambda: 2)
+    monkeypatch.setattr(scraper.throttle, "note_network_failure", lambda: None)
 
     _data, _channel, status, _hints, _resolved_url = scraper._scrape_link_request_impl(
         "https://www.tiktok.com/@source/video/123?tracking=1"
@@ -1392,7 +1392,7 @@ def test_request_shell_retry_preserves_terminal_http_error(monkeypatch):
             return candidate, '<script>{"playCount":525}</script>'
         raise urllib.error.HTTPError(candidate, 404, "Not Found", None, None)
 
-    monkeypatch.setattr(scraper, "fetch_tiktok_html", fake_fetch)
+    monkeypatch.setattr(scraper.fetch_html, "fetch_tiktok_html", fake_fetch)
 
     _data, _channel, status, _hints, _resolved_url = scraper._scrape_link_request_impl(
         "https://www.tiktok.com/@source/video/123"
@@ -1420,7 +1420,7 @@ def test_request_prefers_exact_hidden_status_over_earlier_http_404(monkeypatch):
             raise urllib.error.HTTPError(candidate, 404, "Not Found", None, None)
         return candidate, hidden_content
 
-    monkeypatch.setattr(scraper, "fetch_tiktok_html", fake_fetch)
+    monkeypatch.setattr(scraper.fetch_html, "fetch_tiktok_html", fake_fetch)
 
     _data, _channel, status, _hints, _resolved_url = scraper._scrape_link_request_impl(
         "https://www.tiktok.com/@source/video/123?tracking=1"
@@ -1452,8 +1452,8 @@ def test_proxy_candidate_budget_reaches_photo_video_alias(monkeypatch):
             return url, success_content
         return (base_url if url == source_url else url), "<html></html>"
 
-    monkeypatch.setattr(scraper, "session_uses_proxy", lambda: True)
-    monkeypatch.setattr(scraper, "fetch_tiktok_html", fake_fetch)
+    monkeypatch.setattr(scraper.throttle, "session_uses_proxy", lambda: True)
+    monkeypatch.setattr(scraper.fetch_html, "fetch_tiktok_html", fake_fetch)
 
     data, _channel, status, _hints, _resolved_url = scraper._scrape_link_request_impl(source_url)
 
@@ -1549,8 +1549,8 @@ def test_scrape_link_breaks_early_on_no_stats(monkeypatch):
         empty = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
         return empty, "", scraper.STATUS_TIKTOK_NO_STATS, False, ""
 
-    monkeypatch.setattr(scraper, "_scrape_link_request_impl", fake_impl)
-    monkeypatch.setattr(scraper.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper.fetch_request, "_scrape_link_request_impl", fake_impl)
+    monkeypatch.setattr(scraper.fetch_request.time, "sleep", lambda *_args, **_kwargs: None)
 
     _data, _channel, status, attempts, _resolved = scraper.scrape_link_with_retries_request(
         "https://www.tiktok.com/@demo/video/1",
@@ -1587,9 +1587,9 @@ def _request_scan(monkeypatch, pages, oembed_says_gone):
             raise urllib.error.HTTPError(candidate, answer, "Not Found", None, None)
         return candidate, answer
 
-    monkeypatch.setattr(scraper, "fetch_tiktok_html", fake_fetch)
-    monkeypatch.setattr(scraper.time, "sleep", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(scraper, "confirm_tiktok_post_gone",
+    monkeypatch.setattr(scraper.fetch_html, "fetch_tiktok_html", fake_fetch)
+    monkeypatch.setattr(scraper.fetch_request.time, "sleep", lambda *_args, **_kwargs: None)
+    monkeypatch.setattr(scraper.gone, "confirm_tiktok_post_gone",
                         lambda link, *_a, **_k: asked.append(link) or oembed_says_gone, raising=False)
     data, _channel, status, attempts, _resolved = scraper.scrape_link_with_retries_request(
         url, retries=2, channel_overrides={url.casefold(): "Kênh"},
@@ -1689,7 +1689,7 @@ def test_oembed_confirmation_verdicts(monkeypatch, answer, verdict):
             raise urllib.error.HTTPError(request.full_url, code, "x", {}, io.BytesIO(body.encode("utf-8")))
         return _OembedResponse(body)
 
-    monkeypatch.setattr(scraper, "urlopen_request", fake_urlopen)
+    monkeypatch.setattr(scraper.gone, "urlopen_request", fake_urlopen)
 
     assert scraper.confirm_tiktok_post_gone("https://www.tiktok.com/@demo/photo/7670401030210833685?_r=1") is verdict
     # oEmbed rejects every /photo/ URL, so the photo id is asked in the /video/ form.
@@ -1703,8 +1703,8 @@ def test_note_network_failure_pauses_after_streak(monkeypatch):
 
     scraper.configure_request_concurrency(5)
     sleeps = []
-    monkeypatch.setattr(scraper.time, "sleep", lambda seconds: sleeps.append(seconds))
-    monkeypatch.setattr(scraper.time, "time", lambda: 1000.0)
+    monkeypatch.setattr(scraper.throttle.time, "sleep", lambda seconds: sleeps.append(seconds))
+    monkeypatch.setattr(scraper.throttle.time, "time", lambda: 1000.0)
 
     for _ in range(scraper.NETWORK_FAIL_STREAK_PAUSE):
         scraper.note_network_failure()
@@ -1916,7 +1916,7 @@ def test_write_result_never_fetches_channel_profiles(monkeypatch):
     from riviu.platforms import tiktok as scraper
 
     calls = []
-    monkeypatch.setattr(scraper, "fetch_tiktok_html", lambda url, **_kw: calls.append(url) or (url, ""))
+    monkeypatch.setattr(scraper.fetch_html, "fetch_tiktok_html", lambda url, **_kw: calls.append(url) or (url, ""))
     wb = openpyxl.Workbook()
     ws = wb.active
     ws.title = "Data"
@@ -1955,7 +1955,7 @@ def test_write_result_preserves_existing_channel_on_failed_scan(monkeypatch):
     }
     item = {"sheet_name": "Data", "row": 2, "url": "https://www.tiktok.com/@source/video/123"}
     empty = {"Views": "0", "Likes": "0", "Comments": "0", "Saves": "0", "Shares": "0"}
-    monkeypatch.setattr(scraper, "channel_name_for_sheet", lambda *_args, **_kwargs: "Target Channel")
+    monkeypatch.setattr(scraper.channels, "channel_name_for_sheet", lambda *_args, **_kwargs: "Target Channel")
 
     scraper.write_result(
         contexts,
@@ -1988,7 +1988,7 @@ def test_write_result_does_not_use_failed_redirect_for_channel_lookup(monkeypatc
         captured["resolved_url"] = kwargs.get("resolved_url")
         return "Lỗi"
 
-    monkeypatch.setattr(scraper, "channel_name_for_sheet", fake_channel_name_for_sheet)
+    monkeypatch.setattr(scraper.channels, "channel_name_for_sheet", fake_channel_name_for_sheet)
 
     scraper.write_result(
         contexts,
@@ -2037,10 +2037,10 @@ def test_run_scraper_does_not_report_completion_when_final_save_fails(tmp_path, 
         return False, "permission"
 
     history_entries = []
-    monkeypatch.setattr(scraper, "async_playwright", lambda: FakePlaywrightContext())
-    monkeypatch.setattr(scraper, "_run_request_scrape", fake_scrape)
-    monkeypatch.setattr(scraper, "save_workbook", failed_save)
-    monkeypatch.setattr(scraper, "append_scrape_history", lambda _base, entry: history_entries.append(entry))
+    monkeypatch.setattr(scraper.runner, "async_playwright", lambda: FakePlaywrightContext())
+    monkeypatch.setattr(scraper.workers, "_run_request_scrape", fake_scrape)
+    monkeypatch.setattr(scraper.workbook_io, "save_workbook", failed_save)
+    monkeypatch.setattr(scraper.history, "append_scrape_history", lambda _base, entry: history_entries.append(entry))
 
     with pytest.raises(RuntimeError, match="Excel"):
         asyncio.run(
@@ -2135,7 +2135,7 @@ def test_build_result_sheet_failure_removes_partial_tab(monkeypatch):
     def broken_write(*_args):
         raise ValueError("fixture write failure")
 
-    monkeypatch.setattr(scraper, "set_cell_literal", broken_write)
+    monkeypatch.setattr(scraper.workbook_io, "set_cell_literal", broken_write)
     with pytest.raises(ValueError):
         scraper.build_result_sheet(wb, [{"sheet_name": "Data", "row": 2}], "now")
 
@@ -2156,10 +2156,10 @@ def test_run_scraper_resets_request_backoff_in_every_mode(tmp_path, monkeypatch)
     wb.save(path)
     wb.close()
     # Left over from an earlier run that hit 403s / DNS failures.
-    monkeypatch.setattr(scraper, "_request_block_until", time.time() + 1000)
-    monkeypatch.setattr(scraper, "_network_fail_streak", 2)
+    monkeypatch.setattr(scraper.throttle, "_request_block_until", time.time() + 1000)
+    monkeypatch.setattr(scraper.throttle, "_network_fail_streak", 2)
 
     asyncio.run(scraper.run_scraper(str(path), sheet_name="Data", use_request=False))
 
-    assert scraper._request_block_until == 0.0
-    assert scraper._network_fail_streak == 0
+    assert scraper.throttle._request_block_until == 0.0
+    assert scraper.throttle._network_fail_streak == 0
