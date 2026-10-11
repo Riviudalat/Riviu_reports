@@ -220,7 +220,7 @@ def test_http_fetch_rejects_bad_input_and_supplies_redirect_validator(monkeypatc
         calls.append((request.full_url, kwargs))
         return Response()
 
-    monkeypatch.setattr(scraper, "urlopen_request", fake_urlopen)
+    monkeypatch.setattr(scraper.fetch_html, "urlopen_request", fake_urlopen)
     with pytest.raises(ValueError):
         scraper.fetch_tiktok_html("http://127.0.0.1/tiktok.com")
     assert calls == []
@@ -236,8 +236,8 @@ def test_proxy_enabled_runner_rejects_empty_enabled_pool_before_loading(tmp_path
     book = mixed_book()
     book.save(path)
     book.close()
-    monkeypatch.setattr(scraper, "resolve_proxy_configs", lambda *_args, **_kw: configs)
-    monkeypatch.setattr(scraper.openpyxl, "load_workbook", lambda *_args: pytest.fail("must reject before workbook load"))
+    monkeypatch.setattr(scraper.runner, "resolve_proxy_configs", lambda *_args, **_kw: configs)
+    monkeypatch.setattr(scraper.runner.openpyxl, "load_workbook", lambda *_args: pytest.fail("must reject before workbook load"))
     with pytest.raises(ValueError, match="proxy"):
         asyncio.run(scraper.run_scraper(path, use_proxy=True))
 
@@ -340,7 +340,7 @@ def test_cancelled_request_worker_joins_owned_executor(monkeypatch):
         finally:
             ended.set()
 
-    monkeypatch.setattr(scraper, "_run_request_scrape", blocking_scrape)
+    monkeypatch.setattr(scraper.workers, "_run_request_scrape", blocking_scrape)
 
     async def check():
         queue = asyncio.Queue()
@@ -372,7 +372,7 @@ def test_cancelled_request_worker_does_not_dequeue_after_http_failure(monkeypatc
         assert release.wait(5)
         raise ValueError("synthetic HTTP failure")
 
-    monkeypatch.setattr(scraper, "_run_request_scrape", failed_scrape)
+    monkeypatch.setattr(scraper.workers, "_run_request_scrape", failed_scrape)
 
     async def check():
         queue = asyncio.Queue()
@@ -414,8 +414,8 @@ def test_synthetic_copy_scan_preserves_threads_footer_and_unselected_sheet(tmp_p
         async def __aexit__(self, *_args):
             return False
 
-    monkeypatch.setattr(scraper, "async_playwright", NoBrowser)
-    monkeypatch.setattr(scraper, "_run_request_scrape", lambda *_args, **_kwargs: (
+    monkeypatch.setattr(scraper.runner, "async_playwright", NoBrowser)
+    monkeypatch.setattr(scraper.workers, "_run_request_scrape", lambda *_args, **_kwargs: (
         {"Views": "500", "Likes": "50", "Comments": "4", "Saves": "3", "Shares": "2"},
         "Demo", "Success", 1, TIKTOK,
     ))
@@ -465,10 +465,10 @@ def test_cancelled_scan_keeps_proxy_pool_until_http_exits(tmp_path, monkeypatch)
     def track_pool(configs):
         pool_changes.append((list(configs), ended.is_set()))
 
-    monkeypatch.setattr(scraper, "async_playwright", NoBrowser)
-    monkeypatch.setattr(scraper, "resolve_proxy_configs", lambda *_args, **_kw: [proxy])
-    monkeypatch.setattr(scraper, "set_session_proxies", track_pool)
-    monkeypatch.setattr(scraper, "_run_request_scrape", blocking_scrape)
+    monkeypatch.setattr(scraper.runner, "async_playwright", NoBrowser)
+    monkeypatch.setattr(scraper.runner, "resolve_proxy_configs", lambda *_args, **_kw: [proxy])
+    monkeypatch.setattr(scraper.runner, "set_session_proxies", track_pool)
+    monkeypatch.setattr(scraper.workers, "_run_request_scrape", blocking_scrape)
 
     async def check():
         task = asyncio.create_task(scraper.run_scraper(path, sheet_name="Data", use_proxy=True, retries=0))

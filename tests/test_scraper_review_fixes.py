@@ -133,8 +133,8 @@ def _scan_fixture(tmp_path, monkeypatch):
     sheet.append(["https://www.tiktok.com/@demo/video/123", "Demo", 10, 1, 0, 0, 0])
     book.save(path)
     book.close()
-    monkeypatch.setattr(scraper, "async_playwright", _NoBrowser)
-    monkeypatch.setattr(scraper, "_run_request_scrape", lambda *_a, **_kw: (
+    monkeypatch.setattr(scraper.runner, "async_playwright", _NoBrowser)
+    monkeypatch.setattr(scraper.workers, "_run_request_scrape", lambda *_a, **_kw: (
         {"Views": "999", "Likes": "10", "Comments": "1", "Saves": "2", "Shares": "3"},
         "Demo", "Success", 1, "https://www.tiktok.com/@demo/video/123",
     ))
@@ -189,7 +189,7 @@ def test_tiktok_cancel_save_failure_surfaces_and_keeps_original(tmp_path, monkey
     def locked(*_args):
         raise PermissionError("fixture locked destination")
 
-    monkeypatch.setattr(scraper.os, "replace", locked)
+    monkeypatch.setattr(scraper.runner.os, "replace", locked)
     with pytest.raises(RuntimeError, match="Excel"):
         asyncio.run(scraper.run_scraper(path, manager, worker_count=1, retries=0, sheet_name="Data"))
     assert path.read_bytes() == original
@@ -214,9 +214,9 @@ def test_request_scrapes_use_a_per_run_pool_that_is_shut_down(tmp_path, monkeypa
             "Demo", "Success", 1, "https://www.tiktok.com/@demo/video/123",
         )
 
-    monkeypatch.setattr(scraper, "ThreadPoolExecutor", TrackedPool, raising=False)
-    monkeypatch.setattr(scraper, "_run_request_scrape", scrape)
-    monkeypatch.setattr(scraper, "append_scrape_history", lambda *_a: None)
+    monkeypatch.setattr(scraper.runner, "ThreadPoolExecutor", TrackedPool, raising=False)
+    monkeypatch.setattr(scraper.workers, "_run_request_scrape", scrape)
+    monkeypatch.setattr(scraper.history, "append_scrape_history", lambda *_a: None)
     asyncio.run(scraper.run_scraper(path, worker_count=1, retries=0, sheet_name="Data"))
 
     # Not the loop's shared default executor, which also runs workbook saves.
@@ -270,9 +270,9 @@ def test_result_sheet_failure_does_not_skip_summary(tmp_path, monkeypatch):
         book.create_sheet("Summary rebuilt").append(["fresh"])
         return 1
 
-    monkeypatch.setattr(scraper, "build_result_sheet", failed_result)
-    monkeypatch.setattr(scraper, "rebuild_summary_sheet", summary)
-    monkeypatch.setattr(scraper, "append_scrape_history", lambda *_a: None)
+    monkeypatch.setattr(scraper.workbook_io, "build_result_sheet", failed_result)
+    monkeypatch.setattr(scraper.runner, "rebuild_summary_sheet", summary)
+    monkeypatch.setattr(scraper.history, "append_scrape_history", lambda *_a: None)
     asyncio.run(scraper.run_scraper(path, worker_count=1, retries=0, sheet_name="Data", create_result_sheet=True))
     saved = openpyxl.load_workbook(path)
     assert saved["Summary rebuilt"]["A1"].value == "fresh"
@@ -407,7 +407,7 @@ def test_threads_cancellation_joins_autosave_before_cleanup_save(tmp_path, monke
 
 def _needs_browser_fallback(monkeypatch):
     """Request fails retryably, so the link goes to a (fake) browser worker that succeeds."""
-    monkeypatch.setattr(scraper, "_run_request_scrape", lambda *_a, **_kw: (
+    monkeypatch.setattr(scraper.workers, "_run_request_scrape", lambda *_a, **_kw: (
         scraper.empty_metrics(), "", "Error: HTTP 500", 1, "",
     ))
 
@@ -425,10 +425,10 @@ def _needs_browser_fallback(monkeypatch):
     async def browser_scrape(_page, url, _retries, channel_cache=None):
         return {"Views": "999", "Likes": "10", "Comments": "1", "Saves": "2", "Shares": "3"}, "Demo", "Success", 1, url
 
-    monkeypatch.setattr(scraper, "make_browser_context", make_context)
-    monkeypatch.setattr(scraper, "scrape_with_retries", browser_scrape)
+    monkeypatch.setattr(scraper.fetch_browser, "make_browser_context", make_context)
+    monkeypatch.setattr(scraper.fetch_browser, "scrape_with_retries", browser_scrape)
     # Skip the polite pause between browser links.
-    monkeypatch.setattr(scraper.random, "uniform", lambda _low, _high: 0)
+    monkeypatch.setattr(scraper.workers.random, "uniform", lambda _low, _high: 0)
 
 
 class _SlowExitPlaywright:
@@ -504,7 +504,7 @@ def test_finished_scan_does_not_wait_for_slow_chromium_exit(tmp_path, monkeypatc
         path = _scan_fixture(tmp_path, monkeypatch)
         # Hybrid starts Chromium only for a fallback, so make this link need one.
         _needs_browser_fallback(monkeypatch)
-        monkeypatch.setattr(scraper, "async_playwright", fake)
+        monkeypatch.setattr(scraper.runner, "async_playwright", fake)
         scan = lambda: scraper.run_scraper(path, clock, worker_count=1, retries=0, sheet_name="Data",
                                            use_request=True, browser_fallback=True)
     else:
@@ -672,7 +672,7 @@ def test_hybrid_does_not_send_confirmed_unavailable_pages_to_the_browser(monkeyp
                 "https://www.tiktok.com/@a/video/2": scraper.STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED,
                 "https://www.tiktok.com/@a/video/3": "Error: HTTP 404",
                 "https://www.tiktok.com/@a/video/4": "Error: Không đọc được số liệu"}
-    monkeypatch.setattr(scraper, "_run_request_scrape",
+    monkeypatch.setattr(scraper.workers, "_run_request_scrape",
                         lambda _index, url, **_kwargs: (scraper.empty_metrics(), "", statuses[url], 1, ""))
 
     async def scenario():
@@ -747,9 +747,9 @@ def test_total_row_placement_does_constant_whole_sheet_scans(monkeypatch):
 
 def test_scan_setup_and_finish_keep_the_event_loop_responsive(tmp_path, monkeypatch):
     path = _rows_fixture(tmp_path, 3)
-    monkeypatch.setattr(scraper, "async_playwright", _NoBrowser)
-    monkeypatch.setattr(scraper, "_run_request_scrape", _success_for_url)
-    clear_totals, rebuild_summary = scraper.clear_existing_total_rows, scraper.rebuild_summary_sheet
+    monkeypatch.setattr(scraper.runner, "async_playwright", _NoBrowser)
+    monkeypatch.setattr(scraper.workers, "_run_request_scrape", _success_for_url)
+    clear_totals, rebuild_summary = scraper.workbook_io.clear_existing_total_rows, scraper.runner.rebuild_summary_sheet
 
     # Stand-ins for a large workbook's slow setup and finish steps.
     def slow_clear(*args, **kwargs):
@@ -760,8 +760,8 @@ def test_scan_setup_and_finish_keep_the_event_loop_responsive(tmp_path, monkeypa
         time.sleep(0.6)
         return rebuild_summary(*args, **kwargs)
 
-    monkeypatch.setattr(scraper, "clear_existing_total_rows", slow_clear)
-    monkeypatch.setattr(scraper, "rebuild_summary_sheet", slow_summary)
+    monkeypatch.setattr(scraper.workbook_io, "clear_existing_total_rows", slow_clear)
+    monkeypatch.setattr(scraper.runner, "rebuild_summary_sheet", slow_summary)
 
     async def check():
         lags = []
@@ -787,16 +787,16 @@ def test_completed_scan_writes_the_workbook_once_at_the_end(tmp_path, monkeypatc
     # links=5: an autosave due on the last result would only repeat the final save.
     # links=7: the autosave at 5/7 stays for crash safety, then one final save.
     path = _rows_fixture(tmp_path, links)
-    monkeypatch.setattr(scraper, "async_playwright", _NoBrowser)
-    monkeypatch.setattr(scraper, "_run_request_scrape", _success_for_url)
+    monkeypatch.setattr(scraper.runner, "async_playwright", _NoBrowser)
+    monkeypatch.setattr(scraper.workers, "_run_request_scrape", _success_for_url)
     saves = []
-    save = scraper.save_workbook_atomic
+    save = scraper.workbook_io.save_workbook_atomic
 
     def counted_save(workbook, destination):
         saves.append(destination)
         return save(workbook, destination)
 
-    monkeypatch.setattr(scraper, "save_workbook_atomic", counted_save)
+    monkeypatch.setattr(scraper.workbook_io, "save_workbook_atomic", counted_save)
     asyncio.run(scraper.run_scraper(path, worker_count=1, retries=0, save_every=5, sheet_name="Data", base_dir=tmp_path))
     assert len(saves) == expected_saves
     saved = openpyxl.load_workbook(path)
@@ -809,7 +809,7 @@ def test_completed_scan_writes_the_workbook_once_at_the_end(tmp_path, monkeypatc
 
 def test_scan_stopped_during_cleanup_after_last_result_still_saves(tmp_path, monkeypatch):
     path = _rows_fixture(tmp_path, 2)
-    monkeypatch.setattr(scraper, "_run_request_scrape", _success_for_url)
+    monkeypatch.setattr(scraper.workers, "_run_request_scrape", _success_for_url)
     stopping = asyncio.Event()
 
     class StuckStop:
@@ -820,8 +820,8 @@ def test_scan_stopped_during_cleanup_after_last_result_still_saves(tmp_path, mon
             stopping.set()
             await asyncio.sleep(5)
 
-    monkeypatch.setattr(scraper, "async_playwright", StuckStop)
-    monkeypatch.setattr(scraper, "PLAYWRIGHT_STOP_TIMEOUT", 5)
+    monkeypatch.setattr(scraper.runner, "async_playwright", StuckStop)
+    monkeypatch.setattr(scraper.lifecycle, "PLAYWRIGHT_STOP_TIMEOUT", 5)
 
     async def check():
         task = asyncio.create_task(scraper.run_scraper(path, worker_count=1, retries=0, sheet_name="Data", base_dir=tmp_path))
@@ -871,8 +871,8 @@ class _CountingPlaywright:
 def test_hybrid_without_fallback_never_launches_chromium(tmp_path, monkeypatch):
     path = _rows_fixture(tmp_path, 4)
     fake = _CountingPlaywright()
-    monkeypatch.setattr(scraper, "async_playwright", fake)
-    monkeypatch.setattr(scraper, "_run_request_scrape", _success_for_url)
+    monkeypatch.setattr(scraper.runner, "async_playwright", fake)
+    monkeypatch.setattr(scraper.workers, "_run_request_scrape", _success_for_url)
     asyncio.run(scraper.run_scraper(path, worker_count=4, retries=0, sheet_name="Data", base_dir=tmp_path,
                                     use_request=True, browser_fallback=True))
     assert fake.launches == 0
@@ -886,7 +886,7 @@ def test_hybrid_without_fallback_never_launches_chromium(tmp_path, monkeypatch):
 def test_hybrid_fallback_workers_share_one_lazily_launched_chromium(tmp_path, monkeypatch):
     path = _rows_fixture(tmp_path, 4)
     fake = _CountingPlaywright()
-    monkeypatch.setattr(scraper, "async_playwright", fake)
+    monkeypatch.setattr(scraper.runner, "async_playwright", fake)
     _needs_browser_fallback(monkeypatch)
     asyncio.run(scraper.run_scraper(path, worker_count=4, retries=0, sheet_name="Data", base_dir=tmp_path,
                                     use_request=True, browser_fallback=True))
