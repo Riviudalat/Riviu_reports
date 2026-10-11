@@ -253,6 +253,18 @@ def test_upload_multipart_activate_false_preserves_current(client, source_backen
     assert (source_backend / "Uploaded.xlsx").is_file() and selection() == before
 
 
+def test_list_files_lists_the_workbook_catalog_once_per_request(client, monkeypatch):
+    listings = []
+    original = source_files.workbook_file_entries
+    monkeypatch.setattr(source_files, "workbook_file_entries", lambda base_dir: listings.append(base_dir) or original(base_dir))
+    for params in ({"file_id": "B.xlsx", "platform": "threads"}, {"platform": "tiktok"}):
+        listings.clear()
+        state = client.get("/list-files", params=params).json()
+        # Validation, the label and the response share one listing.
+        assert len(listings) == 1
+        assert [entry["id"] for entry in state["files"]] == ["A.xlsx", "B.xlsx"]
+
+
 def test_select_restores_sheets_and_validates_before_committing(client):
     before = selection()
     rejected = client.post("/select-file", json={"file_id": "B.xlsx", "sheet_name": "B Other", "scan_sheet": "A Other", "platform": "threads"})
