@@ -211,6 +211,54 @@ def test_threads_result_reuses_existing_header_spellings():
     assert [sheet.cell(2, column).value for column in range(2, 7)] == ["miri_viu", 15, 2, 3, 0]
 
 
+def test_threads_result_column_cache_writes_the_same_cells(monkeypatch):
+    # The runner remembers resolved column indexes per worksheet; the cells must not change.
+    monkeypatch.setattr(threads_scraper, "format_display_datetime", lambda *_args: "11/10/2026-12:00")
+
+    def book():
+        workbook = openpyxl.Workbook()
+        sparse = workbook.active
+        sparse.title = "Sparse"
+        sparse.append(["Link", "TIM"])  # the other columns are appended as results need them
+        full = workbook.create_sheet("Full")
+        full.append(["Link", "Tên kênh", "Luot xem", "TIM", NFD_COMMENTS, "REPOST", "CHIA SẺ", "Ngày cập nhật"])
+        for index in range(4):
+            sparse.append([f"{URL}{index}", 5])
+            full.append([f"{URL}{index}", "old", 100, 5, 1, 0, 2, "01/10/2026-10:00"])
+        return workbook
+
+    def result(channel="", metric_sources=None, **values):
+        return {"channel": channel, "metrics": {**threads_scraper.empty_metrics(), **values}, "error": "",
+                "metricSources": metric_sources or {}}
+
+    unknown_views = {"views": "view_query_unknown"}
+    steps = [
+        ("Sparse", 2, result(likes=3)),
+        ("Full", 3, result("demo", views=40, likes=0, comments=0, reposts=0, shares=0)),
+        ("Sparse", 4, result("demo", views=0, comments=4)),
+        ("Full", 2, threads_scraper.failure("fixture denied", "access_denied")),
+        ("Sparse", 3, result(metric_sources=unknown_views)),
+        ("Sparse", 5, result("u", shares=9)),
+        ("Full", 4, result(metric_sources=unknown_views, likes=0)),
+        ("Sparse", 2, result("again", views=5, likes=None, reposts=1)),
+    ]
+    plain, cached = book(), book()
+    columns = {}
+    for name, row, values in steps:
+        assert write_threads_result(cached[name], row, values, columns) == write_threads_result(plain[name], row, values)
+
+    def cells(workbook):
+        return {sheet.title: ([list(values) for values in sheet.iter_rows(values_only=True)],
+                              {key: dimension.hidden for key, dimension in sheet.column_dimensions.items()})
+                for sheet in workbook.worksheets}
+
+    assert cells(cached) == cells(plain)
+    # Headers really were appended mid-run, after the cache had entries for this sheet.
+    assert [cell.value for cell in cached["Sparse"][1]] == [
+        "Link", "TIM", "Tên Kênh", "REPOST", threads_scraper.THREADS_SCAN_STATUS_HEADER,
+        threads_scraper.LAST_UPDATE_COLUMN, "LƯỢT XEM", "BÌNH LUẬN", "CHIA SẺ"]
+
+
 def test_threads_save_temp_file_is_hidden_from_workbook_lists(tmp_path):
     target = tmp_path / "threads.xlsx"
     written = []

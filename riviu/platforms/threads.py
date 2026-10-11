@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 from riviu import proxy_utils
 import openpyxl
+from openpyxl.utils import get_column_letter
 from riviu.platforms import threads_session
 from playwright.async_api import async_playwright
 
@@ -65,6 +66,13 @@ CORE_METRICS = ("views", "likes", "comments", "reposts")
 # Hybrid browser fallbacks open at once. Each also takes a route slot, so HTTP
 # keeps the other slots while slow Chromium pages load.
 BROWSER_FALLBACK_LIMIT = 2
+# Mid-run checkpoint: results written into the workbook reach the file once this
+# many seconds have passed since the last save (each save writes the whole
+# workbook). The final and cancellation flushes save whatever is left.
+THREADS_CHECKPOINT_SECONDS = 30
+# Clock of the checkpoint timer; tests replace it (patching time.monotonic would
+# also move asyncio's own clock).
+_checkpoint_clock = time.monotonic
 
 
 def resolve_threads_proxies(base_dir, proxy_text="", mode="request"):
@@ -635,24 +643,42 @@ async def fetch_threads_browser(browser, url, proxy_config=None, session_cookies
             await page.close()
 
 
-def write_threads_result(sheet, row_index, result):
+def _ensure_column(sheet, header, columns, *, hidden=False):
+    """worksheet_ensure_column, remembered per worksheet object when columns (one run's dict) is given.
+
+    Each lookup reads max_column, which scans every cell (~8 ms at 5,000 rows).
+    A run only appends headers to its data sheets, and the first matching header
+    wins, so an index resolved once stays right for the rest of that run.
+    """
+    if columns is None:
+        return worksheet_ensure_column(sheet, header, hidden=hidden)
+    known = columns.setdefault(sheet, {})
+    index = known.get(header)
+    if index is None:
+        index = known[header] = worksheet_ensure_column(sheet, header, hidden=hidden)
+    elif hidden:
+        sheet.column_dimensions[get_column_letter(index)].hidden = True
+    return index
+
+
+def write_threads_result(sheet, row_index, result, columns=None):
     # Shared, diacritic-insensitive header matching: never append a duplicate the preview ignores.
     channel = result.get("channel")
-    channel_column = worksheet_ensure_column(sheet, "Tên Kênh")
+    channel_column = _ensure_column(sheet, "Tên Kênh", columns)
     if channel:
         set_cell_literal(sheet.cell(row=row_index, column=channel_column), channel)
     for key, header in METRICS.items():
         value = result["metrics"].get(key)
         if value is not None:
-            sheet.cell(row=row_index, column=worksheet_ensure_column(sheet, header)).value = value
+            sheet.cell(row=row_index, column=_ensure_column(sheet, header, columns)).value = value
         elif key == "views" and result.get("metricSources", {}).get("views") == "view_query_unknown":
             # Explicit exact-null/conflict invalidates stale display-derived views.
-            sheet.cell(row=row_index, column=worksheet_ensure_column(sheet, header)).value = None
-    worksheet_ensure_column(sheet, "REPOST")
+            sheet.cell(row=row_index, column=_ensure_column(sheet, header, columns)).value = None
+    _ensure_column(sheet, "REPOST", columns)
     status = result_status(result)
-    sheet.cell(row=row_index, column=worksheet_ensure_column(sheet, THREADS_SCAN_STATUS_HEADER, hidden=True)).value = status
+    sheet.cell(row=row_index, column=_ensure_column(sheet, THREADS_SCAN_STATUS_HEADER, columns, hidden=True)).value = status
     if channel or any(value is not None for value in result["metrics"].values()):
-        sheet.cell(row=row_index, column=worksheet_ensure_column(sheet, LAST_UPDATE_COLUMN)).value = format_display_datetime()
+        sheet.cell(row=row_index, column=_ensure_column(sheet, LAST_UPDATE_COLUMN, columns)).value = format_display_datetime()
     return status
 
 
@@ -684,6 +710,34 @@ def collect_threads_rows(workbook, sheet_name="", selected_partners=None, invali
                 continue
             rows.append({"sheet_name": name, "row": index, "url": url, "partners": partners})
     return rows
+
+
+def _load_threads_rows(file_path, sheet_name, selected_partners):
+    """The workbook, its scannable rows, those rows grouped by post, and its invalid
+    Threads links. Blocking: run it off the event loop."""
+    workbook = openpyxl.load_workbook(file_path)
+    invalid_links = []
+    rows = collect_threads_rows(workbook, sheet_name=sheet_name, selected_partners=selected_partners, invalid_links=invalid_links)
+    buckets = {}
+    for row in rows:
+        key = post_identity(row["url"]) or ("share", row["url"].casefold())
+        buckets.setdefault(key, {"url": row["url"], "rows": []})["rows"].append(row)
+    return workbook, rows, list(buckets.values()), invalid_links
+
+
+def _rebuild_summary_or_error(workbook, sheet_name, selected_partners):
+    """Blocking summary rebuild for a worker thread. The error is returned, not raised,
+    so finish_pending_task never lets it hide a cancellation."""
+    try:
+        return rebuild_summary_sheet(
+            workbook,
+            summary_update_time=format_display_datetime(),
+            selected_partners=selected_partners,
+            data_sheet_name=sheet_name,
+            platform="threads",
+        ), None
+    except Exception as error:
+        return 0, error
 
 
 def append_threads_diagnostic(base_dir, entry):
@@ -843,16 +897,15 @@ async def _broadcast_result(websocket_manager, item, result, status, source, pro
 
 
 async def _rebuild_threads_summary(workbook, sheet_name, selected_partners, websocket_manager):
-    """Refresh the sheet's Threads summary tab (never the TikTok one); failure is only a warning."""
-    try:
-        count = rebuild_summary_sheet(
-            workbook,
-            summary_update_time=format_display_datetime(),
-            selected_partners=selected_partners,
-            data_sheet_name=sheet_name,
-            platform="threads",
-        )
-    except Exception as error:
+    """Refresh the sheet's Threads summary tab (never the TikTok one); failure is only a warning.
+
+    The rebuild runs in a worker thread while the run waits, so nothing else touches
+    the workbook meanwhile; a cancellation waits for it, so the cleanup save never
+    writes a half-rebuilt tab.
+    """
+    count, error = await finish_pending_task(asyncio.create_task(asyncio.to_thread(
+        _rebuild_summary_or_error, workbook, sheet_name, selected_partners)))
+    if error is not None:
         if websocket_manager:
             await websocket_manager.broadcast_log(f"CẢNH BÁO: Không cập nhật được sheet Tổng kết ({error})")
         return
@@ -869,15 +922,12 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
         raise ValueError("Bật proxy nhưng chưa có proxy hợp lệ.")
     if session_cookies is not None:
         await _preflight_session(session_cookies, proxies, diagnostics)
-    workbook = openpyxl.load_workbook(file_path)
-    invalid_links = []
-    rows = collect_threads_rows(workbook, sheet_name=sheet_name, selected_partners=selected_partners, invalid_links=invalid_links)
+    # Loading and scanning a large workbook takes a second; keep the server responsive.
+    # Owned like a save: a cancellation waits for the read, so no thread of this run
+    # still holds the file once the scan is released.
+    workbook, rows, items, invalid_links = await finish_pending_task(asyncio.create_task(asyncio.to_thread(
+        _load_threads_rows, file_path, sheet_name, selected_partners)))
     skipped_profiles = sum(1 for invalid in invalid_links if invalid["kind"] == "profile")
-    buckets = {}
-    for row in rows:
-        key = post_identity(row["url"]) or ("share", row["url"].casefold())
-        buckets.setdefault(key, {"url": row["url"], "rows": []})["rows"].append(row)
-    items = list(buckets.values())
     total = len(items)
     workers = max(1, min(int(worker_count or 3), 5 if mode != "request" else 10))
     if diagnostics is not None:
@@ -913,6 +963,10 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
     fallback_slots = asyncio.Semaphore(max(1, min(BROWSER_FALLBACK_LIMIT, workers - 1)))
     processed = success = hidden = errors = 0
     dirty = False
+    last_saved = _checkpoint_clock()
+    # Column indexes of this run's freshly loaded workbook. Only the result loop
+    # uses them, and nothing there inserts, deletes or renames columns.
+    columns = {}
     completed = False
     started = time.monotonic()
 
@@ -929,9 +983,10 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
             return browser
 
         async def save_pending():
-            nonlocal dirty
+            nonlocal dirty, last_saved
             await asyncio.to_thread(save_workbook_atomic, workbook, file_path)
             dirty = False
+            last_saved = _checkpoint_clock()
 
         async def check(index, item):
             # A cookie session keeps one route for the whole run; anonymous runs round-robin.
@@ -950,10 +1005,21 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
             return item, merge_results(request_result, browser_result), "Hybrid"
 
         tasks = [asyncio.create_task(check(index, item)) for index, item in enumerate(items)]
+        waiting = None
         closing = None
         try:
-            for task in asyncio.as_completed(tasks):
-                item, result, source = await task
+            for next_result in asyncio.as_completed(tasks):
+                waiting = asyncio.ensure_future(next_result)
+                while not waiting.done():
+                    # Checkpoint once there are unsaved results and THREADS_CHECKPOINT_SECONDS
+                    # have passed since the last save, even while the next page still loads.
+                    # The save is awaited here, so no row changes while it runs.
+                    due_in = last_saved + THREADS_CHECKPOINT_SECONDS - _checkpoint_clock() if dirty else None
+                    if due_in is not None and due_in <= 0:
+                        await finish_pending_task(asyncio.create_task(save_pending()))
+                    else:
+                        await asyncio.wait({waiting}, timeout=due_in)
+                item, result, source = waiting.result()
                 if session_cookies is not None and result.get("error_kind") in {"auth_invalid", "auth_checkpoint", "auth_unknown"}:
                     if diagnostics is not None:
                         diagnostics["authState"] = result["error_kind"].removeprefix("auth_")
@@ -967,7 +1033,7 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                 else:
                     hidden += 1
                 for row in item["rows"]:
-                    write_threads_result(workbook[row["sheet_name"]], row["row"], result)
+                    write_threads_result(workbook[row["sheet_name"]], row["row"], result, columns)
                     dirty = True
                 if diagnostics is not None:
                     diagnostics.update(processedUrls=processed, success=success, partial=hidden, error=errors)
@@ -983,8 +1049,6 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                         "mode": "partner" if selected_partners else "full", "done": False,
                         "rate": round(processed / max(time.monotonic() - started, 0.1) * 60, 1),
                     })
-                if processed % 5 == 0:
-                    await finish_pending_task(asyncio.create_task(save_pending()))
             # Every page load is done: Chromium closes while the workbook is finalized.
             closing = asyncio.ensure_future(close_browser_bounded(browser))
             if sheet_name:
@@ -993,11 +1057,12 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
             completed = True
         finally:
             async def cleanup():
-                for task in tasks:
+                owned = [*tasks, *([waiting] if waiting is not None else [])]
+                for task in owned:
                     if not task.done():
                         task.cancel()
                 try:
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                    await asyncio.gather(*owned, return_exceptions=True)
                     if dirty:
                         await save_pending()
                 finally:
