@@ -178,6 +178,9 @@ def report_cell_value(header, value, parse_date=None):
             return ""
         if hasattr(value, "to_pydatetime"):
             return value.to_pydatetime()
+        # A column mixing real date cells with date text stays `object`, so plain datetimes arrive here.
+        if isinstance(value, datetime):
+            return value
         parsed_date = (parse_date or parse_report_date)(value)
         return parsed_date.to_pydatetime() if not pd.isna(parsed_date) else clean_text(value)
     if header in REPORT_TEXT_COLUMNS:

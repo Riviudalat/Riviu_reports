@@ -357,6 +357,14 @@ def test_export_date_keeps_vietnamese_day_month_year_order():
     assert spreadsheet_date_text("02-06-2026") == "02/06/2026"
 
 
+def test_partner_report_accepts_plain_datetime_air_dates():
+    # A NGÀY AIR column mixing real date cells with date text reaches the report as plain datetimes.
+    rows = [unknown_metric_row(**{"NGÀY AIR": datetime(2026, 6, 2)}),
+            unknown_metric_row(**{"NGÀY AIR": "03/06/2026", "LINK AIR": "https://www.tiktok.com/@a/video/2"})]
+    report = load_workbook(io.BytesIO(build_partner_report("Partner A", rows, apply_min_views=False))).active
+    assert [report.cell(row=row, column=1).value for row in (4, 5)] == [datetime(2026, 6, 2), datetime(2026, 6, 3)]
+
+
 def unknown_metric_row(**overrides):
     return {
         "NGÀY AIR": "", "TÊN KÊNH": "Channel A", "LINK AIR": "https://www.tiktok.com/@a/video/1",
