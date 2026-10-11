@@ -48,6 +48,17 @@ def build_partner_summary_rows(
     selected_keys = normalize_selected_partner_keys(selected_partner, selected_partners)
     previous_updates = previous_updates or {}
     summary = {}
+    # Rows repeat a few update stamps, and each row compares two; parse each stamp once per rebuild.
+    sort_keys = {}
+
+    def update_sort_key(value):
+        if not isinstance(value, str):
+            return display_datetime_sort_key(value)
+        key = sort_keys.get(value)
+        if key is None:
+            key = sort_keys[value] = display_datetime_sort_key(value)
+        return key
+
     data_sheets = workbook_data_sheet_names(workbook)
     requested_sheet = clean_text(data_sheet_name)
     if requested_sheet:
@@ -93,7 +104,7 @@ def build_partner_summary_rows(
                 bucket["TỔNG LINK"] += 1
                 if last_update_column:
                     update_value = clean_text(worksheet.cell(row=row_index, column=last_update_column).value)
-                    if update_value and display_datetime_sort_key(update_value) > display_datetime_sort_key(bucket[LAST_UPDATE_COLUMN]):
+                    if update_value and update_sort_key(update_value) > update_sort_key(bucket[LAST_UPDATE_COLUMN]):
                         bucket[LAST_UPDATE_COLUMN] = update_value
                 for metric, column_index in metric_columns.items():
                     if column_index:
