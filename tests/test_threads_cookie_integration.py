@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from riviu import app as backend
-from riviu import proxy_utils
+from riviu import proxy_utils, scan_service, server_context
 from riviu.platforms import threads
 from riviu.platforms import threads_session as sessions
 from test_backend_review_fixes import isolated_backend, run_fixture_websocket_start
@@ -34,7 +34,7 @@ class Store:
 @pytest.fixture
 def session_backend(isolated_backend, monkeypatch):
     manager = sessions.ThreadsSession(isolated_backend, store=Store())
-    monkeypatch.setattr(backend, "threads_session_manager", lambda: manager)
+    monkeypatch.setattr(server_context, "threads_session_manager", lambda: manager)
     async def verified(cookies, proxy_config=None):
         return {"state": "valid", "checkedAt": "fixture", "message": "Verified", "route": "direct"}
     monkeypatch.setattr(sessions, "verify_cookies", verified)
@@ -263,7 +263,7 @@ def test_websocket_auth_snapshot_follows_proxy_without_extra_consent(session_bac
         generation = imported["status"]["generation"]
         calls = []
         async def runner(path, options, **kwargs): calls.append(options)
-        monkeypatch.setattr(backend, "run_scraper_safely", runner)
+        monkeypatch.setattr(scan_service, "run_scraper_safely", runner)
         messages = await run_fixture_websocket_start(monkeypatch, {
             "platform": "threads", "use_threads_session": True, "threads_session_generation": generation,
             "use_proxy": True, "proxy_text": "proxy.example:8080", "threads_session_proxy_consent": consent,
@@ -285,7 +285,7 @@ def test_only_session_errors_invalidate_session_and_nothing_leaks(session_backen
         imported = await session_backend.import_cookie([COOKIE])
         before = session_backend.status()["state"]
         async def failed(*_args, **_kwargs): raise error()
-        monkeypatch.setattr(backend, "run_threads_scraper", failed)
+        monkeypatch.setattr(scan_service, "run_threads_scraper", failed)
         await backend.run_scraper_safely(str(isolated_backend / "A.xlsx"), backend.scan_options(
             platform="threads", sheet_name="Data",
             threads_cookies=session_backend.snapshot(), threads_generation=imported["status"]["generation"]))

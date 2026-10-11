@@ -36,7 +36,7 @@ finds them in the repository. Chromium is bundled inside it
 
 ### What the bundle contains
 
-Every browser launch in the app (`riviu/platforms/tiktok.py`,
+Every browser launch in the app (`riviu/platforms/tiktok/`,
 `riviu/platforms/threads.py`, `riviu/platforms/threads_session.py`) is headless Chromium without a `channel`. Playwright runs
 those launches with `chromium-headless-shell`, never with the full Chromium
 build. The build therefore runs `playwright install --only-shell chromium`, and

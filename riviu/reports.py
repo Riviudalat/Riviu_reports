@@ -1,7 +1,7 @@
 """Partner report workbooks, export payloads and Google push rows.
 
 Pure workbook/report building: no FastAPI, scan state, locks or WebSocket code.
-`riviu/app.py` owns the routes that call into this module; this module must not import `riviu.app`.
+`riviu/api/export.py` and `riviu/api/google.py` own the routes that call into this module; this module must not import `riviu.app`.
 """
 import io
 import os

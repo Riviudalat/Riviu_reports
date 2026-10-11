@@ -1,1 +1,1 @@
-"""Per-platform scanners: TikTok (tiktok.py) and Threads (threads.py, threads_session.py)."""
+"""Per-platform scanners: TikTok (the tiktok/ package) and Threads (threads.py, threads_session.py)."""

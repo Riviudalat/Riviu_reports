@@ -1,13 +1,4 @@
-let ws;
-let reportPartners = [];
-let reportSheetName = '';
-let reportSheetUpdating = false;
-let selectedPartners = new Set();
-let failedLinks = [];
-let duplicateLinks = [];
-let duplicateRowCount = 0;
-let googleOAuthAuthorized = false;
-
+// ---- Platform registry ------------------------------------------------------
 // Everything that differs between platforms lives here. Adding a platform means adding
 // one entry (plus its icon in static/platform-icons/ and backend support); the platform
 // bar, the source rows in the source drawer (element ids from `dom`), link matching,
@@ -96,6 +87,17 @@ for (const [name, key] of Object.entries({
     });
 }
 
+// ---- Shared state -----------------------------------------------------------
+let ws;
+let reportPartners = [];
+let reportSheetName = '';
+let reportSheetUpdating = false;
+let selectedPartners = new Set();
+let failedLinks = [];
+let duplicateLinks = [];
+let duplicateRowCount = 0;
+let googleOAuthAuthorized = false;
+
 let sourceBusy = false;
 let sourceRevision = 0;
 let sourcesInitialized = false;
@@ -112,21 +114,26 @@ let desktopUpdateCheckInFlight = false;
 let desktopUpdateInstalling = false;
 let desktopStartupUpdatePending = false;
 let websocketSessionReady = false;
-const WS_RECONNECT_BASE_MS = 1000;
-const WS_RECONNECT_MAX_MS = 5000;
-const WS_LOST_AFTER_MS = 15000;
-const CONNECTION_RECONNECTING_TEXT = 'Đang kết nối lại tới server…';
-const CONNECTION_LOST_TEXT = 'Mất kết nối tới server. Ứng dụng vẫn tự thử lại, hoặc tải lại trang (F5).';
-let wsReconnectFailures = 0;
-let wsDisconnectedAt = 0;
-let wsRetryPending = false;
-let wsConnectionLost = false;
+
 let scanPhase = 'idle';
 let currentRunContext = null;
 let lastTerminalStatus = '';
 const liveResultClasses = new Map();
 let lastProgressData = null;
 const readRequestSequence = { files: 0, preview: 0, summary: 0, partners: 0 };
+
+let proxyListText = '';
+let proxySavedCount = 0;
+const SERVER_BUILD_KEY = 'serverProxyBuild';
+// localStorage copy of the source preferences, kept only while the server cannot save them.
+const SOURCE_PREFERENCES_FALLBACK_KEY = 'riviuPlatformSourcesV1';
+let threadsCookieState = { configured: false, state: 'none', generation: '' };
+let threadsCookieBusy = false;
+let threadsCookieFocus = null;
+let threadsCookieSource = 'file';
+let threadsCookieRevision = 0;
+
+// ---- DOM handles and button markup ------------------------------------------
 const startBtn = document.getElementById('startBtn');
 const cancelBtn = document.getElementById('cancelBtn');
 const workerCountSelect = document.getElementById('workerCountSelect');
@@ -137,32 +144,113 @@ const proxyTestResult = document.getElementById('proxyTestResult');
 const proxyModalSummary = document.getElementById('proxyModalSummary');
 const proxyCard = document.getElementById('proxyCard');
 const proxyConfigBtn = document.getElementById('proxyConfigBtn');
-let proxyListText = '';
-let proxySavedCount = 0;
-const SERVER_BUILD_KEY = 'serverProxyBuild';
-let threadsCookieState = { configured: false, state: 'none', generation: '' };
-let threadsCookieBusy = false;
-let threadsCookieFocus = null;
-let threadsCookieSource = 'file';
-let threadsCookieRevision = 0;
+
+const scanSheetSelect = document.getElementById('scanSheetSelect');
 
 const BTN_START_IDLE = '<span class="material-icons-outlined">play_arrow</span><span>Bắt đầu quét</span>';
 const BTN_START_BUSY = '<span class="material-icons-outlined">hourglass_top</span><span>Đang quét...</span>';
 const BTN_CANCEL_IDLE = '<span class="material-icons-outlined">stop_circle</span><span>Hủy</span>';
 const BTN_CANCEL_BUSY = '<span class="material-icons-outlined">hourglass_top</span><span>Đang hủy...</span>';
 
-function setProxyCardState({ ready = false, active = false } = {}) {
-    if (!proxyCard) return;
-    proxyCard.classList.toggle('ready', ready);
-    proxyCard.classList.toggle('active', active);
+// ---- Shared helpers ---------------------------------------------------------
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
 }
 
-function syncProxyCardActiveState() {
-    const ready = proxySavedCount > 0;
-    setProxyCardState({ ready, active: ready && Boolean(proxyUseCheckbox && proxyUseCheckbox.checked) });
+function normalizeVietnameseKey(value) {
+    return String(value || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/đ/g, 'd')
+        .replace(/Đ/g, 'D')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
 }
-const scanSheetSelect = document.getElementById('scanSheetSelect');
 
+function formatNumber(value) {
+    const number = Number(value || 0);
+    return Number.isFinite(number) ? number.toLocaleString('vi-VN') : '0';
+}
+
+// Unknown metrics stay blank on every platform; only a confirmed number (including 0) is shown.
+function formatResultNumber(value) {
+    return value === null || value === undefined || value === '' ? '' : formatNumber(value);
+}
+
+function formatDuration(seconds) {
+    if (seconds === null || seconds === undefined || seconds === '') return '';
+    const sec = Math.max(parseInt(seconds, 10) || 0, 0);
+    if (sec < 60) return `${sec}s`;
+    const minutes = Math.floor(sec / 60);
+    const remain = sec % 60;
+    if (minutes < 60) return `${minutes}m ${remain}s`;
+    const hours = Math.floor(minutes / 60);
+    const remainMin = minutes % 60;
+    return `${hours}h ${remainMin}m`;
+}
+
+function fileDisplayLabel(file) {
+    return typeof file === 'string' ? file : (file?.label || file?.id || '');
+}
+
+function filenameFromDisposition(disposition, fallback) {
+    const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    if (utf8Match) return decodeURIComponent(utf8Match[1]);
+    const plainMatch = disposition.match(/filename="?([^";]+)"?/i);
+    return plainMatch ? plainMatch[1] : fallback;
+}
+
+function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+}
+
+// dd-mm-yyyy-HH-MM, the local timestamp used in exported file names.
+function fileTimestamp(now = new Date()) {
+    const pad = value => String(value).padStart(2, '0');
+    return `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()}-${pad(now.getHours())}-${pad(now.getMinutes())}`;
+}
+
+// navigator.clipboard is missing outside secure contexts; fall back to a hidden textarea.
+async function copyText(text) {
+    if (navigator.clipboard) {
+        await navigator.clipboard.writeText(text);
+        return;
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    document.body.appendChild(textarea);
+    textarea.select();
+    document.execCommand('copy');
+    textarea.remove();
+}
+
+function postJson(url, body) {
+    return fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+    });
+}
+
+function setModalOpen(modal, open) {
+    modal.classList.toggle('active', open);
+    modal.setAttribute('aria-hidden', open ? 'false' : 'true');
+}
+
+// ---- Platform switch and workspace layout -----------------------------------
 function renderPlatformBar() {
     const bar = document.getElementById('platformBar');
     if (!bar) return;
@@ -218,15 +306,23 @@ function applyPlatformUI(platform) {
     if (reportLabel) reportLabel.textContent = `Đối tác & báo cáo ${config.label}`;
 }
 
-function resetProgressDisplay() {
-    for (const id of ['processedLinks', 'successLinks', 'hiddenCountBadge', 'failedCountBadge']) {
-        document.getElementById(id).textContent = '0';
-    }
-    document.getElementById('progressBar').style.width = '0%';
-    document.getElementById('progressText').textContent = 'Sẵn sàng chờ lệnh...';
+const PROGRESS_COUNTER_IDS = ['processedLinks', 'successLinks', 'hiddenCountBadge', 'failedCountBadge'];
+
+function resetProgressCounters(ids = PROGRESS_COUNTER_IDS) {
+    for (const id of ids) document.getElementById(id).textContent = '0';
+}
+
+function clearProgressStatus() {
     const statusEl = document.getElementById('progressStatus');
     statusEl.textContent = '';
     statusEl.className = 'progress-status';
+}
+
+function resetProgressDisplay() {
+    resetProgressCounters();
+    document.getElementById('progressBar').style.width = '0%';
+    document.getElementById('progressText').textContent = 'Sẵn sàng chờ lệnh...';
+    clearProgressStatus();
 }
 
 // Drop rows, counters and failure/duplicate lists that belong to another run.
@@ -243,7 +339,7 @@ function clearLiveResults({ duplicates = true, emptyText = '' } = {}) {
 }
 
 async function setPlatform(platform) {
-    if (!isPlatform(platform) || scanIsBusy() || desktopUpdateInstalling || sourceBusy || threadsCookieBusy || activePlatform === platform) return;
+    if (!isPlatform(platform) || uiIsBusy() || activePlatform === platform) return;
     saveActiveSource();
     sourceBusy = true;
     ++sourceRevision;
@@ -402,6 +498,7 @@ function setWorkspaceTab(tabName) {
     if (meta.panel === 'live') showNewestLiveResults();
 }
 
+// ---- Logs and notifications -------------------------------------------------
 function cmdLine(type, message) {
     const prefix = type ? `[${type}] ` : '';
     return `${prefix}${message}`;
@@ -417,14 +514,12 @@ function detectLogLevel(msg, explicitLevel = '') {
         || text.includes('Mất kết nối')
         || text.includes('thất bại')
         || text.includes('Error:')
-        || text.includes('[4/10] Lỗi')
     ) {
         return 'ERROR';
     }
     if (text.includes('CẢNH BÁO') || text.includes('Đang chờ') || text.includes('Ẩn số liệu')) return 'WARN';
     if (
         text.includes('OK •')
-        || text.includes('] OK •')
         || text.includes('thành công')
         || text.includes('HOÀN THÀNH')
         || text.includes('--- QUÉT HOÀN TẤT ---')
@@ -454,6 +549,7 @@ function renderScrapeLogHtml(details, level) {
     const url = details.url
         ? `<a class="log-url" href="${escapeHtml(details.url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(details.url)}</a>`
         : '';
+    const tail = `${worker}${elapsed}${rows}${url ? `<div class="log-url-row">${url}</div>` : ''}`;
 
     if (details.kind === 'scrape_ok') {
         const m = details.metrics || {};
@@ -465,17 +561,17 @@ function renderScrapeLogHtml(details, level) {
             renderLogMetricChip('Lưu', m.saves, 'log-saves', 'Lượt lưu / bookmark trên TikTok'),
             renderLogMetricChip('Chia sẻ', m.shares, 'log-shares', 'Số lần chia sẻ'),
         ].join('');
-        return `<div class="log-rich log-rich-ok">${progress}<span class="log-badge log-ok">OK</span>${channel}<span class="log-metrics">${metrics}</span>${worker}${elapsed}${rows}${url ? `<div class="log-url-row">${url}</div>` : ''}</div>`;
+        return `<div class="log-rich log-rich-ok">${progress}<span class="log-badge log-ok">OK</span>${channel}<span class="log-metrics">${metrics}</span>${tail}</div>`;
     }
 
     if (details.kind === 'scrape_hidden') {
-        return `<div class="log-rich log-rich-warn">${progress}<span class="log-badge log-warn">Ẩn số liệu</span><span class="log-meta">TikTok không trả lượt xem cho post này</span>${worker}${elapsed}${rows}${url ? `<div class="log-url-row">${url}</div>` : ''}</div>`;
+        return `<div class="log-rich log-rich-warn">${progress}<span class="log-badge log-warn">Ẩn số liệu</span><span class="log-meta">TikTok không trả lượt xem cho post này</span>${tail}</div>`;
     }
 
     if (details.kind === 'scrape_error') {
         const reason = `<span class="log-error-text">${escapeHtml(details.status || 'Lỗi không xác định')}</span>`;
         const attempts = details.attempts ? `<span class="log-meta">Thử ${details.attempts} lần</span>` : '';
-        return `<div class="log-rich log-rich-error">${progress}<span class="log-badge log-error">Lỗi</span>${reason}${attempts}${worker}${elapsed}${rows}${url ? `<div class="log-url-row">${url}</div>` : ''}</div>`;
+        return `<div class="log-rich log-rich-error">${progress}<span class="log-badge log-error">Lỗi</span>${reason}${attempts}${tail}</div>`;
     }
 
     return escapeHtml(cmdLine(level, ''));
@@ -507,8 +603,10 @@ function addLog(msg, options = {}) {
 }
 
 const TOAST_ICONS = { success: 'check_circle', error: 'error', warn: 'warning', info: 'info' };
+const TOAST_TIMEOUT_MS = 4200;
+const TOAST_FADE_MS = 220;
 
-function showToast(message, level = 'info', timeout = 4200) {
+function showToast(message, level = 'info', timeout = TOAST_TIMEOUT_MS) {
     const stack = document.getElementById('toastStack');
     if (!stack) return;
     const toast = document.createElement('div');
@@ -518,7 +616,7 @@ function showToast(message, level = 'info', timeout = 4200) {
     setTimeout(() => {
         toast.style.opacity = '0';
         toast.style.transform = 'translateX(12px)';
-        setTimeout(() => toast.remove(), 220);
+        setTimeout(() => toast.remove(), TOAST_FADE_MS);
     }, timeout);
 }
 
@@ -528,18 +626,6 @@ function notify(message, level = 'info') {
     showToast(message, level);
 }
 
-function isNoStatsStatus(status) {
-    const text = String(status || '');
-    return (
-        text.includes('Ẩn số liệu')
-        || text.startsWith('Partial:')
-        || text.includes('TikTok không trả số liệu')
-        || text.includes('TikTok không trả lượt xem')
-        || text.includes('không trả số liệu')
-        || text.includes('không trả lượt xem')
-    );
-}
-
 function getLogText() {
     return Array.from(document.querySelectorAll('#logs .log-line'))
         .map(line => line.dataset.logText || line.textContent.trim())
@@ -547,10 +633,7 @@ function getLogText() {
 }
 
 function logExportFilename() {
-    const now = new Date();
-    const pad = value => String(value).padStart(2, '0');
-    const stamp = `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()}-${pad(now.getHours())}-${pad(now.getMinutes())}`;
-    return `log-${stamp}.txt`;
+    return `log-${fileTimestamp()}.txt`;
 }
 
 function exportLogs() {
@@ -560,14 +643,7 @@ function exportLogs() {
         return;
     }
     try {
-        const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
-        const link = document.createElement('a');
-        link.href = URL.createObjectURL(blob);
-        link.download = logExportFilename();
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        URL.revokeObjectURL(link.href);
+        downloadBlob(new Blob([text], { type: 'text/plain;charset=utf-8' }), logExportFilename());
         addLog(`Đã xuất log ra file ${logExportFilename()}.`, { level: 'OK' });
     } catch (error) {
         addLog(`Lỗi xuất log: ${error.message}`);
@@ -581,16 +657,7 @@ async function copyLogs() {
         return;
     }
     try {
-        if (navigator.clipboard) {
-            await navigator.clipboard.writeText(text);
-        } else {
-            const textarea = document.createElement('textarea');
-            textarea.value = text;
-            document.body.appendChild(textarea);
-            textarea.select();
-            document.execCommand('copy');
-            textarea.remove();
-        }
+        await copyText(text);
         addLog('Đã copy toàn bộ log hệ thống.');
     } catch (error) {
         addLog(`Lỗi copy log: ${error.message}`);
@@ -602,19 +669,7 @@ function clearLogs() {
     addLog('Đã xóa log hệ thống.');
 }
 
-function escapeHtml(value) {
-    return String(value ?? '')
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#039;');
-}
-
-function fileDisplayLabel(file) {
-    return typeof file === 'string' ? file : (file?.label || file?.id || '');
-}
-
+// ---- Sheet names and sheet selects ------------------------------------------
 function isSummarySheetName(value) {
     const key = normalizeVietnameseKey(value);
     return key === 'tong ket' || key.startsWith('tong ket ');
@@ -719,47 +774,16 @@ function renderPushSheetOptions(sheets, selectedSheet = '') {
     );
 }
 
-// The only rule for the "Tạo sheet" buttons: idle UI, Google login, a target URL,
-// and that platform's own file and sheet.
-function setGooglePushState() {
-    for (const platform of PLATFORM_KEYS) {
-        const source = platformSources[platform], controls = sourceControls(platform);
-        const enabled = Boolean(!scanIsBusy() && !desktopUpdateInstalling && !sourceBusy && !threadsCookieBusy
-            && googleOAuthAuthorized && controls.url?.value.trim() && source.fileId && (controls.sheet?.value || source.pushSheet));
-        if (controls.push) { controls.push.disabled = !enabled; controls.push.title = enabled ? '' : 'Cần đăng nhập Google, link đích và file/sheet của nền tảng này.'; }
-    }
+// ---- Proxy settings ---------------------------------------------------------
+function setProxyCardState({ ready = false, active = false } = {}) {
+    if (!proxyCard) return;
+    proxyCard.classList.toggle('ready', ready);
+    proxyCard.classList.toggle('active', active);
 }
 
-function rememberServerBuild(build) {
-    const value = String(build || '').trim();
-    if (value) {
-        localStorage.setItem(SERVER_BUILD_KEY, value);
-    }
-}
-
-async function checkServerVersion() {
-    const banner = document.getElementById('serverBanner');
-    try {
-        const res = await fetch('/api/version');
-        const data = await res.json();
-        const build = String(data.proxyTestBuild || '').trim();
-        if (!build) return;
-        const stored = localStorage.getItem(SERVER_BUILD_KEY);
-        if (stored && stored !== build && banner) {
-            banner.hidden = false;
-            banner.textContent = 'Server đã cập nhật code (build '
-                + build
-                + '). Restart Khoidong.bat (Ctrl+C → chạy lại) rồi F5 trang này.';
-            rememberServerBuild(build);
-        } else if (banner) {
-            banner.hidden = true;
-            rememberServerBuild(build);
-        } else {
-            rememberServerBuild(build);
-        }
-    } catch (error) {
-        console.error(error);
-    }
+function syncProxyCardActiveState() {
+    const ready = proxySavedCount > 0;
+    setProxyCardState({ ready, active: ready && Boolean(proxyUseCheckbox && proxyUseCheckbox.checked) });
 }
 
 async function loadProxyList() {
@@ -885,16 +909,14 @@ function openProxyModal() {
         proxyTestResult.textContent = 'Chưa test.';
     }
     loadProxyList().then(data => updateProxyModalSummary(Number(data.count || 0)));
-    modal.classList.add('active');
-    modal.setAttribute('aria-hidden', 'false');
+    setModalOpen(modal, true);
     if (proxyTextInput) proxyTextInput.focus();
 }
 
 function closeProxyModal() {
     const modal = document.getElementById('proxyModal');
     if (!modal) return;
-    modal.classList.remove('active');
-    modal.setAttribute('aria-hidden', 'true');
+    setModalOpen(modal, false);
 }
 
 async function saveProxyList() {
@@ -902,11 +924,7 @@ async function saveProxyList() {
     const btn = document.getElementById('proxySaveBtn');
     if (btn) btn.disabled = true;
     try {
-        const res = await fetch('/proxy-list', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text }),
-        });
+        const res = await postJson('/proxy-list', { text });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || data.message || 'Lưu thất bại');
         proxyListText = text;
@@ -932,11 +950,7 @@ async function testProxyList() {
         proxyTestResult.textContent = 'Đang kiểm tra proxy...';
     }
     try {
-        const res = await fetch(`/proxy-test?_=${Date.now()}`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ text, save: false }),
-        });
+        const res = await postJson(`/proxy-test?_=${Date.now()}`, { text, save: false });
         const data = await res.json();
         if (!res.ok) throw new Error(data.detail || data.message || 'Test thất bại');
         renderProxyTestResult(data);
@@ -949,6 +963,36 @@ async function testProxyList() {
             btn.disabled = false;
             btn.innerHTML = '<span class="material-icons-outlined">network_check</span> Test proxy';
         }
+    }
+}
+
+// ---- Server build and Google login ------------------------------------------
+function rememberServerBuild(build) {
+    const value = String(build || '').trim();
+    if (value) {
+        localStorage.setItem(SERVER_BUILD_KEY, value);
+    }
+}
+
+async function checkServerVersion() {
+    const banner = document.getElementById('serverBanner');
+    try {
+        const res = await fetch('/api/version');
+        const data = await res.json();
+        const build = String(data.proxyTestBuild || '').trim();
+        if (!build) return;
+        const stored = localStorage.getItem(SERVER_BUILD_KEY);
+        if (stored && stored !== build && banner) {
+            banner.hidden = false;
+            banner.textContent = 'Server đã cập nhật code (build '
+                + build
+                + '). Restart Khoidong.bat (Ctrl+C → chạy lại) rồi F5 trang này.';
+        } else if (banner) {
+            banner.hidden = true;
+        }
+        rememberServerBuild(build);
+    } catch (error) {
+        console.error(error);
     }
 }
 
@@ -979,53 +1023,45 @@ async function refreshGoogleOauthStatus() {
     }
 }
 
-function normalizeVietnameseKey(value) {
-    return String(value || '')
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/đ/g, 'd')
-        .replace(/Đ/g, 'D')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .toLowerCase();
-}
-
-function formatNumber(value) {
-    const number = Number(value || 0);
-    return Number.isFinite(number) ? number.toLocaleString('vi-VN') : '0';
-}
-
-// Unknown metrics stay blank on every platform; only a confirmed number (including 0) is shown.
-function formatResultNumber(value) {
-    return value === null || value === undefined || value === '' ? '' : formatNumber(value);
-}
-
-function summaryDashboardTitle(data, totals) {
-    const sheetTitle = String(data.sheet || 'Tổng kết').trim();
-    const partnerCount = Number(totals.partners || 0);
-    const partnerMeta = partnerCount > 0
-        ? `<span class="summary-title-meta">${formatNumber(partnerCount)} đối tác</span>`
-        : '';
-    return `${escapeHtml(sheetTitle)}${partnerMeta}`;
-}
-
-function renderSummaryTableCell(column, value, { footer = false } = {}) {
-    const key = normalizeVietnameseKey(column);
-    if (key === 'doi tac') {
-        return `<td class="partner-cell" title="${escapeHtml(value)}">${escapeHtml(value)}</td>`;
+async function uploadGoogleOauthClient(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+        const res = await fetch('/google-oauth-client', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'Không nạp được OAuth client');
+        addLog('Đã cài cấu hình Google cho ứng dụng. Từ giờ trên máy này chỉ cần bấm "Đăng nhập Google".');
+        await refreshGoogleOauthStatus();
+    } catch (error) {
+        addLog(`Lỗi OAuth client: ${error.message}`);
     }
-    if (key === 'cap nhat lan cuoi') return `<td>${escapeHtml(value)}</td>`;
-    if (key === 'stt') return `<td class="number-cell">${value === '' ? '' : formatNumber(value)}</td>`;
-    if (key === 'tong link') return `<td class="number-cell total-link-cell">${formatNumber(value)}</td>`;
-    return `<td class="number-cell">${formatResultNumber(value)}</td>`;
+    input.value = '';
 }
 
-function setPreviewTableVisible(visible) {
-    const wrapper = document.querySelector('#previewTable')?.closest('.table-wrap');
-    if (wrapper) wrapper.style.display = visible ? '' : 'none';
-    document.getElementById('summaryDashboard').classList.toggle('active', !visible);
+async function connectGoogleOAuth() {
+    const btn = document.getElementById('googleLoginBtn');
+    const originalHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = 'Đang mở đăng nhập...';
+    try {
+        const res = await fetch('/google-oauth-login', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'Đăng nhập Google thất bại');
+        notify('Đăng nhập Google thành công.', 'success');
+        await refreshGoogleOauthStatus();
+        await updateFileList();
+    } catch (error) {
+        notify(`Lỗi đăng nhập Google: ${error.message}`, 'error');
+    } finally {
+        btn.innerHTML = originalHtml;
+        await refreshGoogleOauthStatus();
+        await updateFileList();
+    }
 }
 
+// ---- Platform sources -------------------------------------------------------
 function sourceControls(platform) {
     const { dom } = platformConfig(platform);
     return {
@@ -1036,6 +1072,18 @@ function sourceControls(platform) {
         label: document.getElementById(dom.sourceLabel),
     };
 }
+
+// The only rule for the "Tạo sheet" buttons: idle UI, Google login, a target URL,
+// and that platform's own file and sheet.
+function setGooglePushState() {
+    for (const platform of PLATFORM_KEYS) {
+        const source = platformSources[platform], controls = sourceControls(platform);
+        const enabled = Boolean(!uiIsBusy() && googleOAuthAuthorized && controls.url?.value.trim() && source.fileId && (controls.sheet?.value || source.pushSheet));
+        if (controls.push) { controls.push.disabled = !enabled; controls.push.title = enabled ? '' : 'Cần đăng nhập Google, link đích và file/sheet của nền tảng này.'; }
+    }
+}
+
+const EXCEL_SHEET_NAME_MAX = 31;
 
 function validatedSourceItem(item = {}) {
     if (!item || typeof item !== 'object' || Array.isArray(item)) throw new Error('Nguồn đã lưu không hợp lệ.');
@@ -1048,7 +1096,7 @@ function validatedSourceItem(item = {}) {
     if (source.fileId.length > 1024 || /^(?:[\\/]|[A-Za-z]:)/.test(source.fileId)
         || source.fileId.split(/[\\/]/).some(part => ['.', '..'].includes(part))) throw new Error('Tên file đã lưu không hợp lệ.');
     for (const key of ['displaySheet', 'scanSheet', 'pushSheet']) {
-        if (source[key].length > 31 || /[\\/?*\[\]:]/.test(source[key])) throw new Error('Tên sheet đã lưu không hợp lệ.');
+        if (source[key].length > EXCEL_SHEET_NAME_MAX || /[\\/?*\[\]:]/.test(source[key])) throw new Error('Tên sheet đã lưu không hợp lệ.');
     }
     if (source.url) {
         const url = new URL(source.url);
@@ -1081,7 +1129,7 @@ function sourcePreferencesSnapshot() {
 }
 
 function storeSourcePreferencesFallback(sources) {
-    try { localStorage.setItem('riviuPlatformSourcesV1', JSON.stringify(sources)); } catch {}
+    try { localStorage.setItem(SOURCE_PREFERENCES_FALLBACK_KEY, JSON.stringify(sources)); } catch {}
 }
 
 function loadSourcePreferences() {
@@ -1096,7 +1144,7 @@ function loadSourcePreferences() {
             sources = validatedSourcePreferences(data.sources);
         } catch {
             sourcePreferencesSaveFailed = true;
-            try { sources = validatedSourcePreferences(JSON.parse(localStorage.getItem('riviuPlatformSourcesV1') || 'null')); } catch {}
+            try { sources = validatedSourcePreferences(JSON.parse(localStorage.getItem(SOURCE_PREFERENCES_FALLBACK_KEY) || 'null')); } catch {}
         }
         if (sources && generation === sourcePreferencesGeneration) {
             for (const platform of PLATFORM_KEYS) Object.assign(platformSources[platform], sources[platform]);
@@ -1126,7 +1174,7 @@ async function flushSourcePreferences() {
             const pending = sourcePreferencesPending;
             sourcePreferencesPending = null;
             try {
-                const response = await fetch('/source-preferences', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sources: pending.sources }) });
+                const response = await postJson('/source-preferences', { sources: pending.sources });
                 const data = await response.json();
                 if (response.status === 409) {
                     sourcePreferencesPending ||= pending;
@@ -1134,7 +1182,7 @@ async function flushSourcePreferences() {
                 }
                 if (!response.ok || !data.success) throw new Error(data.error || 'Không lưu được nguồn dữ liệu.');
                 sourcePreferencesSaveFailed = false;
-                try { localStorage.removeItem('riviuPlatformSourcesV1'); } catch {}
+                try { localStorage.removeItem(SOURCE_PREFERENCES_FALLBACK_KEY); } catch {}
             } catch {
                 sourcePreferencesSaveFailed = true;
                 storeSourcePreferencesFallback(sourcePreferencesPending?.sources || pending.sources);
@@ -1148,7 +1196,7 @@ async function flushSourcePreferences() {
 function persistSources() {
     ++sourcePreferencesGeneration;
     try {
-        sourcePreferencesPending = { generation: sourcePreferencesGeneration, sources: sourcePreferencesSnapshot() };
+        sourcePreferencesPending = { sources: sourcePreferencesSnapshot() };
         if (sourcePreferencesSaveFailed) storeSourcePreferencesFallback(sourcePreferencesPending.sources);
         scheduleSourcePreferencesSave();
     } catch {}
@@ -1200,8 +1248,7 @@ async function activateSource(platform) {
     }
     const known = source.sheets || [];
     const keep = sheet => (sheet && (!known.length || known.includes(sheet)) ? sheet : '');
-    const select = (sheetName, scanSheet) => fetch('/select-file', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ filename: source.fileId, platform, sheet_name: sheetName, scan_sheet: scanSheet }) });
+    const select = (sheetName, scanSheet) => postJson('/select-file', { filename: source.fileId, platform, sheet_name: sheetName, scan_sheet: scanSheet });
     const sheetName = keep(source.displaySheet), scanSheet = keep(source.scanSheet);
     let response = await select(sheetName, scanSheet);
     if (response.status === 400 && (sheetName || scanSheet)) response = await select('', '');
@@ -1343,18 +1390,14 @@ async function updateFileList({ applyGoogleSheetUrl = false } = {}) {
 }
 
 async function selectFile(fileId) {
-    if (!fileId || sourceBusy || scanIsBusy() || threadsCookieBusy || desktopUpdateInstalling) return;
+    if (!fileId || uiIsBusy()) return;
     const platform = activePlatform;
     sourceBusy = true; ++sourceRevision; syncScanControls();
     const source = platformSources[platform];
     try {
         source.displaySheet = '';
         setGooglePushState();
-        const res = await fetch('/select-file', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ filename: fileId, platform })
-        });
+        const res = await postJson('/select-file', { filename: fileId, platform });
         const data = await res.json();
         if (!data.success) throw new Error(data.error || 'Không chọn được file');
         const displaySheet = data.sheet || '';
@@ -1369,7 +1412,7 @@ async function selectFile(fileId) {
 }
 
 async function syncGoogleSheet(platform = activePlatform) {
-    if (!isPlatform(platform) || sourceBusy || scanIsBusy() || threadsCookieBusy || desktopUpdateInstalling) return;
+    if (!isPlatform(platform) || uiIsBusy()) return;
     const controls = sourceControls(platform);
     const url = controls.url.value.trim();
     if (!url) {
@@ -1385,11 +1428,7 @@ async function syncGoogleSheet(platform = activePlatform) {
     setGooglePushState();
 
     try {
-        const res = await fetch('/sync-google-sheet', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, platform, activate: false })
-        });
+        const res = await postJson('/sync-google-sheet', { url, platform, activate: false });
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Không đồng bộ được Google Sheet');
 
@@ -1414,7 +1453,7 @@ async function syncGoogleSheet(platform = activePlatform) {
 }
 
 async function uploadFile(input) {
-    if (sourceBusy || scanIsBusy() || threadsCookieBusy || desktopUpdateInstalling) return;
+    if (uiIsBusy()) return;
     const platform = activePlatform;
     const file = input.files[0];
     if (!file) return;
@@ -1444,46 +1483,8 @@ async function uploadFile(input) {
     sourceBusy = false; syncScanControls();
 }
 
-async function uploadGoogleOauthClient(input) {
-    const file = input.files[0];
-    if (!file) return;
-    const formData = new FormData();
-    formData.append('file', file);
-    try {
-        const res = await fetch('/google-oauth-client', { method: 'POST', body: formData });
-        const data = await res.json();
-        if (!res.ok || !data.success) throw new Error(data.error || 'Không nạp được OAuth client');
-        addLog('Đã cài cấu hình Google cho ứng dụng. Từ giờ trên máy này chỉ cần bấm "Đăng nhập Google".');
-        await refreshGoogleOauthStatus();
-    } catch (error) {
-        addLog(`Lỗi OAuth client: ${error.message}`);
-    }
-    input.value = '';
-}
-
-async function connectGoogleOAuth() {
-    const btn = document.getElementById('googleLoginBtn');
-    const originalHtml = btn.innerHTML;
-    btn.disabled = true;
-    btn.innerHTML = 'Đang mở đăng nhập...';
-    try {
-        const res = await fetch('/google-oauth-login', { method: 'POST' });
-        const data = await res.json();
-        if (!res.ok || !data.success) throw new Error(data.error || 'Đăng nhập Google thất bại');
-        notify('Đăng nhập Google thành công.', 'success');
-        await refreshGoogleOauthStatus();
-        await updateFileList();
-    } catch (error) {
-        notify(`Lỗi đăng nhập Google: ${error.message}`, 'error');
-    } finally {
-        btn.innerHTML = originalHtml;
-        await refreshGoogleOauthStatus();
-        await updateFileList();
-    }
-}
-
 async function pushCurrentSheetToGoogle(event, platform = activePlatform) {
-    if (sourceBusy || scanIsBusy() || threadsCookieBusy || desktopUpdateInstalling) return;
+    if (uiIsBusy()) return;
     if (platform === activePlatform) saveActiveSource();
     const source = platformSources[platform], controls = sourceControls(platform);
     const fileId = source.fileId, sourceSheet = controls.sheet.value || source.pushSheet;
@@ -1510,11 +1511,7 @@ async function pushCurrentSheetToGoogle(event, platform = activePlatform) {
         button.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> Đang tạo...';
     }
     try {
-        const res = await fetch('/push-google-sheet', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ url, sourceSheet, platform, file_id: fileId })
-        });
+        const res = await postJson('/push-google-sheet', { url, sourceSheet, platform, file_id: fileId });
         const data = await res.json();
         if (!res.ok || !data.success) throw new Error(data.error || 'Không tạo được sheet trên Google');
         addLog(`Đã tạo sheet Google mới từ ${data.sourceSheet || sourceSheet}: ${data.sheetTitle}`);
@@ -1557,6 +1554,33 @@ async function switchSheet(sheetName) {
     await loadPreview(sheetName);
 }
 
+// ---- Sheet preview and summary dashboard ------------------------------------
+function summaryDashboardTitle(data, totals) {
+    const sheetTitle = String(data.sheet || 'Tổng kết').trim();
+    const partnerCount = Number(totals.partners || 0);
+    const partnerMeta = partnerCount > 0
+        ? `<span class="summary-title-meta">${formatNumber(partnerCount)} đối tác</span>`
+        : '';
+    return `${escapeHtml(sheetTitle)}${partnerMeta}`;
+}
+
+function renderSummaryTableCell(column, value, { footer = false } = {}) {
+    const key = normalizeVietnameseKey(column);
+    if (key === 'doi tac') {
+        return `<td class="partner-cell" title="${escapeHtml(value)}">${escapeHtml(value)}</td>`;
+    }
+    if (key === 'cap nhat lan cuoi') return `<td>${escapeHtml(value)}</td>`;
+    if (key === 'stt') return `<td class="number-cell">${value === '' ? '' : formatNumber(value)}</td>`;
+    if (key === 'tong link') return `<td class="number-cell total-link-cell">${formatNumber(value)}</td>`;
+    return `<td class="number-cell">${formatResultNumber(value)}</td>`;
+}
+
+function setPreviewTableVisible(visible) {
+    const wrapper = document.querySelector('#previewTable')?.closest('.table-wrap');
+    if (wrapper) wrapper.style.display = visible ? '' : 'none';
+    document.getElementById('summaryDashboard').classList.toggle('active', !visible);
+}
+
 function matchesPlatformLink(value, platform = activePlatform) {
     const text = String(value || '').trim();
     if (!text || /[\x00-\x20\x7f\\]/.test(text)) return false;
@@ -1569,6 +1593,8 @@ function matchesPlatformLink(value, platform = activePlatform) {
 }
 
 const PREVIEW_LINK_COLUMNS = ['link', 'link air', 'url'];
+const VIDEO_LINK_COLOR = '#1d4ed8';
+const SINGLE_PARTNER_LINK_COLOR = '#9a3412';
 const PREVIEW_SAVED_COLUMN = 'LƯỢT LƯU';
 const PREVIEW_SHARES_COLUMN = 'CHIA SẺ';
 
@@ -1608,9 +1634,7 @@ function renderEmptySourcePreview() {
     document.getElementById('previewHeader').innerHTML = '';
     document.getElementById('previewBody').innerHTML = '<tr><td colspan="10" class="workspace-empty">Chưa chọn nguồn cho nền tảng này.</td></tr>';
     window.lastWorkbookSheets = [];
-    for (const id of ['totalLinks', 'processedLinks', 'successLinks', 'hiddenCountBadge', 'failedCountBadge']) {
-        document.getElementById(id).textContent = '0';
-    }
+    resetProgressCounters(['totalLinks', ...PROGRESS_COUNTER_IDS]);
     renderSheetTabs([], '');
     syncScanControls();
 }
@@ -1638,8 +1662,8 @@ function previewRowHtml(row, columns) {
     ].filter(Boolean).join(' ');
     const rowClass = classes ? ` class="${classes}"` : '';
     let linkColor = '#ff6b00';
-    if (isVideoLink) linkColor = '#1d4ed8';
-    else if (isSinglePartner) linkColor = '#9a3412';
+    if (isVideoLink) linkColor = VIDEO_LINK_COLOR;
+    else if (isSinglePartner) linkColor = SINGLE_PARTNER_LINK_COLOR;
     return `<tr${rowClass}>${columns.map(column => {
         let val = row[column] ?? '';
         if (typeof val === 'string' && val.startsWith('http')) {
@@ -1708,6 +1732,8 @@ async function loadPreview(sheetName = '') {
     }
 }
 
+const DEFAULT_SUMMARY_COLUMNS = ['Stt', 'ĐỐI TÁC', 'TỔNG LINK', 'TỔNG LƯỢT XEM', 'TỔNG TIM', 'TỔNG BÌNH LUẬN', 'TỔNG LƯỢT LƯU', 'TỔNG CHIA SẺ', 'Cập nhật lần cuối'];
+
 async function renderSummaryDashboard(dataSheetName = '') {
     if (sourcesInitialized && !currentFileId) return;
     const isCurrent = beginReadRequest('summary', currentSheetName);
@@ -1733,9 +1759,7 @@ async function renderSummaryDashboard(dataSheetName = '') {
         if (!res.ok) throw new Error(data.error || 'Không đọc được sheet Tổng kết');
 
         const rows = data.rows || [];
-        const columns = data.columns && data.columns.length
-            ? data.columns
-            : ['Stt', 'ĐỐI TÁC', 'TỔNG LINK', 'TỔNG LƯỢT XEM', 'TỔNG TIM', 'TỔNG BÌNH LUẬN', 'TỔNG LƯỢT LƯU', 'TỔNG CHIA SẺ', 'Cập nhật lần cuối'];
+        const columns = data.columns && data.columns.length ? data.columns : DEFAULT_SUMMARY_COLUMNS;
         const totals = data.totals || {};
 
         if (rows.length === 0) {
@@ -1772,8 +1796,15 @@ async function renderSummaryDashboard(dataSheetName = '') {
     }
 }
 
+// ---- Scan controls and run context ------------------------------------------
 function scanIsBusy() {
     return ['starting', 'running', 'saving', 'cancelling'].includes(scanPhase);
+}
+
+// A scan, an update install, a Threads cookie action or a source operation is in flight;
+// controls that start another of these stay disabled meanwhile.
+function uiIsBusy() {
+    return scanIsBusy() || desktopUpdateInstalling || threadsCookieBusy || sourceBusy;
 }
 
 // Why an idle Start button cannot start a scan right now ('' when it can); shown as its tooltip.
@@ -1786,7 +1817,7 @@ function startBlockedReason() {
 
 function syncScanControls() {
     scheduleSourcePreferencesSave();
-    const busy = scanIsBusy() || desktopUpdateInstalling || threadsCookieBusy || sourceBusy;
+    const busy = uiIsBusy();
     for (const id of ['threadsCookieBtn', 'threadsCookieImport', 'threadsCookieVerify', 'threadsCookieDelete', 'threadsCookieDeleteAccept', 'threadsCookieDeleteCancel', 'threadsCookieTabFile', 'threadsCookieTabPaste', 'threadsSessionUse', 'threadsCookieFile', 'threadsCookieText']) {
         const input = document.getElementById(id);
         if (input) input.disabled = busy || (['threadsSessionUse', 'threadsCookieVerify', 'threadsCookieDelete'].includes(id) && !threadsCookieState.configured);
@@ -1887,6 +1918,17 @@ function handleSessionSnapshot(session) {
     }
 }
 
+// ---- WebSocket connection ---------------------------------------------------
+const WS_RECONNECT_BASE_MS = 1000;
+const WS_RECONNECT_MAX_MS = 5000;
+const WS_LOST_AFTER_MS = 15000;
+const CONNECTION_RECONNECTING_TEXT = 'Đang kết nối lại tới server…';
+const CONNECTION_LOST_TEXT = 'Mất kết nối tới server. Ứng dụng vẫn tự thử lại, hoặc tải lại trang (F5).';
+let wsReconnectFailures = 0;
+let wsDisconnectedAt = 0;
+let wsRetryPending = false;
+let wsConnectionLost = false;
+
 function connectWS() {
     websocketSessionReady = false;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1971,6 +2013,7 @@ function renderConnectionState() {
     syncScanControls();
 }
 
+// ---- Threads cookie session -------------------------------------------------
 function formatCookieCheckedAt(value) {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return String(value);
@@ -2047,11 +2090,10 @@ function cancelThreadsCookieDelete() {
 }
 
 function openThreadsCookieModal() {
-    if (scanIsBusy() || desktopUpdateInstalling || threadsCookieBusy || sourceBusy) return;
+    if (uiIsBusy()) return;
     threadsCookieFocus = document.activeElement;
     const modal = document.getElementById('threadsCookieModal');
-    modal.classList.add('active');
-    modal.setAttribute('aria-hidden', 'false');
+    setModalOpen(modal, true);
     cancelThreadsCookieDelete();
     document.getElementById('threadsCookieModalStatus').textContent = '';
     setThreadsCookieSource(threadsCookieSource);
@@ -2062,15 +2104,17 @@ function openThreadsCookieModal() {
 function closeThreadsCookieModal() {
     if (threadsCookieBusy) return;
     const modal = document.getElementById('threadsCookieModal');
-    modal.classList.remove('active');
-    modal.setAttribute('aria-hidden', 'true');
+    setModalOpen(modal, false);
     clearThreadsCookieInputs();
     cancelThreadsCookieDelete();
     if (threadsCookieFocus?.focus) threadsCookieFocus.focus();
 }
 
+// Matches MAX_IMPORT_BYTES in riviu/platforms/threads_session.py.
+const COOKIE_IMPORT_MAX_BYTES = 256 * 1024;
+
 async function threadsCookieAction(action) {
-    if (scanIsBusy() || desktopUpdateInstalling || threadsCookieBusy || sourceBusy) return;
+    if (uiIsBusy()) return;
     const source = threadsCookieSource;
     const file = document.getElementById('threadsCookieFile').files?.[0];
     let body = '';
@@ -2084,12 +2128,12 @@ async function threadsCookieAction(action) {
         if (action === 'import') {
             if (source === 'file') {
                 if (!file) throw new Error('Chọn file JSON trước khi import.');
-                if (file.size > 262144) throw new Error('File cookie quá lớn, tối đa 256 KiB.');
+                if (file.size > COOKIE_IMPORT_MAX_BYTES) throw new Error('File cookie quá lớn, tối đa 256 KiB.');
                 body = await file.text();
             } else {
                 body = document.getElementById('threadsCookieText').value;
             }
-            if (!body.trim() || new TextEncoder().encode(body).length > 262144) throw new Error('Nhập JSON cookie hợp lệ, tối đa 256 KiB.');
+            if (!body.trim() || new TextEncoder().encode(body).length > COOKIE_IMPORT_MAX_BYTES) throw new Error('Nhập JSON cookie hợp lệ, tối đa 256 KiB.');
         }
         const response = await fetch(action === 'delete' ? '/threads-session' : `/threads-session/${action}`, {
             method: action === 'delete' ? 'DELETE' : 'POST', headers: { 'Content-Type': 'application/json' },
@@ -2114,7 +2158,7 @@ async function threadsCookieAction(action) {
 function importThreadsCookie() { return threadsCookieAction('import'); }
 function verifyThreadsCookie() { return threadsCookieAction('verify'); }
 function deleteThreadsCookie() {
-    if (threadsCookieBusy || sourceBusy || scanIsBusy() || desktopUpdateInstalling || !threadsCookieState.configured) return;
+    if (uiIsBusy() || !threadsCookieState.configured) return;
     document.getElementById('threadsCookieDeleteConfirm').hidden = false;
     document.getElementById('threadsCookieDeleteCancel').focus();
 }
@@ -2123,18 +2167,21 @@ function confirmThreadsCookieDelete() {
     return threadsCookieAction('delete');
 }
 
+// ---- Scan start and cancel --------------------------------------------------
 const SCRAPE_MODE_LABELS = Object.freeze({
     browser: 'trình duyệt',
     hybrid: 'Hybrid (Request + trình duyệt)',
     request: 'Request (HTTP)',
 });
 
+const DEFAULT_WORKER_COUNT = 10;
+
 // Collects the scan settings, or explains (and returns null) when the scan cannot start.
 function buildScanRequest(partners, sheetName) {
     const config = platformConfig();
     const selected = Array.isArray(partners) ? partners : (partners ? [partners] : []);
     const useProxy = Boolean(proxyUseCheckbox && proxyUseCheckbox.checked);
-    const workers = Number(workerCountSelect.value || 10);
+    const workers = Number(workerCountSelect.value || DEFAULT_WORKER_COUNT);
     const scrapeMode = scrapeModeSelect.value || 'request';
     const proxyText = useProxy ? currentProxyText() : '';
     const useThreadsSession = config.cookieSession && Boolean(document.getElementById('threadsSessionUse')?.checked);
@@ -2176,7 +2223,7 @@ function buildScanRequest(partners, sheetName) {
 }
 
 function startScraping(partners = [], sheetName = '') {
-    if (scanIsBusy() || desktopUpdateInstalling || threadsCookieBusy || sourceBusy) return;
+    if (uiIsBusy()) return;
     if (sourcesInitialized && !currentFileId) { notify('Chưa chọn nguồn cho nền tảng này.', 'warn'); return; }
     if (!ws || ws.readyState !== WebSocket.OPEN) {
         notify('Lỗi: Chưa kết nối được server. Vui lòng kiểm tra CMD.', 'error');
@@ -2192,9 +2239,7 @@ function startScraping(partners = [], sheetName = '') {
     lastTerminalStatus = '';
     syncScanControls();
     clearLiveResults();
-    const statusEl = document.getElementById('progressStatus');
-    statusEl.textContent = '';
-    statusEl.className = 'progress-status';
+    clearProgressStatus();
 }
 
 function cancelScraping() {
@@ -2208,62 +2253,15 @@ function cancelScraping() {
     addLog('Đã gửi lệnh hủy quét.');
 }
 
-// Every platform's partner report uses the same min-views threshold (TikTok's rules).
-function reportFilterParams() {
-    const applyMinViews = document.getElementById('minViewToggle')?.checked ?? true;
-    const minViewsRaw = parseInt(document.getElementById('minViewInput')?.value, 10);
-    const minViews = Number.isFinite(minViewsRaw) && minViewsRaw >= 0 ? minViewsRaw : 100;
-    return { applyMinViews, minViews };
-}
-
-function normalizeReportPartners(raw) {
-    return (raw || []).map(item => {
-        if (typeof item === 'string') return { name: item, linkCount: null, rawLinkCount: null };
-        const linkCount = Number(item.linkCount);
-        const rawLinkCount = Number(item.rawLinkCount);
-        return {
-            name: String(item.name || '').trim(),
-            linkCount: Number.isFinite(linkCount) ? linkCount : 0,
-            rawLinkCount: Number.isFinite(rawLinkCount) ? rawLinkCount : 0,
-        };
-    }).filter(item => item.name);
-}
-
-function partnerShowsNoLinkStatus(item) {
-    if (item.linkCount !== null && item.linkCount !== undefined) {
-        return item.linkCount <= 0;
-    }
-    if (item.rawLinkCount !== null && item.rawLinkCount !== undefined) {
-        return item.rawLinkCount <= 0;
-    }
-    return false;
-}
-
-function partnerNamesFromSelection() {
-    return reportPartners.filter(item => selectedPartners.has(item.name)).map(item => item.name);
-}
-
-async function refreshPartnerLinks() {
-    const partners = partnerNamesFromSelection();
-    if (partners.length === 0) {
-        addLog('Hãy chọn ít nhất 1 đối tác để cập nhật lại link.');
-        return;
-    }
-    const sheetName = reportSheetName || document.getElementById('reportSheetSelect')?.value || '';
-    closeReportModal();
-    startScraping(partners, sheetName);
-}
-
-function formatDuration(seconds) {
-    if (seconds === null || seconds === undefined || seconds === '') return '';
-    const sec = Math.max(parseInt(seconds, 10) || 0, 0);
-    if (sec < 60) return `${sec}s`;
-    const minutes = Math.floor(sec / 60);
-    const remain = sec % 60;
-    if (minutes < 60) return `${minutes}m ${remain}s`;
-    const hours = Math.floor(minutes / 60);
-    const remainMin = minutes % 60;
-    return `${hours}h ${remainMin}m`;
+// ---- Progress and live results ----------------------------------------------
+function isNoStatsStatus(status) {
+    const text = String(status || '');
+    return (
+        text.includes('Ẩn số liệu')
+        || text.startsWith('Partial:')
+        || text.includes('không trả số liệu')
+        || text.includes('không trả lượt xem')
+    );
 }
 
 function classifyLiveResult(row, platform) {
@@ -2291,14 +2289,18 @@ function progressResultCounts(data) {
 
 const TERMINAL_SCAN_PHASES = ['completed', 'failed', 'cancelled'];
 
-function renderProgressCounts(data, counts) {
-    document.getElementById('totalLinks').textContent = data.total;
-    document.getElementById('processedLinks').textContent = data.processed;
+function renderResultCounts(counts) {
     document.getElementById('successLinks').textContent = counts.success;
     const hiddenBadge = document.getElementById('hiddenCountBadge');
     const failedBadge = document.getElementById('failedCountBadge');
     if (hiddenBadge) hiddenBadge.textContent = counts.hidden;
     if (failedBadge) failedBadge.textContent = counts.error;
+}
+
+function renderProgressCounts(data, counts) {
+    document.getElementById('totalLinks').textContent = data.total;
+    document.getElementById('processedLinks').textContent = data.processed;
+    renderResultCounts(counts);
 }
 
 function progressSummaryText(data, pct) {
@@ -2366,10 +2368,14 @@ function updateProgress(data, { replay = false } = {}) {
     if (TERMINAL_SCAN_PHASES.includes(phase)) finishScanRun(phase, { replay });
 }
 
+// Scrolled further down than this, the reader keeps their place as new rows arrive on top.
+const LIVE_RESULTS_PINNED_SCROLL_PX = 32;
+
 function appendData(row, context = {}) {
     const platform = row.platform || context.platform || currentRunContext?.platform || activePlatform;
     const tbody = document.getElementById('dataFeed');
-    if (tbody.innerText.includes('Chưa có kết quả')) tbody.innerHTML = '';
+    // The "no results" placeholder is a lone row; reading innerText of a full feed costs O(rows).
+    if (tbody.children.length <= 1 && tbody.innerText.includes('Chưa có kết quả')) tbody.innerHTML = '';
     const wrapper = document.querySelector('.live-results-wrap');
     const resultStatus = classifyLiveResult(row, platform);
     const isSuccess = resultStatus === 'success';
@@ -2380,8 +2386,9 @@ function appendData(row, context = {}) {
     liveResultClasses.set(String(row.id ?? row.url), resultStatus);
     const visibleInCurrentTab = activeWorkspaceTab === 'live'
         || (activeWorkspaceTab === 'success' && isSuccess);
-    const preserveScroll = Boolean(wrapper && visibleInCurrentTab && wrapper.scrollTop > 32);
-    const previousScrollHeight = wrapper?.scrollHeight || 0;
+    const preserveScroll = Boolean(wrapper && visibleInCurrentTab && wrapper.scrollTop > LIVE_RESULTS_PINNED_SCROLL_PX);
+    // scrollHeight forces a layout of the whole feed, so read it only when it is used.
+    const previousScrollHeight = preserveScroll ? wrapper.scrollHeight : 0;
     const tr = document.createElement('tr');
     tr.dataset.resultStatus = resultStatus;
     if (row.videoLink) tr.classList.add('video-link-row');
@@ -2399,7 +2406,7 @@ function appendData(row, context = {}) {
         <td data-label="ID">${escapeHtml(row.id)}</td>
         <td data-label="Sheet">${escapeHtml(row.sheetName || '')}</td>
         <td data-label="Kênh" title="${escapeHtml(row.channelName || '')}">${escapeHtml(row.channelName || '')}</td>
-        <td data-label="Link" class="col-url" title="${escapeHtml(row.url)}"><a href="${escapeHtml(row.url)}" target="_blank" rel="noopener noreferrer" style="color: ${row.videoLink ? '#1d4ed8' : (row.singlePartner ? '#9a3412' : 'inherit')}; text-decoration: none;">${escapeHtml(row.url)}</a></td>
+        <td data-label="Link" class="col-url" title="${escapeHtml(row.url)}"><a href="${escapeHtml(row.url)}" target="_blank" rel="noopener noreferrer" style="color: ${row.videoLink ? VIDEO_LINK_COLOR : (row.singlePartner ? SINGLE_PARTNER_LINK_COLOR : 'inherit')}; text-decoration: none;">${escapeHtml(row.url)}</a></td>
         <td data-label="Lượt xem" style="text-align:right; font-weight:bold">${escapeHtml(views)}</td>
         <td data-label="Tim" style="text-align:right; font-weight:bold">${escapeHtml(likes)}</td>
         <td data-label="Bình luận" style="text-align:right; font-weight:bold">${escapeHtml(comments)}</td>
@@ -2414,47 +2421,10 @@ function appendData(row, context = {}) {
         updatePendingLiveResults();
     }
     if (!isSuccess) appendFailedLink(row);
-    if (lastProgressData) {
-        const counts = progressResultCounts(lastProgressData);
-        document.getElementById('successLinks').textContent = counts.success;
-        document.getElementById('hiddenCountBadge').textContent = counts.hidden;
-        document.getElementById('failedCountBadge').textContent = counts.error;
-    }
+    if (lastProgressData) renderResultCounts(progressResultCounts(lastProgressData));
 }
 
-function desktopUpdaterInvoke() {
-    return window.__TAURI__?.core?.invoke || null;
-}
-
-async function checkDesktopUpdate() {
-    const invoke = desktopUpdaterInvoke();
-    if (!invoke || desktopUpdateCheckInFlight || !websocketSessionReady || scanIsBusy()) return;
-    desktopUpdateCheckInFlight = true;
-    try {
-        const version = await invoke('check_for_update');
-        if (!version || !websocketSessionReady || scanIsBusy()) return;
-        desktopUpdateInstalling = true;
-        syncScanControls();
-        showToast(`Đang cài đặt Riviu Reports ${version}...`, 'info');
-        await invoke('install_update');
-    } catch (error) {
-        console.warn('Desktop updater check failed:', error);
-        addLog(`Chưa cập nhật được ứng dụng: ${String(error)}`);
-    } finally {
-        desktopUpdateInstalling = false;
-        desktopUpdateCheckInFlight = false;
-        syncScanControls();
-    }
-}
-
-// The socket is still connecting here, so checkDesktopUpdate() would return early;
-// the first check runs from the first session snapshot instead.
-function scheduleDesktopUpdates() {
-    if (!desktopUpdaterInvoke()) return;
-    desktopStartupUpdatePending = true;
-    window.setInterval(() => void checkDesktopUpdate(), 5 * 60 * 1000);
-}
-
+// ---- Duplicate and failed links ---------------------------------------------
 function groupDuplicateLocations(locations) {
     const grouped = new Map();
     (Array.isArray(locations) ? locations : []).forEach(location => {
@@ -2532,16 +2502,7 @@ async function copyDuplicateLinks() {
     }).join('\n\n');
 
     try {
-        if (navigator.clipboard) {
-            await navigator.clipboard.writeText(text);
-        } else {
-            const textarea = document.createElement('textarea');
-            textarea.value = text;
-            document.body.appendChild(textarea);
-            textarea.select();
-            document.execCommand('copy');
-            textarea.remove();
-        }
+        await copyText(text);
         notify(`Đã copy ${duplicateLinks.length} link trùng kèm số dòng.`, 'success');
     } catch (error) {
         notify(`Lỗi copy link: ${error.message}`, 'error');
@@ -2584,37 +2545,58 @@ function renderFailureRows(items, emptyMessage) {
     }).join('');
 }
 
-function renderFailedLinks() {
-    const errorBody = document.getElementById('failedLinksBody');
-    const noStatsBody = document.getElementById('noStatsLinksBody');
+// Failure rows carry the active platform's labels, so a new row may only be prepended to
+// tables last fully rendered for the same platform.
+let failedLinksRenderedPlatform = null;
+
+function renderFailureCounts(errorCount, noStatsCount) {
     const errorBadge = document.getElementById('failedCountBadge');
     const noStatsBadge = document.getElementById('hiddenCountBadge');
     const note = document.getElementById('failedNote');
-    const noStatsItems = failedLinksForKind('nostats');
-    const errorItems = failedLinksForKind('errors');
-
-    if (errorBadge) errorBadge.textContent = errorItems.length;
-    if (noStatsBadge) noStatsBadge.textContent = noStatsItems.length;
-    if (errorBody) errorBody.innerHTML = renderFailureRows(errorItems, 'Chưa có link lỗi');
-    if (noStatsBody) noStatsBody.innerHTML = renderFailureRows(noStatsItems, 'Chưa có link không đọc được số liệu');
-
+    if (errorBadge) errorBadge.textContent = errorCount;
+    if (noStatsBadge) noStatsBadge.textContent = noStatsCount;
     if (note) {
         const parts = [];
-        if (errorItems.length > 0) parts.push(`${errorItems.length} lỗi quét`);
-        if (noStatsItems.length > 0) parts.push(`${noStatsItems.length} không đọc được số liệu`);
+        if (errorCount > 0) parts.push(`${errorCount} lỗi quét`);
+        if (noStatsCount > 0) parts.push(`${noStatsCount} không đọc được số liệu`);
         note.textContent = parts.length ? `(${parts.join(' • ')})` : '';
     }
 }
 
+function renderFailedLinks() {
+    const errorBody = document.getElementById('failedLinksBody');
+    const noStatsBody = document.getElementById('noStatsLinksBody');
+    const noStatsItems = failedLinksForKind('nostats');
+    const errorItems = failedLinksForKind('errors');
+
+    if (errorBody) errorBody.innerHTML = renderFailureRows(errorItems, 'Chưa có link lỗi');
+    if (noStatsBody) noStatsBody.innerHTML = renderFailureRows(noStatsItems, 'Chưa có link không đọc được số liệu');
+    renderFailureCounts(errorItems.length, noStatsItems.length);
+    failedLinksRenderedPlatform = activePlatform;
+}
+
+// Prepends one row instead of re-rendering every failure for each result; the markup is
+// the same as a full renderFailedLinks().
 function appendFailedLink(row) {
-    failedLinks.unshift({
+    const item = {
         id: row.id,
         sheetName: row.sheetName,
         url: row.url,
         status: row.status,
         worker: row.worker
-    });
-    renderFailedLinks();
+    };
+    failedLinks.unshift(item);
+    const noStats = isNoStatsStatus(item.status);
+    const body = document.getElementById(noStats ? 'noStatsLinksBody' : 'failedLinksBody');
+    const sameKindCount = failedLinksForKind(noStats ? 'nostats' : 'errors').length;
+    // The first row of a kind replaces its empty-state placeholder.
+    if (!body || sameKindCount === 1 || failedLinksRenderedPlatform !== activePlatform) {
+        renderFailedLinks();
+        return;
+    }
+    body.insertAdjacentHTML('afterbegin', renderFailureRows([item], ''));
+    const otherKindCount = failedLinks.length - sameKindCount;
+    renderFailureCounts(noStats ? otherKindCount : sameKindCount, noStats ? sameKindCount : otherKindCount);
 }
 
 async function copyFailedLinks(kind = 'all') {
@@ -2626,16 +2608,7 @@ async function copyFailedLinks(kind = 'all') {
     }
     const text = items.map(item => item.url).join('\n');
     try {
-        if (navigator.clipboard) {
-            await navigator.clipboard.writeText(text);
-        } else {
-            const textarea = document.createElement('textarea');
-            textarea.value = text;
-            document.body.appendChild(textarea);
-            textarea.select();
-            document.execCommand('copy');
-            textarea.remove();
-        }
+        await copyText(text);
         notify(`Đã copy ${items.length} ${label}.`, 'success');
     } catch (error) {
         notify(`Lỗi copy link: ${error.message}`, 'error');
@@ -2661,12 +2634,94 @@ function clearFailedLinks(showLog = true, kind = 'all') {
     }
 }
 
+// ---- Desktop updater --------------------------------------------------------
+function desktopUpdaterInvoke() {
+    return window.__TAURI__?.core?.invoke || null;
+}
+
+async function checkDesktopUpdate() {
+    const invoke = desktopUpdaterInvoke();
+    if (!invoke || desktopUpdateCheckInFlight || !websocketSessionReady || scanIsBusy()) return;
+    desktopUpdateCheckInFlight = true;
+    try {
+        const version = await invoke('check_for_update');
+        if (!version || !websocketSessionReady || scanIsBusy()) return;
+        desktopUpdateInstalling = true;
+        syncScanControls();
+        showToast(`Đang cài đặt Riviu Reports ${version}...`, 'info');
+        await invoke('install_update');
+    } catch (error) {
+        console.warn('Desktop updater check failed:', error);
+        addLog(`Chưa cập nhật được ứng dụng: ${String(error)}`);
+    } finally {
+        desktopUpdateInstalling = false;
+        desktopUpdateCheckInFlight = false;
+        syncScanControls();
+    }
+}
+
+// The socket is still connecting here, so checkDesktopUpdate() would return early;
+// the first check runs from the first session snapshot instead.
+function scheduleDesktopUpdates() {
+    if (!desktopUpdaterInvoke()) return;
+    desktopStartupUpdatePending = true;
+    window.setInterval(() => void checkDesktopUpdate(), 5 * 60 * 1000);
+}
+
+// ---- Partner reports and scan history ---------------------------------------
+const DEFAULT_MIN_VIEWS = 100;
+
+// Every platform's partner report uses the same min-views threshold (TikTok's rules).
+function reportFilterParams() {
+    const applyMinViews = document.getElementById('minViewToggle')?.checked ?? true;
+    const minViewsRaw = parseInt(document.getElementById('minViewInput')?.value, 10);
+    const minViews = Number.isFinite(minViewsRaw) && minViewsRaw >= 0 ? minViewsRaw : DEFAULT_MIN_VIEWS;
+    return { applyMinViews, minViews };
+}
+
+function normalizeReportPartners(raw) {
+    return (raw || []).map(item => {
+        if (typeof item === 'string') return { name: item, linkCount: null, rawLinkCount: null };
+        const linkCount = Number(item.linkCount);
+        const rawLinkCount = Number(item.rawLinkCount);
+        return {
+            name: String(item.name || '').trim(),
+            linkCount: Number.isFinite(linkCount) ? linkCount : 0,
+            rawLinkCount: Number.isFinite(rawLinkCount) ? rawLinkCount : 0,
+        };
+    }).filter(item => item.name);
+}
+
+function partnerShowsNoLinkStatus(item) {
+    if (item.linkCount !== null && item.linkCount !== undefined) {
+        return item.linkCount <= 0;
+    }
+    if (item.rawLinkCount !== null && item.rawLinkCount !== undefined) {
+        return item.rawLinkCount <= 0;
+    }
+    return false;
+}
+
+function partnerNamesFromSelection() {
+    return reportPartners.filter(item => selectedPartners.has(item.name)).map(item => item.name);
+}
+
+async function refreshPartnerLinks() {
+    const partners = partnerNamesFromSelection();
+    if (partners.length === 0) {
+        addLog('Hãy chọn ít nhất 1 đối tác để cập nhật lại link.');
+        return;
+    }
+    const sheetName = reportSheetName || document.getElementById('reportSheetSelect')?.value || '';
+    closeReportModal();
+    startScraping(partners, sheetName);
+}
+
 async function openReportModal() {
     const modal = document.getElementById('reportModal');
     const list = document.getElementById('partnerList');
     closeCompactDrawers();
-    modal.classList.add('active');
-    modal.setAttribute('aria-hidden', 'false');
+    setModalOpen(modal, true);
     document.body.style.overflow = 'hidden';
     document.getElementById('partnerSearch').value = '';
     reportPartners = [];
@@ -2768,33 +2823,32 @@ async function loadReportPartners(sheetName = '') {
 function closeReportModal() {
     ++readRequestSequence.partners;
     const modal = document.getElementById('reportModal');
-    modal.classList.remove('active');
-    modal.setAttribute('aria-hidden', 'true');
+    setModalOpen(modal, false);
     document.body.style.overflow = '';
 }
 
 async function openHistoryModal() {
     const modal = document.getElementById('historyModal');
     closeCompactDrawers();
-    modal.classList.add('active');
-    modal.setAttribute('aria-hidden', 'false');
+    setModalOpen(modal, true);
     document.body.style.overflow = 'hidden';
     await loadScrapeHistory();
 }
 
 function closeHistoryModal() {
     const modal = document.getElementById('historyModal');
-    modal.classList.remove('active');
-    modal.setAttribute('aria-hidden', 'true');
+    setModalOpen(modal, false);
     document.body.style.overflow = '';
 }
+
+const SCRAPE_HISTORY_LIMIT = 50;
 
 async function loadScrapeHistory() {
     const body = document.getElementById('historyBody');
     const subtitle = document.getElementById('historyModalSubtitle');
     body.innerHTML = '<tr><td colspan="11" style="text-align:center; padding:32px; color:#9ca3af">Đang tải lịch sử...</td></tr>';
     try {
-        const res = await fetch('/scrape-history?limit=50');
+        const res = await fetch(`/scrape-history?limit=${SCRAPE_HISTORY_LIMIT}`);
         const data = await res.json();
         if (!res.ok) throw new Error(data.error || 'Không tải được lịch sử');
         const history = Array.isArray(data.history) ? data.history : [];
@@ -2911,17 +2965,8 @@ function updateReportSummary() {
     renderSelectedPartnerList();
 }
 
-function filenameFromDisposition(disposition, fallback) {
-    const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
-    if (utf8Match) return decodeURIComponent(utf8Match[1]);
-    const plainMatch = disposition.match(/filename="?([^";]+)"?/i);
-    return plainMatch ? plainMatch[1] : fallback;
-}
-
 function buildExportFallbackFilename(partners, sheetName) {
-    const now = new Date();
-    const pad = (value) => String(value).padStart(2, '0');
-    const stamp = `${pad(now.getDate())}-${pad(now.getMonth() + 1)}-${now.getFullYear()}-${pad(now.getHours())}-${pad(now.getMinutes())}`;
+    const stamp = fileTimestamp();
     const sheet = String(sheetName || reportSheetName || '').trim();
     if (partners.length === 1) {
         const parts = [partners[0]];
@@ -2930,17 +2975,6 @@ function buildExportFallbackFilename(partners, sheetName) {
         return `${parts.join(' ')}.xlsx`;
     }
     return sheet ? `bao_cao_doi_tac ${sheet} ${stamp}.zip` : `bao_cao_doi_tac ${stamp}.zip`;
-}
-
-function downloadBlob(blob, filename) {
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
 }
 
 async function exportPartnerReport() {
@@ -2958,11 +2992,7 @@ async function exportPartnerReport() {
 
     try {
         const { applyMinViews, minViews } = reportFilterParams();
-        const res = await fetch('/export-report', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ partners, applyMinViews, minViews, sheetName: reportSheetName || document.getElementById('reportSheetSelect')?.value || '', platform: activePlatform, file_id: currentFileId })
-        });
+        const res = await postJson('/export-report', { partners, applyMinViews, minViews, sheetName: reportSheetName || document.getElementById('reportSheetSelect')?.value || '', platform: activePlatform, file_id: currentFileId });
         if (!res.ok) {
             const data = await res.json().catch(() => ({}));
             throw new Error(data.error || 'Không xuất được báo cáo');
@@ -2984,6 +3014,7 @@ async function exportPartnerReport() {
     }
 }
 
+// ---- Event wiring and startup -----------------------------------------------
 const area = document.getElementById('uploadArea');
 area.addEventListener('dragover', (event) => { event.preventDefault(); area.classList.add('dragover'); });
 area.addEventListener('dragleave', () => area.classList.remove('dragover'));

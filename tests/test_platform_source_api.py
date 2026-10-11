@@ -11,6 +11,8 @@ from starlette.datastructures import UploadFile
 from starlette.websockets import WebSocketDisconnect
 
 from riviu import app as backend
+from riviu import scan_service, server_context, source_files
+from riviu.api import google as google_api, security, sources as sources_api
 from riviu.workbook_utils import (
     PLATFORMS,
     google_sheet_source_for_file,
@@ -48,7 +50,7 @@ def source_backend(tmp_path, monkeypatch):
     monkeypatch.setattr(backend, "SOURCE_BUSY", False)
     monkeypatch.setattr(backend, "DESKTOP_UPDATE_PENDING", False)
     monkeypatch.setattr(backend, "manager", backend.ConnectionManager())
-    monkeypatch.setattr(backend, "oauth_status", lambda _: {"valid": True, "configured": True})
+    monkeypatch.setattr(sources_api, "oauth_status", lambda _: {"valid": True, "configured": True})
     for marker in ("A", "B"):
         make_source(tmp_path / f"{marker}.xlsx", marker)
         register_google_sheet_source(str(tmp_path), f"{marker}.xlsx", f"https://docs.google.com/spreadsheets/d/ID_{marker}/edit")
@@ -166,7 +168,7 @@ def test_threads_report_apis_honour_min_views_like_tiktok(client, source_backend
 
 def test_explicit_push_uses_b_provenance_and_never_registers_override(client, source_backend, monkeypatch):
     calls = []
-    monkeypatch.setattr(backend, "push_rows_to_new_sheet", lambda base, sid, rows, **kw: calls.append((sid, rows, kw)) or "Result")
+    monkeypatch.setattr(google_api, "push_rows_to_new_sheet", lambda base, sid, rows, **kw: calls.append((sid, rows, kw)) or "Result")
     before = selection()
     query = {"file_id": "B.xlsx", "platform": "threads"}
     pushed = client.post("/push-google-sheet", json=query).json()
@@ -216,7 +218,7 @@ def test_legacy_no_argument_direct_calls_and_default_activation(source_backend, 
     # A snapshot of the bytes, not a stream of the live file: an open download must not block the scan's atomic replace.
     assert download.body == (Path(backend.EXCEL_DIR) / "A.xlsx").read_bytes()
     calls = []
-    monkeypatch.setattr(backend, "push_rows_to_new_sheet", lambda base, sid, rows, **kw: calls.append(sid) or "Result")
+    monkeypatch.setattr(google_api, "push_rows_to_new_sheet", lambda base, sid, rows, **kw: calls.append(sid) or "Result")
     assert asyncio.run(backend.push_google_sheet())["success"] and calls == ["ID_A"]
     uploaded = asyncio.run(backend.upload_excel(UploadFile(filename="Legacy.xlsx", file=io.BytesIO((source_backend / "B.xlsx").read_bytes()))))
     assert uploaded["success"] and uploaded["platform"] == "tiktok"
@@ -224,8 +226,8 @@ def test_legacy_no_argument_direct_calls_and_default_activation(source_backend, 
 
 
 def test_sync_activate_false_publishes_registered_source_without_activation(client, source_backend, monkeypatch):
-    monkeypatch.setattr(backend, "fetch_google_spreadsheet_title", lambda _: "Synced")
-    monkeypatch.setattr(backend, "sync_download_google_sheet", lambda base, url, sid, destination: make_source(destination, "New"))
+    monkeypatch.setattr(google_api, "fetch_google_spreadsheet_title", lambda _: "Synced")
+    monkeypatch.setattr(google_api, "sync_download_google_sheet", lambda base, url, sid, destination: make_source(destination, "New"))
     logs = []
     async def log(message, **kwargs): logs.append(message)
     monkeypatch.setattr(backend.manager, "broadcast_log", log)
@@ -265,14 +267,14 @@ def test_select_restores_sheets_and_validates_before_committing(client):
 @pytest.mark.parametrize("route", ["/list-files", "/preview-excel", "/summary-dashboard", "/report-partners", "/download-excel"])
 def test_wrong_platform_is_rejected_before_file_resolution(client, monkeypatch, route):
     def unexpected(): pytest.fail("Invalid platform must not resolve legacy current file")
-    monkeypatch.setattr(backend, "ensure_selected_file", unexpected)
+    monkeypatch.setattr(source_files, "ensure_selected_file", unexpected)
     assert client.get(route, params={"platform": "wrong"}).status_code == 400
 
 
 @pytest.mark.parametrize("route", ["/select-file", "/sync-google-sheet", "/push-google-sheet", "/export-report"])
 def test_wrong_body_platform_is_rejected_before_file_resolution(client, monkeypatch, route):
     def unexpected(): pytest.fail("Invalid platform must not inspect files")
-    monkeypatch.setattr(backend, "file_entries", unexpected)
+    monkeypatch.setattr(source_files, "file_entries", unexpected)
     assert client.post(route, json={"platform": "wrong", "file_id": "B.xlsx"}).status_code == 400
 
 
@@ -300,8 +302,8 @@ async def websocket_start(monkeypatch, payload):
                 return json.dumps({"action": "start", "sheet_name": "A Data", **payload})
             await asyncio.sleep(0)
             raise WebSocketDisconnect()
-    monkeypatch.setattr(backend, "trusted_local_request", lambda *args, **kwargs: True)
-    monkeypatch.setattr(backend, "valid_local_session", lambda *args: True)
+    monkeypatch.setattr(security, "trusted_local_request", lambda *args, **kwargs: True)
+    monkeypatch.setattr(security, "valid_local_session", lambda *args: True)
     socket = Socket()
     await backend.websocket_endpoint(socket)
     if backend.SCRAPE_TASK:
@@ -312,7 +314,7 @@ async def websocket_start(monkeypatch, payload):
 @pytest.mark.parametrize("payload", [{"platform": "wrong"}, {"file_id": ""}])
 def test_websocket_rejects_platform_and_empty_source_before_legacy_resolution(source_backend, monkeypatch, payload):
     def unexpected(): pytest.fail("Rejected start must not resolve current workbook")
-    monkeypatch.setattr(backend, "ensure_selected_file", unexpected)
+    monkeypatch.setattr(source_files, "ensure_selected_file", unexpected)
     messages = asyncio.run(websocket_start(monkeypatch, payload))
     assert any(message.get("data", {}).get("phase") == "failed" for message in messages)
     assert backend.SCRAPE_TASK is None
@@ -327,8 +329,8 @@ def test_session_start_follows_proxy_toggle_without_separate_consent(source_back
             generations.append(generation)
             return cookies
     async def runner(path, options, **kwargs): calls.append(options)
-    monkeypatch.setattr(backend, "threads_session_manager", lambda: Session())
-    monkeypatch.setattr(backend, "run_scraper_safely", runner)
+    monkeypatch.setattr(server_context, "threads_session_manager", lambda: Session())
+    monkeypatch.setattr(scan_service, "run_scraper_safely", runner)
     asyncio.run(websocket_start(monkeypatch, {
         "platform": "threads", "file_id": "A.xlsx", "use_threads_session": True,
         "threads_session_generation": "fixture-generation", "use_proxy": use_proxy,
@@ -347,8 +349,8 @@ def test_session_start_rejects_socks5_auth_proxy_before_dispatch(source_backend,
             return ({"name": "sessionid", "value": "synthetic-only"},)
     calls = []
     async def runner(path, options, **kwargs): calls.append(options)
-    monkeypatch.setattr(backend, "threads_session_manager", lambda: Session())
-    monkeypatch.setattr(backend, "run_scraper_safely", runner)
+    monkeypatch.setattr(server_context, "threads_session_manager", lambda: Session())
+    monkeypatch.setattr(scan_service, "run_scraper_safely", runner)
     messages = asyncio.run(websocket_start(monkeypatch, {
         "platform": "threads", "file_id": "A.xlsx", "use_threads_session": True,
         "threads_session_generation": "fixture-generation", "scrape_mode": "request",
@@ -362,7 +364,7 @@ def test_session_start_rejects_socks5_auth_proxy_before_dispatch(source_backend,
 def test_session_generation_still_required(source_backend, monkeypatch):
     calls = []
     async def runner(path, options, **kwargs): calls.append(options)
-    monkeypatch.setattr(backend, "run_scraper_safely", runner)
+    monkeypatch.setattr(scan_service, "run_scraper_safely", runner)
     messages = asyncio.run(websocket_start(monkeypatch, {"platform": "threads", "use_threads_session": True}))
     assert not calls
     assert any("cookie Threads" in message.get("message", "") for message in messages)
