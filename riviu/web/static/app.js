@@ -93,7 +93,10 @@ let reportPartners = [];
 let reportSheetName = '';
 let reportSheetUpdating = false;
 let selectedPartners = new Set();
+// Oldest first, so a new failure is a push; the tables and the copied text list newest first.
 let failedLinks = [];
+// Kept in step with failedLinks, so a new failure never re-classifies the whole list.
+const failedLinkCounts = { errors: 0, nostats: 0 };
 let duplicateLinks = [];
 let duplicateRowCount = 0;
 let googleOAuthAuthorized = false;
@@ -2516,10 +2519,12 @@ function clearDuplicateLinks(showLog = true) {
     if (showLog) addLog('Đã xóa danh sách link trùng.');
 }
 
+// Newest first, the order of the tables and of the copied text.
 function failedLinksForKind(kind = 'all') {
-    if (kind === 'nostats') return failedLinks.filter(item => isNoStatsStatus(item.status));
-    if (kind === 'errors') return failedLinks.filter(item => !isNoStatsStatus(item.status));
-    return failedLinks;
+    const newestFirst = failedLinks.slice().reverse();
+    if (kind === 'nostats') return newestFirst.filter(item => isNoStatsStatus(item.status));
+    if (kind === 'errors') return newestFirst.filter(item => !isNoStatsStatus(item.status));
+    return newestFirst;
 }
 
 function renderFailureRows(items, emptyMessage) {
@@ -2571,6 +2576,9 @@ function renderFailedLinks() {
 
     if (errorBody) errorBody.innerHTML = renderFailureRows(errorItems, 'Chưa có link lỗi');
     if (noStatsBody) noStatsBody.innerHTML = renderFailureRows(noStatsItems, 'Chưa có link không đọc được số liệu');
+    // Every reset (new run, platform switch, snapshot replay, clear) ends here and recounts.
+    failedLinkCounts.errors = errorItems.length;
+    failedLinkCounts.nostats = noStatsItems.length;
     renderFailureCounts(errorItems.length, noStatsItems.length);
     failedLinksRenderedPlatform = activePlatform;
 }
@@ -2585,18 +2593,17 @@ function appendFailedLink(row) {
         status: row.status,
         worker: row.worker
     };
-    failedLinks.unshift(item);
-    const noStats = isNoStatsStatus(item.status);
-    const body = document.getElementById(noStats ? 'noStatsLinksBody' : 'failedLinksBody');
-    const sameKindCount = failedLinksForKind(noStats ? 'nostats' : 'errors').length;
+    failedLinks.push(item);
+    const kind = isNoStatsStatus(item.status) ? 'nostats' : 'errors';
+    failedLinkCounts[kind] += 1;
+    const body = document.getElementById(kind === 'nostats' ? 'noStatsLinksBody' : 'failedLinksBody');
     // The first row of a kind replaces its empty-state placeholder.
-    if (!body || sameKindCount === 1 || failedLinksRenderedPlatform !== activePlatform) {
+    if (!body || failedLinkCounts[kind] === 1 || failedLinksRenderedPlatform !== activePlatform) {
         renderFailedLinks();
         return;
     }
     body.insertAdjacentHTML('afterbegin', renderFailureRows([item], ''));
-    const otherKindCount = failedLinks.length - sameKindCount;
-    renderFailureCounts(noStats ? otherKindCount : sameKindCount, noStats ? sameKindCount : otherKindCount);
+    renderFailureCounts(failedLinkCounts.errors, failedLinkCounts.nostats);
 }
 
 async function copyFailedLinks(kind = 'all') {
