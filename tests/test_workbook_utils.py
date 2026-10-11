@@ -175,7 +175,7 @@ def test_threads_rows_use_url_username_for_blank_channel_and_count_like_tiktok(t
 
 def test_google_sheet_file_id_uses_spreadsheet_title(monkeypatch):
     monkeypatch.setattr(
-        "riviu.workbook_utils.fetch_google_spreadsheet_title",
+        "riviu.workbook.google_fetch.fetch_google_spreadsheet_title",
         lambda _url: "Report Seeding Tiktok 2026",
     )
     file_id = google_sheet_file_id_from_title("Report Seeding Tiktok 2026", "05-06-2026-10-42")
