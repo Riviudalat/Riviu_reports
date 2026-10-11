@@ -75,25 +75,30 @@ def validate_platform(platform="tiktok"):
         raise SourceRequestError(str(error)) from error
 
 
-def resolve_source_file(file_id=None, platform="tiktok", *, allow_empty=False):
-    """Capture an exact source; only an omitted ID may use legacy selection."""
+def resolve_source_file(file_id=None, platform="tiktok", *, allow_empty=False, entries=None):
+    """Capture an exact source; only an omitted ID may use legacy selection.
+
+    One catalog listing serves the membership check, the legacy fallback and the label. A
+    caller that also returns the catalog passes the `entries` it listed for this request.
+    """
     platform = validate_platform(platform)
-    if file_id is None:
-        file_id = ensure_selected_file()
-    elif not isinstance(file_id, str):
-        raise SourceRequestError("File không hợp lệ")
-    else:
+    if file_id is not None:
+        if not isinstance(file_id, str):
+            raise SourceRequestError("File không hợp lệ")
         file_id = file_id.replace("\\", "/")
         if not file_id:
             if allow_empty:
                 return "", "", "", platform
             raise SourceRequestError("Chưa chọn workbook hợp lệ")
-        if file_id not in {entry["id"] for entry in file_entries()}:
-            raise SourceRequestError("File không tồn tại", 404)
+    entries = file_entries() if entries is None else entries
+    if file_id is None:
+        file_id = ensure_selected_file(entries)
+    elif file_id not in {entry["id"] for entry in entries}:
+        raise SourceRequestError("File không tồn tại", 404)
     target_path = resolve_file_path(file_id)
     if file_id and (not target_path or not os.path.isfile(target_path)):
         raise SourceRequestError("File không tồn tại", 404)
-    return file_id, target_path, file_display_label(file_id), platform
+    return file_id, target_path, file_display_label(file_id, entries), platform
 
 
 def source_sheet_default(file_id, *, scan=False, explicit=False):
@@ -102,8 +107,8 @@ def source_sheet_default(file_id, *, scan=False, explicit=False):
     return default_sheet_for_file(file_id)
 
 
-def ensure_selected_file():
-    entries = file_entries()
+def ensure_selected_file(entries=None):
+    entries = file_entries() if entries is None else entries
     available_ids = {entry["id"] for entry in entries}
 
     if context.CURRENT_SELECTED_FILE and context.CURRENT_SELECTED_FILE in available_ids:
@@ -142,8 +147,9 @@ def current_google_sheet_source():
     return google_sheet_source_for_file(context.EXCEL_DIR, current_id)
 
 
-def file_display_label(file_id):
-    return next((entry["label"] for entry in file_entries() if entry["id"] == file_id), file_id)
+def file_display_label(file_id, entries=None):
+    entries = file_entries() if entries is None else entries
+    return next((entry["label"] for entry in entries if entry["id"] == file_id), file_id)
 
 
 def default_sheet_for_file(file_id):

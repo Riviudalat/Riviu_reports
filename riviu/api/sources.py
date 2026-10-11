@@ -49,7 +49,10 @@ router = APIRouter()
 @router.get("/list-files")
 async def list_files(file_id: str | None = None, platform: str = "tiktok"):
     try:
-        selected_id, target_path, file_label, platform = resolve_source_file(file_id, platform, allow_empty=True)
+        platform = validate_platform(platform)
+        # One listing per request: validation, the label and the response all read it.
+        entries = source_files.file_entries()
+        selected_id, target_path, file_label, platform = resolve_source_file(file_id, platform, allow_empty=True, entries=entries)
     except SourceRequestError as error:
         return error.response()
     google_source = dict(google_sheet_source_for_file(context.EXCEL_DIR, selected_id)) if selected_id else {}
@@ -67,7 +70,7 @@ async def list_files(file_id: str | None = None, platform: str = "tiktok"):
     selected_sheet = context.CURRENT_SELECTED_SHEET if file_id is None else (sheets[0] if sheets else "")
     scan_sheet = (context.CURRENT_SCAN_SHEET or selected_sheet) if file_id is None else selected_sheet
     state = {
-        "files": source_files.file_entries(),
+        "files": entries,
         "current": selected_id,
         "file_id": selected_id,
         "currentLabel": file_label,
