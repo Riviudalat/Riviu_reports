@@ -441,6 +441,80 @@ def test_cancel_waits_for_owned_http_thread(tmp_path, monkeypatch):
     finally: release.set()
 
 
+def test_workbook_setup_and_summary_leave_the_event_loop_free(tmp_path, monkeypatch):
+    # At 5,000 rows the load takes ~0.4 s and the summary ~0.6 s: neither may stall the server.
+    path = workbook(tmp_path)
+    monkeypatch.setattr(threads, "async_playwright", NoBrowser)
+    monkeypatch.setattr(threads, "fetch_threads_http", lambda url: metrics(views=15))
+    collect, rebuild = threads.collect_threads_rows, threads.rebuild_summary_sheet
+    loop, loop_ran = None, {}
+
+    def loop_runs_meanwhile(step):
+        # Only the event loop sets this, so it is set only while the step runs elsewhere.
+        ran = threading.Event()
+        loop.call_soon_threadsafe(ran.set)
+        loop_ran[step] = ran.wait(2)
+
+    def slow_collect(*args, **kwargs):
+        loop_runs_meanwhile("setup")
+        return collect(*args, **kwargs)
+
+    def slow_rebuild(*args, **kwargs):
+        loop_runs_meanwhile("summary")
+        return rebuild(*args, **kwargs)
+
+    monkeypatch.setattr(threads, "collect_threads_rows", slow_collect)
+    monkeypatch.setattr(threads, "rebuild_summary_sheet", slow_rebuild)
+
+    async def scan():
+        nonlocal loop
+        loop = asyncio.get_running_loop()
+        await threads.run_threads_scraper(path, mode="request", sheet_name="Data")
+
+    asyncio.run(scan())
+    assert loop_ran == {"setup": True, "summary": True}
+
+
+def test_cancel_during_summary_waits_for_the_rebuild_before_the_flush(tmp_path, monkeypatch):
+    path = workbook(tmp_path)
+    monkeypatch.setattr(threads, "async_playwright", NoBrowser)
+    monkeypatch.setattr(threads, "fetch_threads_http", lambda url: metrics(views=15, likes=3))
+    entered = threading.Event()
+    release = threading.Event()
+    order = []
+    rebuild, save = threads.rebuild_summary_sheet, threads.save_workbook_atomic
+
+    def blocked_rebuild(*args, **kwargs):
+        entered.set()
+        assert release.wait(5)
+        count = rebuild(*args, **kwargs)
+        order.append("summary")
+        return count
+
+    def tracked_save(*args):
+        order.append("save")
+        return save(*args)
+
+    monkeypatch.setattr(threads, "rebuild_summary_sheet", blocked_rebuild)
+    monkeypatch.setattr(threads, "save_workbook_atomic", tracked_save)
+
+    async def check():
+        task = asyncio.create_task(threads.run_threads_scraper(path, mode="request", sheet_name="Data"))
+        assert await asyncio.to_thread(entered.wait, 5)
+        task.cancel()
+        await asyncio.sleep(0.05)
+        # No save of the live workbook while its summary is half rebuilt.
+        assert not task.done() and order == []
+        release.set()
+        with pytest.raises(asyncio.CancelledError): await task
+    try: asyncio.run(check())
+    finally: release.set()
+    assert order == ["summary", "save"]  # the cancellation flush still keeps the result
+    saved = openpyxl.load_workbook(path)
+    try: assert saved.active["B2"].value == 3
+    finally: saved.close()
+
+
 class LaunchableChromium:
     """A browser that launches: a Hybrid fallback really reaches fetch_threads_browser."""
 

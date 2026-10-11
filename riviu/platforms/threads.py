@@ -686,6 +686,29 @@ def collect_threads_rows(workbook, sheet_name="", selected_partners=None, invali
     return rows
 
 
+def _load_threads_rows(file_path, sheet_name, selected_partners):
+    """The workbook, its scannable rows and its invalid Threads links. Blocking: run it off the event loop."""
+    workbook = openpyxl.load_workbook(file_path)
+    invalid_links = []
+    rows = collect_threads_rows(workbook, sheet_name=sheet_name, selected_partners=selected_partners, invalid_links=invalid_links)
+    return workbook, rows, invalid_links
+
+
+def _rebuild_summary_or_error(workbook, sheet_name, selected_partners):
+    """Blocking summary rebuild for a worker thread. The error is returned, not raised,
+    so finish_pending_task never lets it hide a cancellation."""
+    try:
+        return rebuild_summary_sheet(
+            workbook,
+            summary_update_time=format_display_datetime(),
+            selected_partners=selected_partners,
+            data_sheet_name=sheet_name,
+            platform="threads",
+        ), None
+    except Exception as error:
+        return 0, error
+
+
 def append_threads_diagnostic(base_dir, entry):
     directory = os.path.join(base_dir, "data")
     os.makedirs(directory, exist_ok=True)
@@ -843,16 +866,15 @@ async def _broadcast_result(websocket_manager, item, result, status, source, pro
 
 
 async def _rebuild_threads_summary(workbook, sheet_name, selected_partners, websocket_manager):
-    """Refresh the sheet's Threads summary tab (never the TikTok one); failure is only a warning."""
-    try:
-        count = rebuild_summary_sheet(
-            workbook,
-            summary_update_time=format_display_datetime(),
-            selected_partners=selected_partners,
-            data_sheet_name=sheet_name,
-            platform="threads",
-        )
-    except Exception as error:
+    """Refresh the sheet's Threads summary tab (never the TikTok one); failure is only a warning.
+
+    The rebuild runs in a worker thread while the run waits, so nothing else touches
+    the workbook meanwhile; a cancellation waits for it, so the cleanup save never
+    writes a half-rebuilt tab.
+    """
+    count, error = await finish_pending_task(asyncio.create_task(asyncio.to_thread(
+        _rebuild_summary_or_error, workbook, sheet_name, selected_partners)))
+    if error is not None:
         if websocket_manager:
             await websocket_manager.broadcast_log(f"CẢNH BÁO: Không cập nhật được sheet Tổng kết ({error})")
         return
@@ -869,9 +891,11 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
         raise ValueError("Bật proxy nhưng chưa có proxy hợp lệ.")
     if session_cookies is not None:
         await _preflight_session(session_cookies, proxies, diagnostics)
-    workbook = openpyxl.load_workbook(file_path)
-    invalid_links = []
-    rows = collect_threads_rows(workbook, sheet_name=sheet_name, selected_partners=selected_partners, invalid_links=invalid_links)
+    # Loading and scanning a large workbook takes a second; keep the server responsive.
+    # Owned like a save: a cancellation waits for the read, so no thread of this run
+    # still holds the file once the scan is released.
+    workbook, rows, invalid_links = await finish_pending_task(asyncio.create_task(asyncio.to_thread(
+        _load_threads_rows, file_path, sheet_name, selected_partners)))
     skipped_profiles = sum(1 for invalid in invalid_links if invalid["kind"] == "profile")
     buckets = {}
     for row in rows:
