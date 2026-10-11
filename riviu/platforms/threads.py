@@ -713,11 +713,16 @@ def collect_threads_rows(workbook, sheet_name="", selected_partners=None, invali
 
 
 def _load_threads_rows(file_path, sheet_name, selected_partners):
-    """The workbook, its scannable rows and its invalid Threads links. Blocking: run it off the event loop."""
+    """The workbook, its scannable rows, those rows grouped by post, and its invalid
+    Threads links. Blocking: run it off the event loop."""
     workbook = openpyxl.load_workbook(file_path)
     invalid_links = []
     rows = collect_threads_rows(workbook, sheet_name=sheet_name, selected_partners=selected_partners, invalid_links=invalid_links)
-    return workbook, rows, invalid_links
+    buckets = {}
+    for row in rows:
+        key = post_identity(row["url"]) or ("share", row["url"].casefold())
+        buckets.setdefault(key, {"url": row["url"], "rows": []})["rows"].append(row)
+    return workbook, rows, list(buckets.values()), invalid_links
 
 
 def _rebuild_summary_or_error(workbook, sheet_name, selected_partners):
@@ -920,14 +925,9 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
     # Loading and scanning a large workbook takes a second; keep the server responsive.
     # Owned like a save: a cancellation waits for the read, so no thread of this run
     # still holds the file once the scan is released.
-    workbook, rows, invalid_links = await finish_pending_task(asyncio.create_task(asyncio.to_thread(
+    workbook, rows, items, invalid_links = await finish_pending_task(asyncio.create_task(asyncio.to_thread(
         _load_threads_rows, file_path, sheet_name, selected_partners)))
     skipped_profiles = sum(1 for invalid in invalid_links if invalid["kind"] == "profile")
-    buckets = {}
-    for row in rows:
-        key = post_identity(row["url"]) or ("share", row["url"].casefold())
-        buckets.setdefault(key, {"url": row["url"], "rows": []})["rows"].append(row)
-    items = list(buckets.values())
     total = len(items)
     workers = max(1, min(int(worker_count or 3), 5 if mode != "request" else 10))
     if diagnostics is not None:
