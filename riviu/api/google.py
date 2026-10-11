@@ -213,7 +213,8 @@ async def push_google_sheet(data: dict | None = None):
             rows = await asyncio.to_thread(build_workbook_rows, target_path, sheet_name=upload_sheet, platform=platform)
             if not rows:
                 return JSONResponse(content={"error": f"Sheet \"{upload_sheet or 'đang chọn'}\" không có link {platform} để tạo sheet."}, status_code=400)
-            values = build_google_push_rows(rows, platform=platform)
+            # Off the loop on the fresh row copies; a cancel still waits for it inside the source gate.
+            values = await context.complete_blocking(build_google_push_rows, rows, platform=platform)
             sheet_title = await context.complete_blocking(context.google_io, push_rows_to_new_sheet, context.EXCEL_DIR, spreadsheet_id, values, source_sheet_name=upload_sheet, platform=platform)
             return {"success": True, "sheetTitle": sheet_title, "sourceSheet": upload_sheet, "file": file_id, "file_id": file_id, "platform": platform}
         except Exception as error:
