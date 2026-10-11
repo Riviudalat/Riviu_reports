@@ -536,3 +536,20 @@ def test_failure_lists_count_each_failure_once_and_match_a_full_render(page):
     no_stats = {f"https://www.tiktok.com/@demo/video/{i}" for i in range(2000) if i % 7 in (1, 2, 3)}
     assert result["copies"] == [newest_first, [url for url in newest_first if url not in no_stats],
                                 [url for url in newest_first if url in no_stats]]
+
+
+def test_log_badge_counts_lines_and_log_box_follows_newest_line(page):
+    result = page.evaluate("""async () => {
+        setWorkspaceTab('logs');
+        const logs=document.getElementById('logs');
+        const frame=()=>new Promise(resolve=>requestAnimationFrame(()=>resolve()));
+        const state=()=>({badge:document.getElementById('logCountBadge').textContent,
+            lines:logs.querySelectorAll('.log-line').length, overflows:logs.scrollHeight>logs.clientHeight,
+            atEnd:logs.scrollTop+logs.clientHeight>=logs.scrollHeight-1});
+        for(let i=0;i<300;i++) addLog('Dòng '+i);
+        await frame(); const filled=state();
+        clearLogs(); addLog('Sau khi xóa'); await frame();
+        return {filled,cleared:state()};
+    }""")
+    assert result["filled"] == {"badge": "300", "lines": 300, "overflows": True, "atEnd": True}
+    assert result["cleared"] == {"badge": "2", "lines": 2, "overflows": False, "atEnd": True}

@@ -587,6 +587,20 @@ function renderLogBody(msg, level, details) {
     return `<span class="log-plain" style="color:${logLevelColor(level)}">${escapeHtml(cmdLine(level, msg))}</span>`;
 }
 
+// The .log-line children of #logs: only addLog adds them and only clearLogs removes them.
+let logLineCount = 0;
+let logScrollScheduled = false;
+
+// Reading scrollHeight forces a layout, so a burst of lines scrolls once, before the next paint.
+function scrollLogsToEnd(logs) {
+    if (logScrollScheduled) return;
+    logScrollScheduled = true;
+    requestAnimationFrame(() => {
+        logScrollScheduled = false;
+        logs.scrollTop = logs.scrollHeight;
+    });
+}
+
 function addLog(msg, options = {}) {
     const logs = document.getElementById('logs');
     const div = document.createElement('div');
@@ -600,9 +614,10 @@ function addLog(msg, options = {}) {
     div.dataset.logText = storedLine;
     div.innerHTML = `<span class="log-time">[${time}]</span> ${renderLogBody(msg, level, details)}`;
     logs.appendChild(div);
-    logs.scrollTop = logs.scrollHeight;
+    logLineCount += 1;
+    scrollLogsToEnd(logs);
     const logCountBadge = document.getElementById('logCountBadge');
-    if (logCountBadge) logCountBadge.textContent = logs.querySelectorAll('.log-line').length;
+    if (logCountBadge) logCountBadge.textContent = logLineCount;
 }
 
 const TOAST_ICONS = { success: 'check_circle', error: 'error', warn: 'warning', info: 'info' };
@@ -669,6 +684,7 @@ async function copyLogs() {
 
 function clearLogs() {
     document.getElementById('logs').innerHTML = '';
+    logLineCount = 0;
     addLog('Đã xóa log hệ thống.');
 }
 
