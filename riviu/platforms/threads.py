@@ -15,6 +15,7 @@ from urllib.parse import parse_qs, urljoin, urlparse
 
 from riviu import proxy_utils
 import openpyxl
+from openpyxl.utils import get_column_letter
 from riviu.platforms import threads_session
 from playwright.async_api import async_playwright
 
@@ -642,24 +643,42 @@ async def fetch_threads_browser(browser, url, proxy_config=None, session_cookies
             await page.close()
 
 
-def write_threads_result(sheet, row_index, result):
+def _ensure_column(sheet, header, columns, *, hidden=False):
+    """worksheet_ensure_column, remembered per worksheet object when columns (one run's dict) is given.
+
+    Each lookup reads max_column, which scans every cell (~8 ms at 5,000 rows).
+    A run only appends headers to its data sheets, and the first matching header
+    wins, so an index resolved once stays right for the rest of that run.
+    """
+    if columns is None:
+        return worksheet_ensure_column(sheet, header, hidden=hidden)
+    known = columns.setdefault(sheet, {})
+    index = known.get(header)
+    if index is None:
+        index = known[header] = worksheet_ensure_column(sheet, header, hidden=hidden)
+    elif hidden:
+        sheet.column_dimensions[get_column_letter(index)].hidden = True
+    return index
+
+
+def write_threads_result(sheet, row_index, result, columns=None):
     # Shared, diacritic-insensitive header matching: never append a duplicate the preview ignores.
     channel = result.get("channel")
-    channel_column = worksheet_ensure_column(sheet, "Tên Kênh")
+    channel_column = _ensure_column(sheet, "Tên Kênh", columns)
     if channel:
         set_cell_literal(sheet.cell(row=row_index, column=channel_column), channel)
     for key, header in METRICS.items():
         value = result["metrics"].get(key)
         if value is not None:
-            sheet.cell(row=row_index, column=worksheet_ensure_column(sheet, header)).value = value
+            sheet.cell(row=row_index, column=_ensure_column(sheet, header, columns)).value = value
         elif key == "views" and result.get("metricSources", {}).get("views") == "view_query_unknown":
             # Explicit exact-null/conflict invalidates stale display-derived views.
-            sheet.cell(row=row_index, column=worksheet_ensure_column(sheet, header)).value = None
-    worksheet_ensure_column(sheet, "REPOST")
+            sheet.cell(row=row_index, column=_ensure_column(sheet, header, columns)).value = None
+    _ensure_column(sheet, "REPOST", columns)
     status = result_status(result)
-    sheet.cell(row=row_index, column=worksheet_ensure_column(sheet, THREADS_SCAN_STATUS_HEADER, hidden=True)).value = status
+    sheet.cell(row=row_index, column=_ensure_column(sheet, THREADS_SCAN_STATUS_HEADER, columns, hidden=True)).value = status
     if channel or any(value is not None for value in result["metrics"].values()):
-        sheet.cell(row=row_index, column=worksheet_ensure_column(sheet, LAST_UPDATE_COLUMN)).value = format_display_datetime()
+        sheet.cell(row=row_index, column=_ensure_column(sheet, LAST_UPDATE_COLUMN, columns)).value = format_display_datetime()
     return status
 
 
@@ -945,6 +964,9 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
     processed = success = hidden = errors = 0
     dirty = False
     last_saved = _checkpoint_clock()
+    # Column indexes of this run's freshly loaded workbook. Only the result loop
+    # uses them, and nothing there inserts, deletes or renames columns.
+    columns = {}
     completed = False
     started = time.monotonic()
 
@@ -1011,7 +1033,7 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                 else:
                     hidden += 1
                 for row in item["rows"]:
-                    write_threads_result(workbook[row["sheet_name"]], row["row"], result)
+                    write_threads_result(workbook[row["sheet_name"]], row["row"], result, columns)
                     dirty = True
                 if diagnostics is not None:
                     diagnostics.update(processedUrls=processed, success=success, partial=hidden, error=errors)
