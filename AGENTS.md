@@ -4,9 +4,9 @@
 
 The Python code is the `riviu` package; run it with `python -m riviu` (the root `app.py` is a shim that does the same).
 
-- `riviu/app.py` serves the FastAPI API and WebSocket scan events; `riviu/desktop_server.py` integrates the desktop backend.
-- `riviu/platforms/tiktok.py` handles TikTok; `riviu/platforms/threads.py` and `riviu/platforms/threads_session.py` handle Threads metrics and authenticated sessions.
-- `riviu/workbook_utils.py`, `riviu/google_sheets_sync.py`, and `riviu/proxy_utils.py` own workbook operations, Google integration, and proxy transport.
+- `riviu/app.py` builds the FastAPI app from the routers in `riviu/api/`; `riviu/scan_state.py` and `riviu/scan_service.py` own the single-scan state and dispatch; `riviu/desktop_server.py` integrates the desktop backend.
+- the `riviu/platforms/tiktok/` package handles TikTok; `riviu/platforms/threads.py` and `riviu/platforms/threads_session.py` handle Threads metrics and authenticated sessions.
+- the `riviu/workbook/` package (re-exported by the `riviu/workbook_utils.py` facade), `riviu/google_sheets_sync.py`, and `riviu/proxy_utils.py` own workbook operations, Google integration, and proxy transport.
 - `riviu/reports.py` builds partner Excel reports, export payloads, and Google push rows; it must not import `riviu.app`.
 - `riviu/paths.py` resolves web resources and the user-data directory for source and frozen runs.
 - `riviu/web/templates/index.html`, `riviu/web/static/` and `riviu/web/logo.png` contain the HTML, JavaScript, CSS, icons and logo.
