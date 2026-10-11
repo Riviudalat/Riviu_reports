@@ -1,13 +1,4 @@
-let ws;
-let reportPartners = [];
-let reportSheetName = '';
-let reportSheetUpdating = false;
-let selectedPartners = new Set();
-let failedLinks = [];
-let duplicateLinks = [];
-let duplicateRowCount = 0;
-let googleOAuthAuthorized = false;
-
+// ---- Platform registry ------------------------------------------------------
 // Everything that differs between platforms lives here. Adding a platform means adding
 // one entry (plus its icon in static/platform-icons/ and backend support); the platform
 // bar, the source rows in the source drawer (element ids from `dom`), link matching,
@@ -96,6 +87,17 @@ for (const [name, key] of Object.entries({
     });
 }
 
+// ---- Shared state -----------------------------------------------------------
+let ws;
+let reportPartners = [];
+let reportSheetName = '';
+let reportSheetUpdating = false;
+let selectedPartners = new Set();
+let failedLinks = [];
+let duplicateLinks = [];
+let duplicateRowCount = 0;
+let googleOAuthAuthorized = false;
+
 let sourceBusy = false;
 let sourceRevision = 0;
 let sourcesInitialized = false;
@@ -112,21 +114,24 @@ let desktopUpdateCheckInFlight = false;
 let desktopUpdateInstalling = false;
 let desktopStartupUpdatePending = false;
 let websocketSessionReady = false;
-const WS_RECONNECT_BASE_MS = 1000;
-const WS_RECONNECT_MAX_MS = 5000;
-const WS_LOST_AFTER_MS = 15000;
-const CONNECTION_RECONNECTING_TEXT = 'Đang kết nối lại tới server…';
-const CONNECTION_LOST_TEXT = 'Mất kết nối tới server. Ứng dụng vẫn tự thử lại, hoặc tải lại trang (F5).';
-let wsReconnectFailures = 0;
-let wsDisconnectedAt = 0;
-let wsRetryPending = false;
-let wsConnectionLost = false;
+
 let scanPhase = 'idle';
 let currentRunContext = null;
 let lastTerminalStatus = '';
 const liveResultClasses = new Map();
 let lastProgressData = null;
 const readRequestSequence = { files: 0, preview: 0, summary: 0, partners: 0 };
+
+let proxyListText = '';
+let proxySavedCount = 0;
+const SERVER_BUILD_KEY = 'serverProxyBuild';
+let threadsCookieState = { configured: false, state: 'none', generation: '' };
+let threadsCookieBusy = false;
+let threadsCookieFocus = null;
+let threadsCookieSource = 'file';
+let threadsCookieRevision = 0;
+
+// ---- DOM handles and button markup ------------------------------------------
 const startBtn = document.getElementById('startBtn');
 const cancelBtn = document.getElementById('cancelBtn');
 const workerCountSelect = document.getElementById('workerCountSelect');
@@ -137,32 +142,80 @@ const proxyTestResult = document.getElementById('proxyTestResult');
 const proxyModalSummary = document.getElementById('proxyModalSummary');
 const proxyCard = document.getElementById('proxyCard');
 const proxyConfigBtn = document.getElementById('proxyConfigBtn');
-let proxyListText = '';
-let proxySavedCount = 0;
-const SERVER_BUILD_KEY = 'serverProxyBuild';
-let threadsCookieState = { configured: false, state: 'none', generation: '' };
-let threadsCookieBusy = false;
-let threadsCookieFocus = null;
-let threadsCookieSource = 'file';
-let threadsCookieRevision = 0;
+
+const scanSheetSelect = document.getElementById('scanSheetSelect');
 
 const BTN_START_IDLE = '<span class="material-icons-outlined">play_arrow</span><span>Bắt đầu quét</span>';
 const BTN_START_BUSY = '<span class="material-icons-outlined">hourglass_top</span><span>Đang quét...</span>';
 const BTN_CANCEL_IDLE = '<span class="material-icons-outlined">stop_circle</span><span>Hủy</span>';
 const BTN_CANCEL_BUSY = '<span class="material-icons-outlined">hourglass_top</span><span>Đang hủy...</span>';
 
-function setProxyCardState({ ready = false, active = false } = {}) {
-    if (!proxyCard) return;
-    proxyCard.classList.toggle('ready', ready);
-    proxyCard.classList.toggle('active', active);
+// ---- Shared helpers ---------------------------------------------------------
+function escapeHtml(value) {
+    return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('"', '&quot;')
+        .replaceAll("'", '&#039;');
 }
 
-function syncProxyCardActiveState() {
-    const ready = proxySavedCount > 0;
-    setProxyCardState({ ready, active: ready && Boolean(proxyUseCheckbox && proxyUseCheckbox.checked) });
+function normalizeVietnameseKey(value) {
+    return String(value || '')
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/đ/g, 'd')
+        .replace(/Đ/g, 'D')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
 }
-const scanSheetSelect = document.getElementById('scanSheetSelect');
 
+function formatNumber(value) {
+    const number = Number(value || 0);
+    return Number.isFinite(number) ? number.toLocaleString('vi-VN') : '0';
+}
+
+// Unknown metrics stay blank on every platform; only a confirmed number (including 0) is shown.
+function formatResultNumber(value) {
+    return value === null || value === undefined || value === '' ? '' : formatNumber(value);
+}
+
+function formatDuration(seconds) {
+    if (seconds === null || seconds === undefined || seconds === '') return '';
+    const sec = Math.max(parseInt(seconds, 10) || 0, 0);
+    if (sec < 60) return `${sec}s`;
+    const minutes = Math.floor(sec / 60);
+    const remain = sec % 60;
+    if (minutes < 60) return `${minutes}m ${remain}s`;
+    const hours = Math.floor(minutes / 60);
+    const remainMin = minutes % 60;
+    return `${hours}h ${remainMin}m`;
+}
+
+function fileDisplayLabel(file) {
+    return typeof file === 'string' ? file : (file?.label || file?.id || '');
+}
+
+function filenameFromDisposition(disposition, fallback) {
+    const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
+    if (utf8Match) return decodeURIComponent(utf8Match[1]);
+    const plainMatch = disposition.match(/filename="?([^";]+)"?/i);
+    return plainMatch ? plainMatch[1] : fallback;
+}
+
+function downloadBlob(blob, filename) {
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+}
+
+// ---- Platform switch and workspace layout -----------------------------------
 function renderPlatformBar() {
     const bar = document.getElementById('platformBar');
     if (!bar) return;
@@ -402,6 +455,7 @@ function setWorkspaceTab(tabName) {
     if (meta.panel === 'live') showNewestLiveResults();
 }
 
+// ---- Logs and notifications -------------------------------------------------
 function cmdLine(type, message) {
     const prefix = type ? `[${type}] ` : '';
     return `${prefix}${message}`;
@@ -528,18 +582,6 @@ function notify(message, level = 'info') {
     showToast(message, level);
 }
 
-function isNoStatsStatus(status) {
-    const text = String(status || '');
-    return (
-        text.includes('Ẩn số liệu')
-        || text.startsWith('Partial:')
-        || text.includes('TikTok không trả số liệu')
-        || text.includes('TikTok không trả lượt xem')
-        || text.includes('không trả số liệu')
-        || text.includes('không trả lượt xem')
-    );
-}
-
 function getLogText() {
     return Array.from(document.querySelectorAll('#logs .log-line'))
         .map(line => line.dataset.logText || line.textContent.trim())
@@ -602,19 +644,7 @@ function clearLogs() {
     addLog('Đã xóa log hệ thống.');
 }
 
-function escapeHtml(value) {
-    return String(value ?? '')
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;')
-        .replaceAll('"', '&quot;')
-        .replaceAll("'", '&#039;');
-}
-
-function fileDisplayLabel(file) {
-    return typeof file === 'string' ? file : (file?.label || file?.id || '');
-}
-
+// ---- Sheet names and sheet selects ------------------------------------------
 function isSummarySheetName(value) {
     const key = normalizeVietnameseKey(value);
     return key === 'tong ket' || key.startsWith('tong ket ');
@@ -719,47 +749,16 @@ function renderPushSheetOptions(sheets, selectedSheet = '') {
     );
 }
 
-// The only rule for the "Tạo sheet" buttons: idle UI, Google login, a target URL,
-// and that platform's own file and sheet.
-function setGooglePushState() {
-    for (const platform of PLATFORM_KEYS) {
-        const source = platformSources[platform], controls = sourceControls(platform);
-        const enabled = Boolean(!scanIsBusy() && !desktopUpdateInstalling && !sourceBusy && !threadsCookieBusy
-            && googleOAuthAuthorized && controls.url?.value.trim() && source.fileId && (controls.sheet?.value || source.pushSheet));
-        if (controls.push) { controls.push.disabled = !enabled; controls.push.title = enabled ? '' : 'Cần đăng nhập Google, link đích và file/sheet của nền tảng này.'; }
-    }
+// ---- Proxy settings ---------------------------------------------------------
+function setProxyCardState({ ready = false, active = false } = {}) {
+    if (!proxyCard) return;
+    proxyCard.classList.toggle('ready', ready);
+    proxyCard.classList.toggle('active', active);
 }
 
-function rememberServerBuild(build) {
-    const value = String(build || '').trim();
-    if (value) {
-        localStorage.setItem(SERVER_BUILD_KEY, value);
-    }
-}
-
-async function checkServerVersion() {
-    const banner = document.getElementById('serverBanner');
-    try {
-        const res = await fetch('/api/version');
-        const data = await res.json();
-        const build = String(data.proxyTestBuild || '').trim();
-        if (!build) return;
-        const stored = localStorage.getItem(SERVER_BUILD_KEY);
-        if (stored && stored !== build && banner) {
-            banner.hidden = false;
-            banner.textContent = 'Server đã cập nhật code (build '
-                + build
-                + '). Restart Khoidong.bat (Ctrl+C → chạy lại) rồi F5 trang này.';
-            rememberServerBuild(build);
-        } else if (banner) {
-            banner.hidden = true;
-            rememberServerBuild(build);
-        } else {
-            rememberServerBuild(build);
-        }
-    } catch (error) {
-        console.error(error);
-    }
+function syncProxyCardActiveState() {
+    const ready = proxySavedCount > 0;
+    setProxyCardState({ ready, active: ready && Boolean(proxyUseCheckbox && proxyUseCheckbox.checked) });
 }
 
 async function loadProxyList() {
@@ -952,6 +951,39 @@ async function testProxyList() {
     }
 }
 
+// ---- Server build and Google login ------------------------------------------
+function rememberServerBuild(build) {
+    const value = String(build || '').trim();
+    if (value) {
+        localStorage.setItem(SERVER_BUILD_KEY, value);
+    }
+}
+
+async function checkServerVersion() {
+    const banner = document.getElementById('serverBanner');
+    try {
+        const res = await fetch('/api/version');
+        const data = await res.json();
+        const build = String(data.proxyTestBuild || '').trim();
+        if (!build) return;
+        const stored = localStorage.getItem(SERVER_BUILD_KEY);
+        if (stored && stored !== build && banner) {
+            banner.hidden = false;
+            banner.textContent = 'Server đã cập nhật code (build '
+                + build
+                + '). Restart Khoidong.bat (Ctrl+C → chạy lại) rồi F5 trang này.';
+            rememberServerBuild(build);
+        } else if (banner) {
+            banner.hidden = true;
+            rememberServerBuild(build);
+        } else {
+            rememberServerBuild(build);
+        }
+    } catch (error) {
+        console.error(error);
+    }
+}
+
 async function refreshGoogleOauthStatus() {
     try {
         const res = await fetch('/google-oauth-status');
@@ -979,53 +1011,45 @@ async function refreshGoogleOauthStatus() {
     }
 }
 
-function normalizeVietnameseKey(value) {
-    return String(value || '')
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/đ/g, 'd')
-        .replace(/Đ/g, 'D')
-        .replace(/\s+/g, ' ')
-        .trim()
-        .toLowerCase();
-}
-
-function formatNumber(value) {
-    const number = Number(value || 0);
-    return Number.isFinite(number) ? number.toLocaleString('vi-VN') : '0';
-}
-
-// Unknown metrics stay blank on every platform; only a confirmed number (including 0) is shown.
-function formatResultNumber(value) {
-    return value === null || value === undefined || value === '' ? '' : formatNumber(value);
-}
-
-function summaryDashboardTitle(data, totals) {
-    const sheetTitle = String(data.sheet || 'Tổng kết').trim();
-    const partnerCount = Number(totals.partners || 0);
-    const partnerMeta = partnerCount > 0
-        ? `<span class="summary-title-meta">${formatNumber(partnerCount)} đối tác</span>`
-        : '';
-    return `${escapeHtml(sheetTitle)}${partnerMeta}`;
-}
-
-function renderSummaryTableCell(column, value, { footer = false } = {}) {
-    const key = normalizeVietnameseKey(column);
-    if (key === 'doi tac') {
-        return `<td class="partner-cell" title="${escapeHtml(value)}">${escapeHtml(value)}</td>`;
+async function uploadGoogleOauthClient(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+        const res = await fetch('/google-oauth-client', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'Không nạp được OAuth client');
+        addLog('Đã cài cấu hình Google cho ứng dụng. Từ giờ trên máy này chỉ cần bấm "Đăng nhập Google".');
+        await refreshGoogleOauthStatus();
+    } catch (error) {
+        addLog(`Lỗi OAuth client: ${error.message}`);
     }
-    if (key === 'cap nhat lan cuoi') return `<td>${escapeHtml(value)}</td>`;
-    if (key === 'stt') return `<td class="number-cell">${value === '' ? '' : formatNumber(value)}</td>`;
-    if (key === 'tong link') return `<td class="number-cell total-link-cell">${formatNumber(value)}</td>`;
-    return `<td class="number-cell">${formatResultNumber(value)}</td>`;
+    input.value = '';
 }
 
-function setPreviewTableVisible(visible) {
-    const wrapper = document.querySelector('#previewTable')?.closest('.table-wrap');
-    if (wrapper) wrapper.style.display = visible ? '' : 'none';
-    document.getElementById('summaryDashboard').classList.toggle('active', !visible);
+async function connectGoogleOAuth() {
+    const btn = document.getElementById('googleLoginBtn');
+    const originalHtml = btn.innerHTML;
+    btn.disabled = true;
+    btn.innerHTML = 'Đang mở đăng nhập...';
+    try {
+        const res = await fetch('/google-oauth-login', { method: 'POST' });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'Đăng nhập Google thất bại');
+        notify('Đăng nhập Google thành công.', 'success');
+        await refreshGoogleOauthStatus();
+        await updateFileList();
+    } catch (error) {
+        notify(`Lỗi đăng nhập Google: ${error.message}`, 'error');
+    } finally {
+        btn.innerHTML = originalHtml;
+        await refreshGoogleOauthStatus();
+        await updateFileList();
+    }
 }
 
+// ---- Platform sources -------------------------------------------------------
 function sourceControls(platform) {
     const { dom } = platformConfig(platform);
     return {
@@ -1035,6 +1059,17 @@ function sourceControls(platform) {
         push: document.getElementById(dom.push),
         label: document.getElementById(dom.sourceLabel),
     };
+}
+
+// The only rule for the "Tạo sheet" buttons: idle UI, Google login, a target URL,
+// and that platform's own file and sheet.
+function setGooglePushState() {
+    for (const platform of PLATFORM_KEYS) {
+        const source = platformSources[platform], controls = sourceControls(platform);
+        const enabled = Boolean(!scanIsBusy() && !desktopUpdateInstalling && !sourceBusy && !threadsCookieBusy
+            && googleOAuthAuthorized && controls.url?.value.trim() && source.fileId && (controls.sheet?.value || source.pushSheet));
+        if (controls.push) { controls.push.disabled = !enabled; controls.push.title = enabled ? '' : 'Cần đăng nhập Google, link đích và file/sheet của nền tảng này.'; }
+    }
 }
 
 function validatedSourceItem(item = {}) {
@@ -1444,44 +1479,6 @@ async function uploadFile(input) {
     sourceBusy = false; syncScanControls();
 }
 
-async function uploadGoogleOauthClient(input) {
-    const file = input.files[0];
-    if (!file) return;
-    const formData = new FormData();
-    formData.append('file', file);
-    try {
-        const res = await fetch('/google-oauth-client', { method: 'POST', body: formData });
-        const data = await res.json();
-        if (!res.ok || !data.success) throw new Error(data.error || 'Không nạp được OAuth client');
-        addLog('Đã cài cấu hình Google cho ứng dụng. Từ giờ trên máy này chỉ cần bấm "Đăng nhập Google".');
-        await refreshGoogleOauthStatus();
-    } catch (error) {
-        addLog(`Lỗi OAuth client: ${error.message}`);
-    }
-    input.value = '';
-}
-
-async function connectGoogleOAuth() {
-    const btn = document.getElementById('googleLoginBtn');
-    const originalHtml = btn.innerHTML;
-    btn.disabled = true;
-    btn.innerHTML = 'Đang mở đăng nhập...';
-    try {
-        const res = await fetch('/google-oauth-login', { method: 'POST' });
-        const data = await res.json();
-        if (!res.ok || !data.success) throw new Error(data.error || 'Đăng nhập Google thất bại');
-        notify('Đăng nhập Google thành công.', 'success');
-        await refreshGoogleOauthStatus();
-        await updateFileList();
-    } catch (error) {
-        notify(`Lỗi đăng nhập Google: ${error.message}`, 'error');
-    } finally {
-        btn.innerHTML = originalHtml;
-        await refreshGoogleOauthStatus();
-        await updateFileList();
-    }
-}
-
 async function pushCurrentSheetToGoogle(event, platform = activePlatform) {
     if (sourceBusy || scanIsBusy() || threadsCookieBusy || desktopUpdateInstalling) return;
     if (platform === activePlatform) saveActiveSource();
@@ -1555,6 +1552,33 @@ async function switchSheet(sheetName) {
     currentSheetName = sheetName;
     saveActiveSource();
     await loadPreview(sheetName);
+}
+
+// ---- Sheet preview and summary dashboard ------------------------------------
+function summaryDashboardTitle(data, totals) {
+    const sheetTitle = String(data.sheet || 'Tổng kết').trim();
+    const partnerCount = Number(totals.partners || 0);
+    const partnerMeta = partnerCount > 0
+        ? `<span class="summary-title-meta">${formatNumber(partnerCount)} đối tác</span>`
+        : '';
+    return `${escapeHtml(sheetTitle)}${partnerMeta}`;
+}
+
+function renderSummaryTableCell(column, value, { footer = false } = {}) {
+    const key = normalizeVietnameseKey(column);
+    if (key === 'doi tac') {
+        return `<td class="partner-cell" title="${escapeHtml(value)}">${escapeHtml(value)}</td>`;
+    }
+    if (key === 'cap nhat lan cuoi') return `<td>${escapeHtml(value)}</td>`;
+    if (key === 'stt') return `<td class="number-cell">${value === '' ? '' : formatNumber(value)}</td>`;
+    if (key === 'tong link') return `<td class="number-cell total-link-cell">${formatNumber(value)}</td>`;
+    return `<td class="number-cell">${formatResultNumber(value)}</td>`;
+}
+
+function setPreviewTableVisible(visible) {
+    const wrapper = document.querySelector('#previewTable')?.closest('.table-wrap');
+    if (wrapper) wrapper.style.display = visible ? '' : 'none';
+    document.getElementById('summaryDashboard').classList.toggle('active', !visible);
 }
 
 function matchesPlatformLink(value, platform = activePlatform) {
@@ -1772,6 +1796,7 @@ async function renderSummaryDashboard(dataSheetName = '') {
     }
 }
 
+// ---- Scan controls and run context ------------------------------------------
 function scanIsBusy() {
     return ['starting', 'running', 'saving', 'cancelling'].includes(scanPhase);
 }
@@ -1887,6 +1912,17 @@ function handleSessionSnapshot(session) {
     }
 }
 
+// ---- WebSocket connection ---------------------------------------------------
+const WS_RECONNECT_BASE_MS = 1000;
+const WS_RECONNECT_MAX_MS = 5000;
+const WS_LOST_AFTER_MS = 15000;
+const CONNECTION_RECONNECTING_TEXT = 'Đang kết nối lại tới server…';
+const CONNECTION_LOST_TEXT = 'Mất kết nối tới server. Ứng dụng vẫn tự thử lại, hoặc tải lại trang (F5).';
+let wsReconnectFailures = 0;
+let wsDisconnectedAt = 0;
+let wsRetryPending = false;
+let wsConnectionLost = false;
+
 function connectWS() {
     websocketSessionReady = false;
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -1971,6 +2007,7 @@ function renderConnectionState() {
     syncScanControls();
 }
 
+// ---- Threads cookie session -------------------------------------------------
 function formatCookieCheckedAt(value) {
     const date = new Date(value);
     if (Number.isNaN(date.getTime())) return String(value);
@@ -2123,6 +2160,7 @@ function confirmThreadsCookieDelete() {
     return threadsCookieAction('delete');
 }
 
+// ---- Scan start and cancel --------------------------------------------------
 const SCRAPE_MODE_LABELS = Object.freeze({
     browser: 'trình duyệt',
     hybrid: 'Hybrid (Request + trình duyệt)',
@@ -2208,62 +2246,17 @@ function cancelScraping() {
     addLog('Đã gửi lệnh hủy quét.');
 }
 
-// Every platform's partner report uses the same min-views threshold (TikTok's rules).
-function reportFilterParams() {
-    const applyMinViews = document.getElementById('minViewToggle')?.checked ?? true;
-    const minViewsRaw = parseInt(document.getElementById('minViewInput')?.value, 10);
-    const minViews = Number.isFinite(minViewsRaw) && minViewsRaw >= 0 ? minViewsRaw : 100;
-    return { applyMinViews, minViews };
-}
-
-function normalizeReportPartners(raw) {
-    return (raw || []).map(item => {
-        if (typeof item === 'string') return { name: item, linkCount: null, rawLinkCount: null };
-        const linkCount = Number(item.linkCount);
-        const rawLinkCount = Number(item.rawLinkCount);
-        return {
-            name: String(item.name || '').trim(),
-            linkCount: Number.isFinite(linkCount) ? linkCount : 0,
-            rawLinkCount: Number.isFinite(rawLinkCount) ? rawLinkCount : 0,
-        };
-    }).filter(item => item.name);
-}
-
-function partnerShowsNoLinkStatus(item) {
-    if (item.linkCount !== null && item.linkCount !== undefined) {
-        return item.linkCount <= 0;
-    }
-    if (item.rawLinkCount !== null && item.rawLinkCount !== undefined) {
-        return item.rawLinkCount <= 0;
-    }
-    return false;
-}
-
-function partnerNamesFromSelection() {
-    return reportPartners.filter(item => selectedPartners.has(item.name)).map(item => item.name);
-}
-
-async function refreshPartnerLinks() {
-    const partners = partnerNamesFromSelection();
-    if (partners.length === 0) {
-        addLog('Hãy chọn ít nhất 1 đối tác để cập nhật lại link.');
-        return;
-    }
-    const sheetName = reportSheetName || document.getElementById('reportSheetSelect')?.value || '';
-    closeReportModal();
-    startScraping(partners, sheetName);
-}
-
-function formatDuration(seconds) {
-    if (seconds === null || seconds === undefined || seconds === '') return '';
-    const sec = Math.max(parseInt(seconds, 10) || 0, 0);
-    if (sec < 60) return `${sec}s`;
-    const minutes = Math.floor(sec / 60);
-    const remain = sec % 60;
-    if (minutes < 60) return `${minutes}m ${remain}s`;
-    const hours = Math.floor(minutes / 60);
-    const remainMin = minutes % 60;
-    return `${hours}h ${remainMin}m`;
+// ---- Progress and live results ----------------------------------------------
+function isNoStatsStatus(status) {
+    const text = String(status || '');
+    return (
+        text.includes('Ẩn số liệu')
+        || text.startsWith('Partial:')
+        || text.includes('TikTok không trả số liệu')
+        || text.includes('TikTok không trả lượt xem')
+        || text.includes('không trả số liệu')
+        || text.includes('không trả lượt xem')
+    );
 }
 
 function classifyLiveResult(row, platform) {
@@ -2422,39 +2415,7 @@ function appendData(row, context = {}) {
     }
 }
 
-function desktopUpdaterInvoke() {
-    return window.__TAURI__?.core?.invoke || null;
-}
-
-async function checkDesktopUpdate() {
-    const invoke = desktopUpdaterInvoke();
-    if (!invoke || desktopUpdateCheckInFlight || !websocketSessionReady || scanIsBusy()) return;
-    desktopUpdateCheckInFlight = true;
-    try {
-        const version = await invoke('check_for_update');
-        if (!version || !websocketSessionReady || scanIsBusy()) return;
-        desktopUpdateInstalling = true;
-        syncScanControls();
-        showToast(`Đang cài đặt Riviu Reports ${version}...`, 'info');
-        await invoke('install_update');
-    } catch (error) {
-        console.warn('Desktop updater check failed:', error);
-        addLog(`Chưa cập nhật được ứng dụng: ${String(error)}`);
-    } finally {
-        desktopUpdateInstalling = false;
-        desktopUpdateCheckInFlight = false;
-        syncScanControls();
-    }
-}
-
-// The socket is still connecting here, so checkDesktopUpdate() would return early;
-// the first check runs from the first session snapshot instead.
-function scheduleDesktopUpdates() {
-    if (!desktopUpdaterInvoke()) return;
-    desktopStartupUpdatePending = true;
-    window.setInterval(() => void checkDesktopUpdate(), 5 * 60 * 1000);
-}
-
+// ---- Duplicate and failed links ---------------------------------------------
 function groupDuplicateLocations(locations) {
     const grouped = new Map();
     (Array.isArray(locations) ? locations : []).forEach(location => {
@@ -2659,6 +2620,87 @@ function clearFailedLinks(showLog = true, kind = 'all') {
         const label = kind === 'nostats' ? 'không số liệu' : (kind === 'errors' ? 'lỗi quét' : 'cần kiểm tra');
         addLog(`Đã xóa danh sách link ${label}.`);
     }
+}
+
+// ---- Desktop updater --------------------------------------------------------
+function desktopUpdaterInvoke() {
+    return window.__TAURI__?.core?.invoke || null;
+}
+
+async function checkDesktopUpdate() {
+    const invoke = desktopUpdaterInvoke();
+    if (!invoke || desktopUpdateCheckInFlight || !websocketSessionReady || scanIsBusy()) return;
+    desktopUpdateCheckInFlight = true;
+    try {
+        const version = await invoke('check_for_update');
+        if (!version || !websocketSessionReady || scanIsBusy()) return;
+        desktopUpdateInstalling = true;
+        syncScanControls();
+        showToast(`Đang cài đặt Riviu Reports ${version}...`, 'info');
+        await invoke('install_update');
+    } catch (error) {
+        console.warn('Desktop updater check failed:', error);
+        addLog(`Chưa cập nhật được ứng dụng: ${String(error)}`);
+    } finally {
+        desktopUpdateInstalling = false;
+        desktopUpdateCheckInFlight = false;
+        syncScanControls();
+    }
+}
+
+// The socket is still connecting here, so checkDesktopUpdate() would return early;
+// the first check runs from the first session snapshot instead.
+function scheduleDesktopUpdates() {
+    if (!desktopUpdaterInvoke()) return;
+    desktopStartupUpdatePending = true;
+    window.setInterval(() => void checkDesktopUpdate(), 5 * 60 * 1000);
+}
+
+// ---- Partner reports and scan history ---------------------------------------
+// Every platform's partner report uses the same min-views threshold (TikTok's rules).
+function reportFilterParams() {
+    const applyMinViews = document.getElementById('minViewToggle')?.checked ?? true;
+    const minViewsRaw = parseInt(document.getElementById('minViewInput')?.value, 10);
+    const minViews = Number.isFinite(minViewsRaw) && minViewsRaw >= 0 ? minViewsRaw : 100;
+    return { applyMinViews, minViews };
+}
+
+function normalizeReportPartners(raw) {
+    return (raw || []).map(item => {
+        if (typeof item === 'string') return { name: item, linkCount: null, rawLinkCount: null };
+        const linkCount = Number(item.linkCount);
+        const rawLinkCount = Number(item.rawLinkCount);
+        return {
+            name: String(item.name || '').trim(),
+            linkCount: Number.isFinite(linkCount) ? linkCount : 0,
+            rawLinkCount: Number.isFinite(rawLinkCount) ? rawLinkCount : 0,
+        };
+    }).filter(item => item.name);
+}
+
+function partnerShowsNoLinkStatus(item) {
+    if (item.linkCount !== null && item.linkCount !== undefined) {
+        return item.linkCount <= 0;
+    }
+    if (item.rawLinkCount !== null && item.rawLinkCount !== undefined) {
+        return item.rawLinkCount <= 0;
+    }
+    return false;
+}
+
+function partnerNamesFromSelection() {
+    return reportPartners.filter(item => selectedPartners.has(item.name)).map(item => item.name);
+}
+
+async function refreshPartnerLinks() {
+    const partners = partnerNamesFromSelection();
+    if (partners.length === 0) {
+        addLog('Hãy chọn ít nhất 1 đối tác để cập nhật lại link.');
+        return;
+    }
+    const sheetName = reportSheetName || document.getElementById('reportSheetSelect')?.value || '';
+    closeReportModal();
+    startScraping(partners, sheetName);
 }
 
 async function openReportModal() {
@@ -2911,13 +2953,6 @@ function updateReportSummary() {
     renderSelectedPartnerList();
 }
 
-function filenameFromDisposition(disposition, fallback) {
-    const utf8Match = disposition.match(/filename\*=UTF-8''([^;]+)/i);
-    if (utf8Match) return decodeURIComponent(utf8Match[1]);
-    const plainMatch = disposition.match(/filename="?([^";]+)"?/i);
-    return plainMatch ? plainMatch[1] : fallback;
-}
-
 function buildExportFallbackFilename(partners, sheetName) {
     const now = new Date();
     const pad = (value) => String(value).padStart(2, '0');
@@ -2930,17 +2965,6 @@ function buildExportFallbackFilename(partners, sheetName) {
         return `${parts.join(' ')}.xlsx`;
     }
     return sheet ? `bao_cao_doi_tac ${sheet} ${stamp}.zip` : `bao_cao_doi_tac ${stamp}.zip`;
-}
-
-function downloadBlob(blob, filename) {
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.download = filename;
-    document.body.appendChild(link);
-    link.click();
-    link.remove();
-    URL.revokeObjectURL(url);
 }
 
 async function exportPartnerReport() {
@@ -2984,6 +3008,7 @@ async function exportPartnerReport() {
     }
 }
 
+// ---- Event wiring and startup -----------------------------------------------
 const area = document.getElementById('uploadArea');
 area.addEventListener('dragover', (event) => { event.preventDefault(); area.classList.add('dragover'); });
 area.addEventListener('dragleave', () => area.classList.remove('dragover'));
