@@ -1,4 +1,4 @@
-"""Offline native-DOM regressions for source state, preview routing and preferences.
+"""Offline native-DOM regressions for source state, preview routing, preferences and scan panels.
 
 No server, accounts, production workbooks or external network are used. These
 browser checks do not claim Tauri/WebView restart or real updater acceptance.
@@ -495,3 +495,61 @@ def test_switching_to_platform_keeps_saved_scan_sheet_before_preview(page):
     assert result["selects"][-1]["scan_sheet"] == "Tháng 2"
     assert result["scan"] == "Tháng 2"
     assert page.locator("#scanSheetSelect").input_value() == "Tháng 2"
+
+
+def test_failure_lists_count_each_failure_once_and_match_a_full_render(page):
+    # A run can report thousands of failures. Each new one is prepended and counted without
+    # re-classifying the earlier ones, yet the tables, counts and copied text must equal a full
+    # re-render, across clears and a platform change (whose labels force a full render).
+    result = page.evaluate("""async () => {
+        const copies=[]; copyText=async text=>{copies.push(text);};
+        let classified=0; const classify=isNoStatsStatus;
+        isNoStatsStatus=status=>{classified++; return classify(status);};
+        const statuses=['Error: timeout','Partial: thiếu LƯỢT XEM','Ẩn số liệu','Threads không trả số liệu','',
+            'Error: <b>&','Error: HTTP 403'];
+        const add=(from,to)=>{for(let id=from;id<to;id++) appendFailedLink({id,sheetName:'S',worker:id%3,
+            url:'https://www.tiktok.com/@demo/video/'+id,status:statuses[id%statuses.length]});};
+        const shown=()=>['failedLinksBody','noStatsLinksBody','failedNote','failedCountBadge','hiddenCountBadge']
+            .map(id=>document.getElementById(id).innerHTML);
+        const step=()=>{const incremental=shown(); renderFailedLinks();
+            return {matchesFullRender:JSON.stringify(incremental)===JSON.stringify(shown()),
+                note:document.getElementById('failedNote').textContent};};
+        activePlatform='tiktok'; clearFailedLinks(false); classified=0;
+        add(0,2000);
+        const perFailure=classified/2000;
+        const steps=[step()];
+        for(const kind of ['all','errors','nostats']) await copyFailedLinks(kind);
+        clearFailedLinks(false,'nostats'); add(2000,2004); steps.push(step());
+        applyPlatformUI('threads'); add(2004,2006); steps.push(step());
+        clearFailedLinks(false); add(2006,2007); steps.push(step());
+        return {perFailure,steps,copies:copies.map(text=>text.split('\\n'))};
+    }""")
+    assert result["perFailure"] <= 3
+    assert all(step["matchesFullRender"] for step in result["steps"])
+    assert [step["note"] for step in result["steps"]] == [
+        "(1142 lỗi quét • 858 không đọc được số liệu)",
+        "(1145 lỗi quét • 1 không đọc được số liệu)",
+        "(1145 lỗi quét • 3 không đọc được số liệu)",
+        "(1 lỗi quét)",
+    ]
+    newest_first = [f"https://www.tiktok.com/@demo/video/{i}" for i in reversed(range(2000))]
+    no_stats = {f"https://www.tiktok.com/@demo/video/{i}" for i in range(2000) if i % 7 in (1, 2, 3)}
+    assert result["copies"] == [newest_first, [url for url in newest_first if url not in no_stats],
+                                [url for url in newest_first if url in no_stats]]
+
+
+def test_log_badge_counts_lines_and_log_box_follows_newest_line(page):
+    result = page.evaluate("""async () => {
+        setWorkspaceTab('logs');
+        const logs=document.getElementById('logs');
+        const frame=()=>new Promise(resolve=>requestAnimationFrame(()=>resolve()));
+        const state=()=>({badge:document.getElementById('logCountBadge').textContent,
+            lines:logs.querySelectorAll('.log-line').length, overflows:logs.scrollHeight>logs.clientHeight,
+            atEnd:logs.scrollTop+logs.clientHeight>=logs.scrollHeight-1});
+        for(let i=0;i<300;i++) addLog('Dòng '+i);
+        await frame(); const filled=state();
+        clearLogs(); addLog('Sau khi xóa'); await frame();
+        return {filled,cleared:state()};
+    }""")
+    assert result["filled"] == {"badge": "300", "lines": 300, "overflows": True, "atEnd": True}
+    assert result["cleared"] == {"badge": "2", "lines": 2, "overflows": False, "atEnd": True}
