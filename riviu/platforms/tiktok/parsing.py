@@ -60,7 +60,7 @@ def parse_count_value(raw):
         return None
     if isinstance(raw, (int, float)):
         number = float(raw)
-        return str(int(number)) if number.is_integer() else str(int(number))
+        return str(int(number))
 
     text = clean_text(str(raw)).replace(",", "").replace(" ", "")
     if not text:
@@ -135,6 +135,23 @@ def metrics_from_stats_sources(*sources):
     return metrics
 
 
+def _item_id(obj):
+    return clean_text(obj.get("id") or obj.get("awemeId") or obj.get("itemId"))
+
+
+def _is_item_detail_key(key):
+    """True for an embedded-state scope key that holds the post's own item detail."""
+    key_norm = normalize_text(key).casefold()
+    return any(marker in key_norm for marker in UNIVERSAL_DETAIL_KEY_MARKERS)
+
+
+def handle_fallback(profile_username):
+    """The @handle shown when no nickname is parsed; blank for auto-generated user ids."""
+    if profile_username and not is_generated_username_channel(profile_username):
+        return f"@{profile_username.lstrip('@')}"
+    return ""
+
+
 def extract_embedded_state_blobs(content):
     blobs = []
     for pattern in EMBEDDED_STATE_SCRIPT_PATTERNS:
@@ -149,8 +166,7 @@ def universal_detail_scope_metrics(scope, media_id=""):
     if not isinstance(scope, dict):
         return None
     for key, value in scope.items():
-        key_norm = normalize_text(key).casefold()
-        if not any(marker in key_norm for marker in UNIVERSAL_DETAIL_KEY_MARKERS):
+        if not _is_item_detail_key(key):
             continue
         if not isinstance(value, dict):
             continue
@@ -171,10 +187,7 @@ def parse_counts_from_universal_data(data, media_id=""):
         return None
 
     scope = data.get("__DEFAULT_SCOPE__")
-    metrics = universal_detail_scope_metrics(scope, media_id=media_id)
-    if metrics:
-        return metrics
-    return None
+    return universal_detail_scope_metrics(scope, media_id=media_id) or None
 
 
 def parse_counts_from_sigi_state(data, media_id=""):
@@ -186,7 +199,7 @@ def parse_counts_from_sigi_state(data, media_id=""):
         for module_key in (media_id, str(media_id)):
             item = item_module.get(module_key)
             if isinstance(item, dict):
-                item_id = clean_text(item.get("id") or item.get("awemeId") or item.get("itemId"))
+                item_id = _item_id(item)
                 if item_id and item_id != media_id:
                     continue
                 metrics = metrics_from_stats_sources(item)
@@ -197,7 +210,7 @@ def parse_counts_from_sigi_state(data, media_id=""):
         for obj in iter_nested_dicts(data):
             if not isinstance(obj, dict):
                 continue
-            item_id = clean_text(obj.get("id") or obj.get("awemeId") or obj.get("itemId"))
+            item_id = _item_id(obj)
             if item_id != media_id:
                 continue
             metrics = metrics_from_stats_sources(obj)
@@ -333,14 +346,14 @@ def iter_matching_item_structs(content, media_id=""):
         if isinstance(item_module, dict):
             item = item_module.get(media_id) or item_module.get(str(media_id))
             if isinstance(item, dict):
-                item_id = clean_text(item.get("id") or item.get("awemeId") or item.get("itemId"))
+                item_id = _item_id(item)
                 if not item_id or item_id == media_id:
                     yield item
 
         for obj in iter_nested_dicts(blob):
             if not isinstance(obj, dict):
                 continue
-            item_id = clean_text(obj.get("id") or obj.get("awemeId") or obj.get("itemId"))
+            item_id = _item_id(obj)
             if item_id != media_id:
                 continue
             if isinstance(obj.get("author"), dict) or "stats" in obj or "statsV2" in obj:
@@ -429,8 +442,7 @@ def embedded_item_status_codes(content):
         scope = blob.get("__DEFAULT_SCOPE__")
         if isinstance(scope, dict):
             for key, value in scope.items():
-                key_norm = normalize_text(key).casefold()
-                if any(marker in key_norm for marker in UNIVERSAL_DETAIL_KEY_MARKERS):
+                if _is_item_detail_key(key):
                     codes.extend(_detail_status_codes(value))
     return codes
 
@@ -753,15 +765,11 @@ def parse_fetched_request_page(source_url, final_url, content):
     media_id = source_media_id or final_media_id
     profile_username = extract_profile_username(source_url) or extract_profile_username(final_url)
     if not media_id:
-        channel_name = ""
-        if profile_username and not is_generated_username_channel(profile_username):
-            channel_name = f"@{profile_username.lstrip('@')}"
-        return empty, channel_name, STATUS_METRICS_UNREADABLE
+        return empty, handle_fallback(profile_username), STATUS_METRICS_UNREADABLE
 
     metrics, found = parse_counts(content, media_id=media_id)
     channel_name = parse_profile_channel_name(content, profile_username, media_id=media_id)
-    if not channel_name and profile_username and not is_generated_username_channel(profile_username):
-        channel_name = f"@{profile_username.lstrip('@')}"
+    channel_name = channel_name or handle_fallback(profile_username)
     if found:
         return metrics, channel_name, "Success"
     if is_tiktok_error_page(content):

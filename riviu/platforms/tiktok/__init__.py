@@ -59,6 +59,7 @@ from riviu.platforms.tiktok.parsing import (
     extract_embedded_state_blobs,
     extract_media_id,
     extract_profile_username,
+    handle_fallback,
     is_tiktok_error_page,
     is_tiktok_item_not_found,
     item_struct_explicitly_hides_stats,

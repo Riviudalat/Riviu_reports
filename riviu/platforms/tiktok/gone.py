@@ -12,6 +12,7 @@ from riviu.platforms.tiktok.parsing import extract_media_id, extract_profile_use
 
 
 TIKTOK_OEMBED_ENDPOINT = "https://www.tiktok.com/oembed?url="
+OEMBED_TIMEOUT_SECONDS = 15
 
 
 def tiktok_oembed_target(url, resolved_url=""):
@@ -24,7 +25,7 @@ def tiktok_oembed_target(url, resolved_url=""):
     return f"https://www.tiktok.com/@{username.lstrip('@')}/video/{media_id}"
 
 
-def confirm_tiktok_post_gone(url, resolved_url="", timeout=15):
+def confirm_tiktok_post_gone(url, resolved_url="", timeout=OEMBED_TIMEOUT_SECONDS):
     """Independent check that a post is gone, via TikTok's oEmbed endpoint.
 
     Live sample (Oct 2026): the post page returned 10204 on about a third of

@@ -42,6 +42,11 @@ from riviu.platforms.tiktok.workbook_io import (
 from riviu.platforms.tiktok.workers import hybrid_browser_worker_count, request_worker_loop, worker_loop
 
 
+MAX_RETRIES = 5
+MAX_BROWSER_STARTUPS = 6
+RESULT_WAIT_SECONDS = 30
+WORKER_JOIN_TIMEOUT_SECONDS = 20.0
+STATUS_BROADCAST_INTERVAL_SECONDS = 0.25
 DIRECT_MAX_WORKERS = 10
 MAX_WORKERS_PER_PROXY = 10
 
@@ -260,7 +265,7 @@ class _TikTokScan:
             ),
         })
         now = time.perf_counter()
-        if self.processed == self.total or now - self.last_status_broadcast > 0.25:
+        if self.processed == self.total or now - self.last_status_broadcast > STATUS_BROADCAST_INTERVAL_SECONDS:
             await self.manager.broadcast_status(self.progress())
             self.last_status_broadcast = now
 
@@ -368,7 +373,7 @@ def _start_scan_workers(
         ))
         for index in range(request_worker_count)
     ]
-    startup_semaphore = asyncio.Semaphore(min(browser_worker_count, 6)) if browser_worker_count else None
+    startup_semaphore = asyncio.Semaphore(min(browser_worker_count, MAX_BROWSER_STARTUPS)) if browser_worker_count else None
     workers.extend(
         asyncio.create_task(worker_loop(
             index + 1,
@@ -402,9 +407,9 @@ async def _consume_scan_results(scan, result_queue, workers):
     stalled_seconds = 0
     while scan.processed < scan.total:
         try:
-            result = await asyncio.wait_for(result_queue.get(), timeout=30.0)
+            result = await asyncio.wait_for(result_queue.get(), timeout=RESULT_WAIT_SECONDS)
         except asyncio.TimeoutError:
-            stalled_seconds += 30
+            stalled_seconds += RESULT_WAIT_SECONDS
             alive_workers = sum(1 for task in workers if not task.done())
             if alive_workers == 0:
                 await scan.abandon_remaining()
@@ -580,7 +585,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             await websocket_manager.broadcast_log(f"Lỗi: Không tìm thấy file {file_path}")
         return
 
-    retries = clamp_int(retries, DEFAULT_RETRIES, 0, 5)
+    retries = clamp_int(retries, DEFAULT_RETRIES, 0, MAX_RETRIES)
     save_every = clamp_int(save_every, DEFAULT_SAVE_EVERY, 5, 100)
     selected_names = normalize_selected_partners(selected_partner, selected_partners)
     partner_label = selected_partner_label(selected_names)
@@ -706,7 +711,7 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                     await finalize_task
                 else:
                     try:
-                        await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=20.0)
+                        await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), timeout=WORKER_JOIN_TIMEOUT_SECONDS)
                     except asyncio.TimeoutError:
                         pass
                 scan_complete = True

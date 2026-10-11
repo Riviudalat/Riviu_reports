@@ -168,7 +168,7 @@ def scrape_link_with_retries_request(
             return data, channel_name, status, attempts_used, last_resolved_url
         if is_suspected_gone_status(status):
             if confirmed_gone is None:
-                confirmed_gone = gone.confirm_tiktok_post_gone(url, last_resolved_url, timeout=min(timeout, 15))
+                confirmed_gone = gone.confirm_tiktok_post_gone(url, last_resolved_url, timeout=min(timeout, gone.OEMBED_TIMEOUT_SECONDS))
             if confirmed_gone:
                 return data, channel_name, STATUS_TIKTOK_UNAVAILABLE, attempts_used, last_resolved_url
             # Live (or unknown): the page answer was transient; spend the retry budget.

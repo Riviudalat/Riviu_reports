@@ -24,6 +24,7 @@ from riviu.platforms.tiktok.parsing import (
     empty_metrics,
     extract_media_id,
     extract_profile_username,
+    handle_fallback,
     is_tiktok_error_page,
     is_tiktok_item_not_found,
     looks_like_error_text,
@@ -47,6 +48,16 @@ from riviu.platforms.tiktok.statuses import (
 )
 
 
+PAGE_TIMEOUT_MS = 45000
+PROFILE_PAGE_TIMEOUT_MS = 18000
+# One redirect hop or route refetch; the page timeout bounds the whole chain.
+HOP_TIMEOUT_MS = 15000
+MAX_REDIRECT_HOPS = 10
+STATE_SCRIPT_WAIT_MS = 12000
+# Pages render their embedded state late: poll until two reads agree.
+METRIC_POLL_ROUNDS = 24
+PROFILE_POLL_ROUNDS = 20
+POLL_INTERVAL_MS = 500
 BLOCKED_RESOURCE_TYPES = {"image", "media", "font", "texttrack"}
 
 
@@ -109,7 +120,7 @@ async def read_profile_channel_name_from_dom(page, profile_username):
     return ""
 
 
-async def read_profile_channel_name(page, profile_username, channel_cache=None, timeout_ms=18000):
+async def read_profile_channel_name(page, profile_username, channel_cache=None, timeout_ms=PROFILE_PAGE_TIMEOUT_MS):
     if not profile_username:
         return ""
 
@@ -130,7 +141,7 @@ async def read_profile_channel_name(page, profile_username, channel_cache=None, 
         await navigate_tiktok_page(page, profile_url, timeout_ms=timeout_ms)
         if not is_scrapable_tiktok_url(page.url):
             return ""
-        for _ in range(20):
+        for _ in range(PROFILE_POLL_ROUNDS):
             content = await page.content()
             candidate = parse_profile_channel_name(content, profile_username)
             if not candidate:
@@ -139,7 +150,7 @@ async def read_profile_channel_name(page, profile_username, channel_cache=None, 
                 if isinstance(channel_cache, dict):
                     channel_cache[cache_key] = candidate
                 return candidate
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(POLL_INTERVAL_MS)
     except Exception:
         return ""
     return ""
@@ -155,7 +166,7 @@ async def block_heavy_resources(route):
         try:
             # Routes are not re-entered for server redirects. Fetch one hop and
             # never fulfill a 30x: Chromium could otherwise follow it unchecked.
-            response = await route.fetch(max_redirects=0, timeout=15000)
+            response = await route.fetch(max_redirects=0, timeout=HOP_TIMEOUT_MS)
             if 300 <= response.status < 400:
                 await route.abort()
             else:
@@ -171,7 +182,7 @@ async def block_heavy_resources(route):
         await route.continue_()
 
 
-async def navigate_tiktok_page(page, url, *, timeout_ms=45000):
+async def navigate_tiktok_page(page, url, *, timeout_ms=PAGE_TIMEOUT_MS):
     """Resolve only allowed redirect hops, then perform a no-redirect navigation.
 
     The context's navigation route still checks the final refetch, so a changed
@@ -181,12 +192,12 @@ async def navigate_tiktok_page(page, url, *, timeout_ms=45000):
     if not target:
         raise ValueError("URL TikTok không hợp lệ.")
     deadline = time.monotonic() + timeout_ms / 1000
-    for _hop in range(10):
+    for _hop in range(MAX_REDIRECT_HOPS):
         remaining_ms = int((deadline - time.monotonic()) * 1000)
         if remaining_ms <= 0:
             raise TimeoutError("Hết thời gian kiểm tra chuyển hướng TikTok.")
         response = await page.context.request.get(
-            target, max_redirects=0, timeout=min(15000, remaining_ms),
+            target, max_redirects=0, timeout=min(HOP_TIMEOUT_MS, remaining_ms),
             headers={"Accept": "text/html", "Referer": "https://www.tiktok.com/"},
         )
         try:
@@ -227,7 +238,7 @@ async def make_browser_context(browser, proxy_configs=None):
     return context
 
 
-async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
+async def scrape_single_link(page, url, channel_cache=None, timeout_ms=PAGE_TIMEOUT_MS):
     data = empty_metrics()
     channel_name = ""
     url = normalize_tiktok_url(url)
@@ -242,7 +253,7 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
             await page.wait_for_selector(
                 'script#__UNIVERSAL_DATA_FOR_REHYDRATION__, script#SIGI_STATE, script#api-data',
                 state="attached",
-                timeout=12000,
+                timeout=STATE_SCRIPT_WAIT_MS,
             )
         except Exception:
             pass
@@ -264,14 +275,12 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
             return data, channel_name, STATUS_MEDIA_REDIRECT_MISMATCH, url
         media_id = source_media_id or final_media_id
         if not media_id:
-            if profile_username and not is_generated_username_channel(profile_username):
-                channel_name = f"@{profile_username.lstrip('@')}"
-            return data, channel_name, STATUS_METRICS_UNREADABLE, page_url
+            return data, handle_fallback(profile_username), STATUS_METRICS_UNREADABLE, page_url
 
         previous_metrics = None
         found = False
         content = ""
-        for _ in range(24):
+        for _ in range(METRIC_POLL_ROUNDS):
             content = await page.content()
 
             candidate, candidate_found = parse_counts(content, media_id=media_id)
@@ -293,7 +302,7 @@ async def scrape_single_link(page, url, channel_cache=None, timeout_ms=45000):
                 dom_channel = await read_channel_name_from_dom(page, profile_username)
                 if dom_channel and not is_generated_username_channel(dom_channel, url) and not is_generic_tiktok_channel_name(dom_channel):
                     channel_name = dom_channel
-            await page.wait_for_timeout(500)
+            await page.wait_for_timeout(POLL_INTERVAL_MS)
 
         if profile_username:
             needs_profile_channel = (

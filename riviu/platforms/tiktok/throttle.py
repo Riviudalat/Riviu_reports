@@ -25,6 +25,8 @@ _request_block_until = 0.0
 _network_fail_streak = 0
 NETWORK_FAIL_STREAK_PAUSE = 3
 NETWORK_FAIL_PAUSE_SECONDS = 5.0
+# Direct (no proxy) runs pause every request after TikTok answers 403/429.
+RATE_LIMIT_PAUSE_SECONDS = {403: 8.0, 429: 4.0}
 
 
 def session_uses_proxy():
@@ -62,7 +64,7 @@ def note_request_rate_limit(http_code):
     global _request_block_until
     if http_code not in (403, 429) or session_uses_proxy():
         return
-    pause = 8.0 if http_code == 403 else 4.0
+    pause = RATE_LIMIT_PAUSE_SECONDS[http_code]
     with _request_block_lock:
         _request_block_until = max(_request_block_until, time.time() + pause)
 

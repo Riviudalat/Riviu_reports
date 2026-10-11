@@ -14,6 +14,8 @@ from riviu.platforms.tiktok.statuses import should_clear_stale_metrics
 
 
 MAX_BROWSER_FALLBACK_WORKERS = 15
+# A long-lived browser context slows down; open a fresh one after this many links.
+BROWSER_CONTEXT_RECYCLE_AFTER = 100
 
 
 def hybrid_browser_worker_count(request_workers, total_links):
@@ -22,6 +24,19 @@ def hybrid_browser_worker_count(request_workers, total_links):
     if total_links <= 40:
         return min(max(request_workers // 2, 3), 8)
     return min(max(request_workers // 3, 5), MAX_BROWSER_FALLBACK_WORKERS)
+
+
+def _result_fields(worker, data, channel_name, status, attempts, elapsed, resolved_url):
+    """The per-link result keys a worker puts on the result (or fallback) queue."""
+    return {
+        "worker": worker,
+        "data": data,
+        "channel_name": channel_name,
+        "status": status,
+        "attempts": attempts,
+        "elapsed": elapsed,
+        "resolved_url": resolved_url,
+    }
 
 
 def select_fallback_result(request_result, browser_result):
@@ -57,7 +72,6 @@ async def worker_loop(
     With open_on_first_link (hybrid fallback) the context opens when the first
     link arrives, so a run whose Request results all stand never starts Chromium.
     """
-    RECYCLE_AFTER = 100
     loop = asyncio.get_running_loop()
     display_worker = worker_label if worker_label is not None else worker_id
     browser_proxy_configs = proxy_configs if proxy_configs is not None else ([proxy_config] if proxy_config else [])
@@ -115,13 +129,10 @@ async def worker_loop(
                 result_item = {key: value for key, value in item.items() if key != "_request_result"}
                 await result_queue.put({
                     **result_item,
-                    "worker": display_worker,
-                    "data": empty_metrics(),
-                    "channel_name": "",
-                    "status": f"Error: Worker {display_worker} không mở được trình duyệt",
-                    "attempts": 0,
-                    "elapsed": 0.0,
-                    "resolved_url": "",
+                    **_result_fields(
+                        display_worker, empty_metrics(), "",
+                        f"Error: Worker {display_worker} không mở được trình duyệt", 0, 0.0, "",
+                    ),
                     **(item.get("_request_result") or {}),
                 })
                 scrape_queue.task_done()
@@ -175,19 +186,13 @@ async def worker_loop(
             result_item = {key: value for key, value in item.items() if key != "_request_result"}
             await result_queue.put({
                 **result_item,
-                "worker": selected_worker,
-                "data": data,
-                "channel_name": channel_name,
-                "status": status,
-                "attempts": attempts,
-                "elapsed": elapsed,
-                "resolved_url": resolved_url,
+                **_result_fields(selected_worker, data, channel_name, status, attempts, elapsed, resolved_url),
             })
             scrape_queue.task_done()
             current_item = None
             links_in_current_context += 1
 
-            if links_in_current_context >= RECYCLE_AFTER:
+            if links_in_current_context >= BROWSER_CONTEXT_RECYCLE_AFTER:
                 try:
                     await context.close()
                 except Exception:
@@ -299,26 +304,14 @@ async def request_worker_loop(
             if status == "Success" or not browser_fallback or should_clear_stale_metrics(status):
                 await result_queue.put({
                     **item,
-                    "worker": worker_label,
-                    "data": data,
-                    "channel_name": channel_name,
-                    "status": status,
-                    "attempts": attempts,
-                    "elapsed": elapsed,
-                    "resolved_url": resolved_url,
+                    **_result_fields(worker_label, data, channel_name, status, attempts, elapsed, resolved_url),
                 })
             else:
                 await browser_queue.put({
                     **item,
-                    "_request_result": {
-                        "worker": worker_label,
-                        "data": data,
-                        "channel_name": channel_name,
-                        "status": status,
-                        "attempts": attempts,
-                        "elapsed": elapsed,
-                        "resolved_url": resolved_url,
-                    },
+                    "_request_result": _result_fields(
+                        worker_label, data, channel_name, status, attempts, elapsed, resolved_url,
+                    ),
                 })
             scrape_queue.task_done()
             current_item = None
