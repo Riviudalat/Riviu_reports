@@ -2368,10 +2368,14 @@ function updateProgress(data, { replay = false } = {}) {
     if (TERMINAL_SCAN_PHASES.includes(phase)) finishScanRun(phase, { replay });
 }
 
+// Scrolled further down than this, the reader keeps their place as new rows arrive on top.
+const LIVE_RESULTS_PINNED_SCROLL_PX = 32;
+
 function appendData(row, context = {}) {
     const platform = row.platform || context.platform || currentRunContext?.platform || activePlatform;
     const tbody = document.getElementById('dataFeed');
-    if (tbody.innerText.includes('Chưa có kết quả')) tbody.innerHTML = '';
+    // The "no results" placeholder is a lone row; reading innerText of a full feed costs O(rows).
+    if (tbody.children.length <= 1 && tbody.innerText.includes('Chưa có kết quả')) tbody.innerHTML = '';
     const wrapper = document.querySelector('.live-results-wrap');
     const resultStatus = classifyLiveResult(row, platform);
     const isSuccess = resultStatus === 'success';
@@ -2382,8 +2386,9 @@ function appendData(row, context = {}) {
     liveResultClasses.set(String(row.id ?? row.url), resultStatus);
     const visibleInCurrentTab = activeWorkspaceTab === 'live'
         || (activeWorkspaceTab === 'success' && isSuccess);
-    const preserveScroll = Boolean(wrapper && visibleInCurrentTab && wrapper.scrollTop > 32);
-    const previousScrollHeight = wrapper?.scrollHeight || 0;
+    const preserveScroll = Boolean(wrapper && visibleInCurrentTab && wrapper.scrollTop > LIVE_RESULTS_PINNED_SCROLL_PX);
+    // scrollHeight forces a layout of the whole feed, so read it only when it is used.
+    const previousScrollHeight = preserveScroll ? wrapper.scrollHeight : 0;
     const tr = document.createElement('tr');
     tr.dataset.resultStatus = resultStatus;
     if (row.videoLink) tr.classList.add('video-link-row');
@@ -2540,37 +2545,58 @@ function renderFailureRows(items, emptyMessage) {
     }).join('');
 }
 
-function renderFailedLinks() {
-    const errorBody = document.getElementById('failedLinksBody');
-    const noStatsBody = document.getElementById('noStatsLinksBody');
+// Failure rows carry the active platform's labels, so a new row may only be prepended to
+// tables last fully rendered for the same platform.
+let failedLinksRenderedPlatform = null;
+
+function renderFailureCounts(errorCount, noStatsCount) {
     const errorBadge = document.getElementById('failedCountBadge');
     const noStatsBadge = document.getElementById('hiddenCountBadge');
     const note = document.getElementById('failedNote');
-    const noStatsItems = failedLinksForKind('nostats');
-    const errorItems = failedLinksForKind('errors');
-
-    if (errorBadge) errorBadge.textContent = errorItems.length;
-    if (noStatsBadge) noStatsBadge.textContent = noStatsItems.length;
-    if (errorBody) errorBody.innerHTML = renderFailureRows(errorItems, 'Chưa có link lỗi');
-    if (noStatsBody) noStatsBody.innerHTML = renderFailureRows(noStatsItems, 'Chưa có link không đọc được số liệu');
-
+    if (errorBadge) errorBadge.textContent = errorCount;
+    if (noStatsBadge) noStatsBadge.textContent = noStatsCount;
     if (note) {
         const parts = [];
-        if (errorItems.length > 0) parts.push(`${errorItems.length} lỗi quét`);
-        if (noStatsItems.length > 0) parts.push(`${noStatsItems.length} không đọc được số liệu`);
+        if (errorCount > 0) parts.push(`${errorCount} lỗi quét`);
+        if (noStatsCount > 0) parts.push(`${noStatsCount} không đọc được số liệu`);
         note.textContent = parts.length ? `(${parts.join(' • ')})` : '';
     }
 }
 
+function renderFailedLinks() {
+    const errorBody = document.getElementById('failedLinksBody');
+    const noStatsBody = document.getElementById('noStatsLinksBody');
+    const noStatsItems = failedLinksForKind('nostats');
+    const errorItems = failedLinksForKind('errors');
+
+    if (errorBody) errorBody.innerHTML = renderFailureRows(errorItems, 'Chưa có link lỗi');
+    if (noStatsBody) noStatsBody.innerHTML = renderFailureRows(noStatsItems, 'Chưa có link không đọc được số liệu');
+    renderFailureCounts(errorItems.length, noStatsItems.length);
+    failedLinksRenderedPlatform = activePlatform;
+}
+
+// Prepends one row instead of re-rendering every failure for each result; the markup is
+// the same as a full renderFailedLinks().
 function appendFailedLink(row) {
-    failedLinks.unshift({
+    const item = {
         id: row.id,
         sheetName: row.sheetName,
         url: row.url,
         status: row.status,
         worker: row.worker
-    });
-    renderFailedLinks();
+    };
+    failedLinks.unshift(item);
+    const noStats = isNoStatsStatus(item.status);
+    const body = document.getElementById(noStats ? 'noStatsLinksBody' : 'failedLinksBody');
+    const sameKindCount = failedLinksForKind(noStats ? 'nostats' : 'errors').length;
+    // The first row of a kind replaces its empty-state placeholder.
+    if (!body || sameKindCount === 1 || failedLinksRenderedPlatform !== activePlatform) {
+        renderFailedLinks();
+        return;
+    }
+    body.insertAdjacentHTML('afterbegin', renderFailureRows([item], ''));
+    const otherKindCount = failedLinks.length - sameKindCount;
+    renderFailureCounts(noStats ? otherKindCount : sameKindCount, noStats ? sameKindCount : otherKindCount);
 }
 
 async function copyFailedLinks(kind = 'all') {
