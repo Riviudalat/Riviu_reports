@@ -258,6 +258,39 @@ def test_push_failure_after_saved_scan_is_a_warning_not_a_failed_scan(isolated_b
     assert any("đã lưu xong" in message for message in logs)
 
 
+@pytest.mark.parametrize("site", ["route", "scan"])
+def test_push_rows_build_off_the_loop_and_cancel_waits_for_it(isolated_backend, monkeypatch, site):
+    entered, release, built = threading.Event(), threading.Event(), threading.Event()
+    pushed = []
+    def slow_build(rows, **kwargs):
+        entered.set()
+        release.wait(2)
+        built.set()
+        return [["Stt"]]
+    module = google_api if site == "route" else scan_service
+    monkeypatch.setattr(module, "build_google_push_rows", slow_build)
+    monkeypatch.setattr(module, "push_rows_to_new_sheet", lambda *args, **kwargs: pushed.append(args) or "Result")
+    def start():
+        if site == "route":
+            return backend.push_google_sheet({"file_id": "A.xlsx", "sourceSheet": "Data"})
+        return scan_service.push_scan_results(str(isolated_backend / "A.xlsx"), "A.xlsx", "Data", "tiktok")
+    async def scenario():
+        task = asyncio.create_task(start())
+        assert await asyncio.to_thread(entered.wait, 2)
+        # The rows are still being built, yet this coroutine runs: the build is not on the loop.
+        assert not built.is_set()
+        task.cancel()
+        await asyncio.sleep(.05)
+        # Cancelling must not end the push (and release the source gate) while the thread still runs.
+        assert not task.done()
+        assert site == "scan" or backend.source_mutation_blocked()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert built.is_set() and pushed == []
+    asyncio.run(scenario())
+
+
 def test_websocket_start_scans_the_workbook_the_client_names(isolated_backend, monkeypatch):
     calls = []
     async def fake_runner(path, options, **kwargs):

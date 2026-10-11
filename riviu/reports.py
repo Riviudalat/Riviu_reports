@@ -9,6 +9,7 @@ import re
 import zipfile
 from copy import copy
 from datetime import datetime
+from functools import lru_cache
 
 import pandas as pd
 from openpyxl import Workbook
@@ -44,6 +45,8 @@ from riviu.workbook_utils import (
 
 
 LOGO_PATH = paths.LOGO_PATH
+# Distinct date texts one export or push remembers; a sheet repeats a few dates over many rows.
+REPORT_DATE_MEMO_SIZE = 4096
 
 
 def safe_report_name(name):
@@ -56,14 +59,14 @@ def spreadsheet_text(value):
     return clean_text(value)
 
 
-def spreadsheet_date_text(value):
+def spreadsheet_date_text(value, parse_date=None):
     if pd.isna(value):
         return ""
     if hasattr(value, "to_pydatetime"):
         return spreadsheet_text(value.to_pydatetime().strftime("%d/%m/%Y"))
     if isinstance(value, datetime):
         return spreadsheet_text(value.strftime("%d/%m/%Y"))
-    parsed = parse_report_date(value)
+    parsed = (parse_date or parse_report_date)(value)
     if not pd.isna(parsed):
         return spreadsheet_text(parsed.to_pydatetime().strftime("%d/%m/%Y"))
     text = clean_text(value)
@@ -85,6 +88,19 @@ def parse_report_date(value):
     if re.match(r"^\d{4}[-/]\d{1,2}[-/]\d{1,2}", text):
         return pd.to_datetime(text, errors="coerce")
     return pd.to_datetime(text, errors="coerce", dayfirst=True)
+
+
+def report_date_parser(maxsize=REPORT_DATE_MEMO_SIZE):
+    """`parse_report_date` for one export or push, parsing each distinct date text once.
+
+    The memo is bounded and lives only as long as the operation that made it.
+    """
+    parse_text = lru_cache(maxsize=maxsize)(parse_report_date)
+
+    def parse(value):
+        return parse_text(value) if isinstance(value, str) else parse_report_date(value)
+
+    return parse
 
 
 def spreadsheet_hyperlink(value):
@@ -156,13 +172,16 @@ REPORT_ACCENT_TEXT = "9A3412"
 REPORT_TOTAL_FILL = "FFF7ED"
 
 
-def report_cell_value(header, value):
+def report_cell_value(header, value, parse_date=None):
     if header == "NGÀY AIR":
         if pd.isna(value):
             return ""
         if hasattr(value, "to_pydatetime"):
             return value.to_pydatetime()
-        parsed_date = parse_report_date(value)
+        # A column mixing real date cells with date text stays `object`, so plain datetimes arrive here.
+        if isinstance(value, datetime):
+            return value
+        parsed_date = (parse_date or parse_report_date)(value)
         return parsed_date.to_pydatetime() if not pd.isna(parsed_date) else clean_text(value)
     if header in REPORT_TEXT_COLUMNS:
         return clean_text(value)
@@ -232,8 +251,9 @@ def write_report_total(ws, spec, frame, columns, total_row, border):
         cell.alignment = Alignment(horizontal="right")
 
 
-def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100, platform="tiktok"):
+def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100, platform="tiktok", parse_date=None):
     spec = get_platform(platform)
+    parse_date = parse_date or report_date_parser()
     columns = list(spec.report_columns)
     valid_rows = [
         row for row in rows
@@ -264,7 +284,7 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100, 
         row_fill = report_row_fill(spec, source_row)
         fill_key = row_fill.fgColor.rgb if row_fill is not None else None
         for col_index, header in enumerate(columns, start=1):
-            value = report_cell_value(header, source_row.get(header, ""))
+            value = report_cell_value(header, source_row.get(header, ""), parse_date)
             cell = set_cell_literal(ws.cell(row=row_index, column=col_index), value)
             is_hyperlink = header == "LINK AIR" and isinstance(value, str) and value.startswith("http")
             if is_hyperlink:
@@ -306,6 +326,7 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100, 
 
 def build_google_push_rows(rows, *, platform="tiktok"):
     spec = get_platform(platform)
+    parse_date = report_date_parser()
     normalized_rows = []
     max_partner_columns = 1
     for row in rows:
@@ -333,7 +354,7 @@ def build_google_push_rows(rows, *, platform="tiktok"):
             channel_name = "Lỗi"
         values.append([
             index,
-            spreadsheet_date_text(row.get("NGÀY AIR", "")),
+            spreadsheet_date_text(row.get("NGÀY AIR", ""), parse_date),
             spreadsheet_hyperlink(row.get("LINK AIR", "")),
             channel_name,
             *[metric_cell(row, metric) for metric in spec.metric_columns],
@@ -384,10 +405,14 @@ def _build_export_payload(snapshot, selected_partners, apply_min_views, min_view
     name_tags = [tag for tag in (spec.file_tag, sheet_tag, export_timestamp) if tag]
     # The sheet is read once for all partners, not once per partner.
     rows_by_partner = build_partner_report_rows(snapshot, sheet_name=report_sheet, platform=spec.key)
+    # Partners share rows and air dates, so every report in this export shares one date memo.
+    parse_date = report_date_parser()
 
     def report_bytes(partner):
         rows = rows_by_partner.get(partner_dedup_key(partner), [])
-        return build_partner_report(partner, rows, apply_min_views=apply_min_views, min_views=min_views, platform=spec.key)
+        return build_partner_report(
+            partner, rows, apply_min_views=apply_min_views, min_views=min_views, platform=spec.key, parse_date=parse_date,
+        )
 
     if len(partners) == 1:
         partner = partners[0]

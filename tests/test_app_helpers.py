@@ -7,10 +7,12 @@ from html.parser import HTMLParser
 from pathlib import Path
 from unittest.mock import patch
 
+import pandas as pd
 import pytest
 
-from openpyxl import load_workbook
+from openpyxl import Workbook, load_workbook
 
+from riviu import reports
 from riviu.reports import build_google_push_rows, build_partner_report, spreadsheet_date_text
 from riviu.workbook_utils import SINGLE_LINK_FILL_COLOR, VIDEO_LINK_FILL_COLOR, is_failed_channel_name, metric_number
 
@@ -355,6 +357,14 @@ def test_export_date_keeps_vietnamese_day_month_year_order():
     assert spreadsheet_date_text("02-06-2026") == "02/06/2026"
 
 
+def test_partner_report_accepts_plain_datetime_air_dates():
+    # A NGÀY AIR column mixing real date cells with date text reaches the report as plain datetimes.
+    rows = [unknown_metric_row(**{"NGÀY AIR": datetime(2026, 6, 2)}),
+            unknown_metric_row(**{"NGÀY AIR": "03/06/2026", "LINK AIR": "https://www.tiktok.com/@a/video/2"})]
+    report = load_workbook(io.BytesIO(build_partner_report("Partner A", rows, apply_min_views=False))).active
+    assert [report.cell(row=row, column=1).value for row in (4, 5)] == [datetime(2026, 6, 2), datetime(2026, 6, 3)]
+
+
 def unknown_metric_row(**overrides):
     return {
         "NGÀY AIR": "", "TÊN KÊNH": "Channel A", "LINK AIR": "https://www.tiktok.com/@a/video/1",
@@ -384,6 +394,45 @@ def test_google_push_uses_each_rows_last_update_and_platform_columns():
     assert threads[0] == ["Stt", "Ngày", "Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "REPOST", "CHIA SẺ", "Đối tác", "Cập nhật lần cuối"]
     # Totals sum the known values like TikTok; only a column with nothing known stays blank.
     assert threads[-1][5] == "=SUM(F2:F3)" and threads[-1][6] == ""
+
+
+REPORT_DATE_INPUTS = [
+    "02/06/2026", " 2-6-2026 ", "13/01/2026", "05/12/2026", "1/2/26", "12.05.2026", "02/06/2026 00:00:00",
+    "2026-06-02", "2026/06/02 10:30", "31/02/2026", "not a date", "", "   ", None, float("nan"), pd.NaT,
+    datetime(2026, 6, 2, 14, 5), pd.Timestamp("2026-06-02"), 45000,
+]
+
+
+@pytest.mark.parametrize("bound", [{"maxsize": 1}, {}], ids=["evicting", "default"])
+def test_report_date_memo_returns_exactly_what_the_parser_returns(bound):
+    parse = reports.report_date_parser(**bound)
+    # The second pass is answered from the memo, or after evictions when it holds one text.
+    for value in REPORT_DATE_INPUTS * 2:
+        expected, actual = reports.parse_report_date(value), parse(value)
+        assert (type(actual), repr(actual), getattr(actual, "unit", None)) == (type(expected), repr(expected), getattr(expected, "unit", None))
+
+
+def test_push_and_export_parse_each_date_text_once(tmp_path, monkeypatch):
+    calls = []
+    parse = reports.parse_report_date
+    monkeypatch.setattr(reports, "parse_report_date", lambda value: calls.append(value) or parse(value))
+    rows = [unknown_metric_row(**{"NGÀY AIR": "02/06/2026" if index % 2 else "2026-06-03"}) for index in range(40)]
+    assert build_google_push_rows(rows)[1][1] == "03/06/2026"
+    assert sorted(calls) == ["02/06/2026", "2026-06-03"]
+
+    # Every partner shares the rows, so a per-report memo would parse the date once per partner.
+    path = tmp_path / "shared.xlsx"
+    book = Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["NGÀY AIR", "LINK AIR", "TÊN KÊNH", "LƯỢT XEM", "Đối tác"])
+    for index in range(20):
+        sheet.append(["02/06/2026", f"https://www.tiktok.com/@a/video/{index + 1}", "Channel", 500, "A\nB\nC"])
+    book.save(path)
+    calls.clear()
+    payload = reports.build_export_payload(path, ["A", "B", "C"], False, 100, "Data")
+    assert payload["media_type"] == "application/zip"
+    assert calls == ["02/06/2026"]
 
 
 def test_threads_partner_export_matches_tiktok_report_contract(tmp_path):

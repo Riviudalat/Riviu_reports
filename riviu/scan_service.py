@@ -127,7 +127,8 @@ async def push_scan_results(target_path, file_id, scan_sheet, platform):
         return
     try:
         rows = await asyncio.to_thread(build_workbook_rows, target_path, sheet_name=scan_sheet, platform=platform)
-        values = build_google_push_rows(rows, platform=platform)
+        # Off the loop on the fresh row copies; a cancel still waits for it before the scan ends.
+        values = await context.complete_blocking(build_google_push_rows, rows, platform=platform)
         sheet_title = await context.complete_blocking(context.google_io, push_rows_to_new_sheet, context.EXCEL_DIR, spreadsheet_id, values, source_sheet_name=scan_sheet, platform=platform)
     except GoogleLoginRequired as error:
         await manager.broadcast_log(f"Quét đã lưu xong nhưng chưa đẩy lên Google: {error}", level="WARN")
