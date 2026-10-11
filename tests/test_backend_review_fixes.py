@@ -1,4 +1,5 @@
 import asyncio
+import json
 import io
 import threading
 from pathlib import Path
@@ -10,6 +11,8 @@ from starlette.datastructures import UploadFile
 from starlette.websockets import WebSocketDisconnect
 
 from riviu import app as backend
+from riviu import scan_service
+from riviu.api import google as google_api, security, sources as sources_api
 from riviu.workbook_utils import google_sheet_source_for_file, register_google_sheet_source
 
 
@@ -31,7 +34,7 @@ def isolated_backend(tmp_path, monkeypatch):
     monkeypatch.setattr(backend, "CURRENT_SCAN_SHEET", "Data")
     monkeypatch.setattr(backend, "SCRAPE_TASK", None)
     monkeypatch.setattr(backend, "manager", backend.ConnectionManager())
-    monkeypatch.setattr(backend, "oauth_status", lambda _: {"valid": False, "configured": False})
+    monkeypatch.setattr(sources_api, "oauth_status", lambda _: {"valid": False, "configured": False})
     for name in ("A", "B"):
         make_workbook(tmp_path / f"{name}.xlsx")
         register_google_sheet_source(str(tmp_path), f"{name}.xlsx", f"https://docs.google.com/spreadsheets/d/ID_{name}/edit")
@@ -40,7 +43,7 @@ def isolated_backend(tmp_path, monkeypatch):
 
 def test_select_and_push_uses_workbook_source_without_rebinding_override(isolated_backend, monkeypatch):
     pushed = []
-    monkeypatch.setattr(backend, "push_rows_to_new_sheet", lambda base, sid, rows, **kw: pushed.append(sid) or "Result")
+    monkeypatch.setattr(google_api, "push_rows_to_new_sheet", lambda base, sid, rows, **kw: pushed.append(sid) or "Result")
     asyncio.run(backend.select_file({"filename": "B.xlsx"}))
     state = asyncio.run(backend.list_files())
     assert state["googleSheetUrl"].endswith("/ID_B/edit")
@@ -74,9 +77,9 @@ def test_valid_same_name_upload_gets_new_filename(isolated_backend):
 
 
 def test_sync_same_title_same_minute_creates_distinct_files(isolated_backend, monkeypatch):
-    monkeypatch.setattr(backend, "fetch_google_spreadsheet_title", lambda _: "Same Name")
-    monkeypatch.setattr(backend, "format_filename_datetime", lambda: "25-09-2026-10-30")
-    monkeypatch.setattr(backend, "sync_download_google_sheet", lambda base, url, sid, dest: make_workbook(dest, sid))
+    monkeypatch.setattr(google_api, "fetch_google_spreadsheet_title", lambda _: "Same Name")
+    monkeypatch.setattr(google_api, "format_filename_datetime", lambda: "25-09-2026-10-30")
+    monkeypatch.setattr(google_api, "sync_download_google_sheet", lambda base, url, sid, dest: make_workbook(dest, sid))
     first = asyncio.run(backend.sync_google_sheet({"url": "https://docs.google.com/spreadsheets/d/SOURCE_A/edit"}))
     first_bytes = (isolated_backend / first["file"]).read_bytes()
     second = asyncio.run(backend.sync_google_sheet({"url": "https://docs.google.com/spreadsheets/d/SOURCE_B/edit"}))
@@ -130,7 +133,7 @@ def test_snapshot_metadata_and_terminal_failure(isolated_backend, monkeypatch):
         await events.broadcast_data({"id": 1, "views": None, "saves": None})
         await events.broadcast_status({"total": 1, "processed": 1, "success": 0, "hidden": 1, "error": 0, "done": False})
         raise RuntimeError("fixture save failed")
-    monkeypatch.setattr(backend, "run_threads_scraper", fail_after_partial)
+    monkeypatch.setattr(scan_service, "run_threads_scraper", fail_after_partial)
     asyncio.run(backend.run_scraper_safely(str(isolated_backend / "A.xlsx"), backend.scan_options(platform="threads", sheet_name="Data")))
     snapshot = backend.manager.snapshot()
     assert not snapshot["running"]
@@ -187,7 +190,7 @@ def test_slow_preview_remains_bound_to_original_file(isolated_backend, monkeypat
         entered.set()
         assert release.wait(2)
         return {"currentSheet": "A Sheet", "columns": [], "data": []}
-    monkeypatch.setattr(backend, "read_sheet_preview", delayed_preview)
+    monkeypatch.setattr(sources_api, "read_sheet_preview", delayed_preview)
     async def scenario():
         task = asyncio.create_task(backend.preview_excel("Data"))
         await asyncio.to_thread(entered.wait, 1)
@@ -205,7 +208,7 @@ def test_oauth_does_not_block_other_coroutines(isolated_backend, monkeypatch):
     def waiting_auth(_):
         entered.set()
         assert release.wait(2)
-    monkeypatch.setattr(backend, "authorize_google", waiting_auth)
+    monkeypatch.setattr(google_api, "authorize_google", waiting_auth)
 
     async def scenario():
         task = asyncio.create_task(backend.google_oauth_login())
@@ -228,8 +231,8 @@ def test_scan_target_stays_bound_if_selection_changes(isolated_backend, monkeypa
         observed.append(Path(path).name)
         backend.CURRENT_SELECTED_FILE = "B.xlsx"
         await manager.broadcast_status({"total": 1, "processed": 1, "success": 1, "error": 0, "done": True})
-    monkeypatch.setattr(backend, "run_scraper", fake_scan)
-    monkeypatch.setattr(backend, "push_rows_to_new_sheet", lambda base, sid, rows, **kw: observed.append(sid) or "Result")
+    monkeypatch.setattr(scan_service, "run_scraper", fake_scan)
+    monkeypatch.setattr(scan_service, "push_rows_to_new_sheet", lambda base, sid, rows, **kw: observed.append(sid) or "Result")
     asyncio.run(backend.run_scraper_safely(str(isolated_backend / "A.xlsx"), backend.scan_options(sheet_name="Data", push_to_google=True, file_id="A.xlsx")))
     assert observed == ["A.xlsx", "ID_A"]
     assert backend.manager.last_status["phase"] == "completed"
@@ -241,8 +244,8 @@ def test_push_failure_after_saved_scan_is_a_warning_not_a_failed_scan(isolated_b
         await manager.broadcast_status({"total": 1, "processed": 1, "success": 1, "error": 0, "done": True})
     def failing_push(*_args, **_kwargs):
         raise failure
-    monkeypatch.setattr(backend, "run_scraper", fake_scan)
-    monkeypatch.setattr(backend, "push_rows_to_new_sheet", failing_push)
+    monkeypatch.setattr(scan_service, "run_scraper", fake_scan)
+    monkeypatch.setattr(scan_service, "push_rows_to_new_sheet", failing_push)
     logs = []
     original_log = backend.manager.broadcast_log
     async def capture(message, **kwargs):
@@ -259,7 +262,7 @@ def test_websocket_start_scans_the_workbook_the_client_names(isolated_backend, m
     calls = []
     async def fake_runner(path, options, **kwargs):
         calls.append((Path(path).name, options["file_id"]))
-    monkeypatch.setattr(backend, "run_scraper_safely", fake_runner)
+    monkeypatch.setattr(scan_service, "run_scraper_safely", fake_runner)
     backend.CURRENT_SELECTED_FILE = "A.xlsx"
     asyncio.run(run_fixture_websocket_start(monkeypatch, {"platform": "tiktok", "file_id": "B.xlsx"}))
     assert calls == [("B.xlsx", "B.xlsx")]
@@ -287,7 +290,7 @@ def test_threads_dispatch_forwards_proxy_settings(isolated_backend, monkeypatch,
     calls = []
     async def fake_threads(path, events, **kwargs):
         calls.append((path, kwargs))
-    monkeypatch.setattr(backend, "run_threads_scraper", fake_threads)
+    monkeypatch.setattr(scan_service, "run_threads_scraper", fake_threads)
     text = "http://fixture-user:fixture-password@proxy.example:8080"
     target = str(isolated_backend / "A.xlsx")
     asyncio.run(backend.run_scraper_safely(target, backend.scan_options(
@@ -343,7 +346,7 @@ def test_threads_authenticated_socks_proxy_mode_validation(tmp_path, mode, valid
 def test_proxy_validation_off_skips_threads_resolver(tmp_path, monkeypatch):
     def unexpected(*args):
         pytest.fail("Proxy-off validation must not resolve proxy configuration")
-    monkeypatch.setattr(backend, "resolve_threads_proxies", unexpected)
+    monkeypatch.setattr(scan_service, "resolve_threads_proxies", unexpected)
     assert backend.validate_proxy_start(False, "malformed", str(tmp_path), platform="threads", mode="hybrid") is None
 
 
@@ -352,7 +355,7 @@ def test_threads_proxy_validation_returns_safe_resolver_error(tmp_path, monkeypa
     def reject(base_dir, proxy_text, mode):
         calls.append((base_dir, proxy_text, mode))
         raise ValueError("Fixture safe proxy validation error")
-    monkeypatch.setattr(backend, "resolve_threads_proxies", reject)
+    monkeypatch.setattr(scan_service, "resolve_threads_proxies", reject)
     error = backend.validate_proxy_start(True, "fixture input", str(tmp_path), platform="threads", mode="hybrid")
     assert error == "Fixture safe proxy validation error"
     assert calls == [(str(tmp_path), "fixture input", "hybrid")]
@@ -381,11 +384,11 @@ async def run_fixture_websocket_start(monkeypatch, payload):
         async def receive_text(self):
             if not self.received:
                 self.received = True
-                return backend.json.dumps({"action": "start", "sheet_name": "Data", **payload})
+                return json.dumps({"action": "start", "sheet_name": "Data", **payload})
             await asyncio.sleep(0)
             raise WebSocketDisconnect()
-    monkeypatch.setattr(backend, "trusted_local_request", lambda *args, **kwargs: True)
-    monkeypatch.setattr(backend, "valid_local_session", lambda *args: True)
+    monkeypatch.setattr(security, "trusted_local_request", lambda *args, **kwargs: True)
+    monkeypatch.setattr(security, "valid_local_session", lambda *args: True)
     socket = FixtureSocket()
     await backend.websocket_endpoint(socket)
     if backend.SCRAPE_TASK:
@@ -403,8 +406,8 @@ def test_websocket_start_passes_platform_and_normalized_mode(isolated_backend, m
         validation_calls.append((use_proxy, proxy_text, base_dir, platform, mode))
     async def fake_runner(path, options, **kwargs):
         dispatch_calls.append(options)
-    monkeypatch.setattr(backend, "validate_proxy_start", validate)
-    monkeypatch.setattr(backend, "run_scraper_safely", fake_runner)
+    monkeypatch.setattr(scan_service, "validate_proxy_start", validate)
+    monkeypatch.setattr(scan_service, "run_scraper_safely", fake_runner)
     asyncio.run(run_fixture_websocket_start(monkeypatch, {
         "platform": platform, "scrape_mode": input_mode, "use_proxy": True, "proxy_text": "proxy.example:8080",
     }))
@@ -425,7 +428,7 @@ def test_websocket_rejects_invalid_threads_proxy_before_dispatch(isolated_backen
     calls = []
     async def fake_runner(*args, **kwargs):
         calls.append(kwargs)
-    monkeypatch.setattr(backend, "run_scraper_safely", fake_runner)
+    monkeypatch.setattr(scan_service, "run_scraper_safely", fake_runner)
     save_fixture_proxy_list(isolated_backend, "proxy.example:8080")
     messages = asyncio.run(run_fixture_websocket_start(monkeypatch, {
         "platform": "threads", "scrape_mode": mode, "use_proxy": True, "proxy_text": text,
@@ -434,6 +437,6 @@ def test_websocket_rejects_invalid_threads_proxy_before_dispatch(isolated_backen
     assert backend.SCRAPE_TASK is None
     assert not backend.manager.running
     assert any(message.get("data", {}).get("phase") == "failed" for message in messages)
-    output = backend.json.dumps(messages)
+    output = json.dumps(messages)
     assert "fixture-user" not in output
     assert "fixture-password" not in output
