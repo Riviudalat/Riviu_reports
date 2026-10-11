@@ -515,6 +515,69 @@ def test_cancel_during_summary_waits_for_the_rebuild_before_the_flush(tmp_path, 
     finally: saved.close()
 
 
+def test_checkpoint_saves_after_30_seconds_of_unsaved_results_and_always_flushes(tmp_path, monkeypatch):
+    path = workbook(tmp_path, count=4)
+    gates = {URL + str(index): threading.Event() for index in range(4)}
+    now = [0.0]
+    saves = []
+    save = threads.save_workbook_atomic
+
+    def request(url):
+        assert gates[url].wait(30)  # longer than any wait below: a timeout never ends the run
+        return metrics(views=10 + int(url[-1]))
+
+    def timed_save(book, destination):
+        save(book, destination)
+        saves.append(now[0])
+
+    monkeypatch.setattr(threads, "async_playwright", NoBrowser)
+    monkeypatch.setattr(threads, "fetch_threads_http", request)
+    monkeypatch.setattr(threads, "save_workbook_atomic", timed_save)
+    monkeypatch.setattr(threads, "_checkpoint_clock", lambda: now[0])
+    events = Events()
+
+    async def until(condition):
+        for _ in range(500):
+            if condition():
+                await asyncio.sleep(0.05)  # the run notes the save before the clock moves on
+                return True
+            await asyncio.sleep(0.01)
+        return False
+
+    async def scan():
+        task = asyncio.create_task(threads.run_threads_scraper(path, events, worker_count=4, mode="request"))
+        try:
+            gates[URL + "0"].set()
+            assert await until(lambda: len(events.data) == 1)
+            now[0] = 29.9
+            gates[URL + "1"].set()
+            assert await until(lambda: len(events.data) == 2)
+            await asyncio.sleep(0.3)
+            assert saves == []  # unsaved results, but 30 s have not passed
+            now[0] = 30
+            assert await until(lambda: saves == [30])  # due: saved without waiting for another result
+            now[0] = 100
+            await asyncio.sleep(0.3)
+            assert saves == [30]  # nothing changed since that save
+            gates[URL + "2"].set()
+            assert await until(lambda: saves == [30, 100])  # an overdue result is saved at once
+            now[0] = 101
+            gates[URL + "3"].set()
+            await task
+        finally:
+            for gate in gates.values():
+                gate.set()
+
+    asyncio.run(scan())
+    assert saves == [30, 100, 101]  # the final flush keeps the last result, 1 s after a save
+    saved = openpyxl.load_workbook(path)
+    try:
+        views = worksheet_find_column_index(saved.active, ["LƯỢT XEM"])
+        assert [saved.active.cell(row, views).value for row in range(2, 6)] == [10, 11, 12, 13]
+    finally:
+        saved.close()
+
+
 class LaunchableChromium:
     """A browser that launches: a Hybrid fallback really reaches fetch_threads_browser."""
 

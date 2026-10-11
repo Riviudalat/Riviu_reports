@@ -65,6 +65,13 @@ CORE_METRICS = ("views", "likes", "comments", "reposts")
 # Hybrid browser fallbacks open at once. Each also takes a route slot, so HTTP
 # keeps the other slots while slow Chromium pages load.
 BROWSER_FALLBACK_LIMIT = 2
+# Mid-run checkpoint: results written into the workbook reach the file once this
+# many seconds have passed since the last save (each save writes the whole
+# workbook). The final and cancellation flushes save whatever is left.
+THREADS_CHECKPOINT_SECONDS = 30
+# Clock of the checkpoint timer; tests replace it (patching time.monotonic would
+# also move asyncio's own clock).
+_checkpoint_clock = time.monotonic
 
 
 def resolve_threads_proxies(base_dir, proxy_text="", mode="request"):
@@ -937,6 +944,7 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
     fallback_slots = asyncio.Semaphore(max(1, min(BROWSER_FALLBACK_LIMIT, workers - 1)))
     processed = success = hidden = errors = 0
     dirty = False
+    last_saved = _checkpoint_clock()
     completed = False
     started = time.monotonic()
 
@@ -953,9 +961,10 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
             return browser
 
         async def save_pending():
-            nonlocal dirty
+            nonlocal dirty, last_saved
             await asyncio.to_thread(save_workbook_atomic, workbook, file_path)
             dirty = False
+            last_saved = _checkpoint_clock()
 
         async def check(index, item):
             # A cookie session keeps one route for the whole run; anonymous runs round-robin.
@@ -974,10 +983,21 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
             return item, merge_results(request_result, browser_result), "Hybrid"
 
         tasks = [asyncio.create_task(check(index, item)) for index, item in enumerate(items)]
+        waiting = None
         closing = None
         try:
-            for task in asyncio.as_completed(tasks):
-                item, result, source = await task
+            for next_result in asyncio.as_completed(tasks):
+                waiting = asyncio.ensure_future(next_result)
+                while not waiting.done():
+                    # Checkpoint once there are unsaved results and THREADS_CHECKPOINT_SECONDS
+                    # have passed since the last save, even while the next page still loads.
+                    # The save is awaited here, so no row changes while it runs.
+                    due_in = last_saved + THREADS_CHECKPOINT_SECONDS - _checkpoint_clock() if dirty else None
+                    if due_in is not None and due_in <= 0:
+                        await finish_pending_task(asyncio.create_task(save_pending()))
+                    else:
+                        await asyncio.wait({waiting}, timeout=due_in)
+                item, result, source = waiting.result()
                 if session_cookies is not None and result.get("error_kind") in {"auth_invalid", "auth_checkpoint", "auth_unknown"}:
                     if diagnostics is not None:
                         diagnostics["authState"] = result["error_kind"].removeprefix("auth_")
@@ -1007,8 +1027,6 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                         "mode": "partner" if selected_partners else "full", "done": False,
                         "rate": round(processed / max(time.monotonic() - started, 0.1) * 60, 1),
                     })
-                if processed % 5 == 0:
-                    await finish_pending_task(asyncio.create_task(save_pending()))
             # Every page load is done: Chromium closes while the workbook is finalized.
             closing = asyncio.ensure_future(close_browser_bounded(browser))
             if sheet_name:
@@ -1017,11 +1035,12 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
             completed = True
         finally:
             async def cleanup():
-                for task in tasks:
+                owned = [*tasks, *([waiting] if waiting is not None else [])]
+                for task in owned:
                     if not task.done():
                         task.cancel()
                 try:
-                    await asyncio.gather(*tasks, return_exceptions=True)
+                    await asyncio.gather(*owned, return_exceptions=True)
                     if dirty:
                         await save_pending()
                 finally:

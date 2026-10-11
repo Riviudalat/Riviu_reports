@@ -357,8 +357,21 @@ def _threads_scan_fixture(tmp_path, monkeypatch, count=1):
 
 
 def test_threads_cancellation_joins_autosave_before_cleanup_save(tmp_path, monkeypatch):
-    path = _threads_scan_fixture(tmp_path, monkeypatch, count=5)
+    path = _threads_scan_fixture(tmp_path, monkeypatch, count=6)
     first_started = threading.Event()
+    written = []
+    fetch, write = threads_scraper.fetch_threads_http, threads_scraper.write_threads_result
+
+    def sixth_answers_after_checkpoint(url):
+        if url.endswith("Post5"):
+            first_started.wait(5)
+        return fetch(url)
+
+    monkeypatch.setattr(threads_scraper, "fetch_threads_http", sixth_answers_after_checkpoint)
+    monkeypatch.setattr(threads_scraper, "write_threads_result", lambda *args: written.append(args) or write(*args))
+    # The 30 s checkpoint falls due once the first five results are written.
+    monkeypatch.setattr(threads_scraper, "_checkpoint_clock",
+                        lambda: threads_scraper.THREADS_CHECKPOINT_SECONDS if len(written) >= 5 else 0)
     release_first = threading.Event()
     overlap_seen = threading.Event()
     save = threads_scraper.save_workbook_atomic
