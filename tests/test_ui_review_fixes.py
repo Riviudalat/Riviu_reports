@@ -128,6 +128,16 @@ def test_proxy_settings_survive_platform_switch_and_use_saved_text():
     """)
 
 
+def test_guide_button_handler_opens_and_closes_the_guide_modal():
+    run_js("""
+      el('guideModal'); assert.ok(!el('guideModal').classList.contains('active'));
+      openGuideModal();
+      assert.ok(el('guideModal').classList.contains('active'));
+      closeGuideModal();
+      assert.ok(!el('guideModal').classList.contains('active'));
+    """)
+
+
 def test_threads_proxy_toolbar_is_not_hidden_by_platform_css():
     css = (ROOT / 'riviu' / 'web' / 'static' / 'styles.css').read_text(encoding='utf-8')
     assert not re.search(r'\[data-platform\s*=\s*[\"\']threads[\"\']\]\s+\.toolbar-proxy\s*\{[^}]*display\s*:\s*none', css)

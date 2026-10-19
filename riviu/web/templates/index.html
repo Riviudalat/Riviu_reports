@@ -9,7 +9,7 @@
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">
     <link rel="stylesheet" href="/static/styles.css?v={{ asset_version }}">
 </head>
-<body class="compact-page" data-workspace-tab="sheet" data-platform="tiktok">
+<body class="compact-page" data-workspace-tab="sheet" data-platform="tiktok"{% if server_mode %} data-server-mode="1"{% endif %}>
     <div class="toast-stack" id="toastStack" aria-live="assertive"></div>
     <div class="server-banner" id="serverBanner" hidden>Server đã cập nhật — restart Khoidong.bat rồi F5 trang này.</div>
     <div class="server-banner" id="connectionBanner" role="alert" hidden>Mất kết nối tới server. Ứng dụng vẫn tự thử lại, hoặc tải lại trang (F5).</div>
@@ -37,6 +37,16 @@
                     <button class="btn btn-primary btn-compact compact-top-action" onclick="openReportModal()" title="Đối tác và báo cáo" aria-label="Đối tác và báo cáo">
                         <span class="material-icons-outlined">summarize</span><span class="compact-action-label">Đối tác & báo cáo</span>
                     </button>
+                    <button class="btn btn-outline btn-compact compact-top-action" id="guideButton" type="button" onclick="openGuideModal()" title="Hướng dẫn sử dụng" aria-label="Hướng dẫn sử dụng">
+                        <span class="material-icons-outlined">help_outline</span><span class="compact-action-label">Hướng dẫn sử dụng</span>
+                    </button>
+                    {% if server_mode %}
+                    <form class="logout-form" method="post" action="/logout">
+                        <button class="btn btn-outline btn-compact compact-top-action" id="logoutButton" type="submit" title="Đăng xuất" aria-label="Đăng xuất">
+                            <span class="material-icons-outlined">logout</span><span class="compact-action-label">Đăng xuất</span>
+                        </button>
+                    </form>
+                    {% endif %}
                 </div>
             </header>
             <div class="scan-toolbar" role="toolbar" aria-label="Cấu hình quét">
@@ -507,6 +517,55 @@
             </div>
         </div>
     </div>
+
+    <div class="modal-backdrop" id="guideModal" aria-hidden="true">
+        <div class="report-modal guide-modal" role="dialog" aria-modal="true" aria-labelledby="guideModalTitle">
+            <div class="modal-header">
+                <div>
+                    <div class="modal-title" id="guideModalTitle">Hướng dẫn sử dụng</div>
+                    <div class="modal-subtitle">Các bước quét số liệu, xuất báo cáo và đẩy lên Google Sheet.</div>
+                </div>
+                <button class="icon-btn" onclick="closeGuideModal()" aria-label="Đóng">
+                    <span class="material-icons-outlined">close</span>
+                </button>
+            </div>
+            <div class="modal-body guide-body">
+                {% include "guide.html" %}
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeGuideModal()">Đóng</button>
+            </div>
+        </div>
+    </div>
+
+    {% if server_mode %}
+    <div class="modal-backdrop" id="googlePasteModal" aria-hidden="true">
+        <div class="report-modal proxy-modal" role="dialog" aria-modal="true" aria-labelledby="googlePasteTitle">
+            <div class="modal-header">
+                <div>
+                    <div class="modal-title" id="googlePasteTitle">Đăng nhập Google</div>
+                    <div class="modal-subtitle">Ứng dụng chạy trên server nên không tự mở được trình duyệt.</div>
+                </div>
+                <button class="icon-btn" onclick="closeGooglePasteModal()" aria-label="Đóng">
+                    <span class="material-icons-outlined">close</span>
+                </button>
+            </div>
+            <div class="modal-body">
+                <ol class="google-paste-steps">
+                    <li><a id="googlePasteAuthLink" href="#" target="_blank" rel="noopener noreferrer">Mở trang đăng nhập Google</a> và cho phép quyền truy cập.</li>
+                    <li>Trình duyệt sẽ chuyển tới một địa chỉ <code>http://localhost…</code> và báo không tải được trang. Đó là bình thường.</li>
+                    <li>Sao chép toàn bộ địa chỉ đó trên thanh địa chỉ và dán vào ô dưới đây.</li>
+                </ol>
+                <textarea id="googlePasteInput" class="proxy-textarea" rows="3" placeholder="http://localhost:…/?state=…&amp;code=…"></textarea>
+                <div class="proxy-test-result" id="googlePasteResult"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline" onclick="closeGooglePasteModal()">Đóng</button>
+                <button class="btn btn-primary" id="googlePasteSubmit" onclick="submitGooglePaste()">Xác nhận</button>
+            </div>
+        </div>
+    </div>
+    {% endif %}
 
     <svg width="0" height="0" aria-hidden="true" style="position:absolute;pointer-events:none"><defs>
         <symbol id="cookieShield" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6Z"/><path d="m8 12 3 3 5-6"/></symbol>

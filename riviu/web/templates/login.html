@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="vi">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Đăng nhập · Riviu Reports</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/styles.css?v={{ asset_version }}">
+    <style>
+        .login-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 16px; background: #f5f6f8; }
+        .login-card { width: min(380px, 100%); background: #fff; border: 1px solid #e5e7eb; border-radius: 14px; padding: 28px 24px; box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08); }
+        .login-card h1 { display: flex; align-items: center; gap: 10px; margin: 0 0 20px; font-size: 20px; }
+        .login-card h1 img { height: 30px; }
+        .login-card label { display: block; margin-bottom: 6px; font-size: 13px; font-weight: 600; color: #334155; }
+        .login-card input[type="password"] { width: 100%; box-sizing: border-box; padding: 11px 12px; border: 1px solid #d1d5db; border-radius: 8px; font-size: 15px; }
+        .login-card input[type="password"]:focus { outline: 2px solid #fed7aa; border-color: #ff6b00; }
+        .login-card .btn { width: 100%; justify-content: center; margin-top: 16px; }
+        .login-error { margin: 0 0 14px; padding: 10px 12px; border-radius: 8px; background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; font-size: 14px; }
+    </style>
+</head>
+<body class="login-page">
+    <form class="login-card" method="post" action="/login" autocomplete="off">
+        <h1><img src="/logo.png" alt="Riviu"><span>Reports</span></h1>
+        {% if error %}<p class="login-error" role="alert">{{ error }}</p>{% endif %}
+        <label for="password">Mật khẩu</label>
+        <input type="password" id="password" name="password" required autofocus autocomplete="current-password" maxlength="1024">
+        <button class="btn btn-primary" type="submit">Đăng nhập</button>
+    </form>
+    <script>
+        // Opened from a link on another site, the SameSite=Strict login cookie was not sent;
+        // this same-origin probe carries it, so a logged-in user goes straight back in.
+        fetch('/auth-status', { credentials: 'same-origin' })
+            .then(response => response.ok ? response.json() : null)
+            .then(data => { if (data && data.authenticated) window.location.replace('/'); })
+            .catch(() => {});
+    </script>
+</body>
+</html>

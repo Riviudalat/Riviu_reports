@@ -9,15 +9,17 @@ import urllib.error
 from fastapi import APIRouter, File, UploadFile
 from fastapi.responses import JSONResponse
 
-from riviu import scan_state
+from riviu import scan_state, server_mode
 from riviu import server_context as context
 from riviu import source_files
 from riviu.google_sheets_sync import (
     authorize_google,
     download_google_sheet_authenticated,
+    finish_paste_back_login,
     oauth_status,
     push_rows_to_new_sheet,
     save_oauth_client,
+    start_paste_back_login,
     try_load_credentials,
 )
 from riviu.reports import build_google_push_rows
@@ -46,6 +48,8 @@ from riviu.workbook_utils import (
 
 
 router = APIRouter()
+# Server mode: the one pending paste-back login (state + PKCE verifier stay server side).
+PENDING_GOOGLE_LOGIN = None
 
 
 def sync_download_google_sheet(base_dir, source_url, spreadsheet_id, destination_path):
@@ -164,6 +168,8 @@ async def upload_google_oauth_client(file: UploadFile = File(...)):
 
 @router.post("/google-oauth-login")
 async def google_oauth_login():
+    if server_mode.ACTIVE is not None:
+        return await start_server_google_login()
     # Waits on the user's browser (bounded by a timeout); holding GOOGLE_IO_LOCK here would freeze
     # previews, pushes and scans until the user finished or abandoned the login tab.
     if not context.GOOGLE_LOGIN_LOCK.acquire(blocking=False):
@@ -219,3 +225,34 @@ async def push_google_sheet(data: dict | None = None):
             return {"success": True, "sheetTitle": sheet_title, "sourceSheet": upload_sheet, "file": file_id, "file_id": file_id, "platform": platform}
         except Exception as error:
             return JSONResponse(content={"error": f"Đẩy dữ liệu lên Google Sheet thất bại: {str(error)}"}, status_code=500)
+
+
+async def start_server_google_login():
+    global PENDING_GOOGLE_LOGIN
+    try:
+        PENDING_GOOGLE_LOGIN = await asyncio.to_thread(context.google_io, start_paste_back_login, context.EXCEL_DIR)
+    except Exception as error:
+        return JSONResponse(content={"error": f"Đăng nhập Google thất bại: {str(error)}"}, status_code=500)
+    return {"pasteBack": True, "authUrl": PENDING_GOOGLE_LOGIN["authUrl"]}
+
+
+@router.post("/google-oauth-complete")
+async def google_oauth_complete(data: dict | None = None):
+    global PENDING_GOOGLE_LOGIN
+    if server_mode.ACTIVE is None:
+        return JSONResponse({"error": "Not Found"}, status_code=404)
+    pending = PENDING_GOOGLE_LOGIN
+    pasted = (data or {}).get("url", "")
+    if not context.GOOGLE_LOGIN_LOCK.acquire(blocking=False):
+        return JSONResponse(content={"error": "Đang xác nhận đăng nhập Google, hãy chờ."}, status_code=409)
+    try:
+        await asyncio.to_thread(context.google_io, finish_paste_back_login, context.EXCEL_DIR, pending, pasted)
+    except ValueError as error:
+        return JSONResponse(content={"error": str(error)}, status_code=400)
+    except Exception as error:
+        return JSONResponse(content={"error": f"Đăng nhập Google thất bại: {str(error)}"}, status_code=500)
+    finally:
+        context.GOOGLE_LOGIN_LOCK.release()
+    # One code per consent; a second paste must start over.
+    PENDING_GOOGLE_LOGIN = None
+    return {"success": True}

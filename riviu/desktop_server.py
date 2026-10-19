@@ -7,6 +7,7 @@ import uvicorn
 from fastapi import HTTPException, Request
 
 from riviu import app as app_state
+from riviu import server_mode
 from riviu.platforms import tiktok as scraper
 from riviu.app import app
 
@@ -47,6 +48,9 @@ def main() -> None:
     # Only the packaged process uses the bundled Chromium; importing route helpers
     # must not redirect browser discovery for tests or source deployments.
     os.environ.setdefault("PLAYWRIGHT_BROWSERS_PATH", "0")
+    if server_mode.ACTIVE is not None:
+        # Server mode blocks /_desktop/* and the shared-password login is not for the desktop app.
+        raise SystemExit("RIVIU_SERVER_MODE không dùng cho bản desktop; chạy `python -m riviu` trên server.")
     port = int(os.environ.get("RIVIU_PORT", "1231"))
     shutdown_token = os.environ.get("RIVIU_SHUTDOWN_TOKEN", "")
     config = uvicorn.Config(app, host="127.0.0.1", port=port, log_level="info")
