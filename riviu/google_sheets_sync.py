@@ -1,9 +1,13 @@
+import hmac
 import json
 import os
+import secrets
+import time
 import urllib.request
+from urllib.parse import parse_qs, urlsplit
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow, WSGITimeoutError
+from google_auth_oauthlib.flow import Flow, InstalledAppFlow, WSGITimeoutError
 from googleapiclient.discovery import build
 
 from riviu.workbook_utils import (
@@ -19,6 +23,7 @@ from riviu.workbook_utils import (
 CLIENT_SECRET_FILENAME = "google_oauth_client.json"
 TOKEN_FILENAME = "google_oauth_token.json"
 LOGIN_TIMEOUT_SECONDS = 300
+PASTE_BACK_TTL_SECONDS = 600
 
 
 class GoogleLoginRequired(RuntimeError):
@@ -355,6 +360,62 @@ def authorize_google(base_dir, timeout_seconds=LOGIN_TIMEOUT_SECONDS):
     except WSGITimeoutError as error:
         raise TimeoutError("Hết thời gian chờ đăng nhập Google. Hãy thử lại.") from error
     write_token(token_path(base_dir), creds)
+    return True
+
+
+# ---- Server mode: paste-back login ---------------------------------------------------
+# The server cannot open a browser or receive the loopback redirect. With the same
+# Desktop-type OAuth client, Google redirects the user's own browser to
+# http://localhost:<port>/?state=...&code=...; that page fails to load and the user pastes
+# the address back. PKCE binds the code to this server's verifier; the state is checked
+# whenever the full address is pasted.
+
+def start_paste_back_login(base_dir):
+    """A consent URL plus the pending state to keep server side (never sent to the browser)."""
+    client_file = client_secret_path(base_dir)
+    if not os.path.exists(client_file):
+        raise FileNotFoundError("Chưa có file OAuth client Google.")
+    redirect_uri = f"http://localhost:{49152 + secrets.randbelow(16383)}/"
+    flow = Flow.from_client_secrets_file(client_file, scopes=SCOPES, redirect_uri=redirect_uri, autogenerate_code_verifier=True)
+    auth_url, state = flow.authorization_url(access_type="offline", prompt="consent")
+    return {
+        "authUrl": auth_url,
+        "state": state,
+        "codeVerifier": flow.code_verifier,
+        "redirectUri": redirect_uri,
+        "expiresAt": time.time() + PASTE_BACK_TTL_SECONDS,
+    }
+
+
+def paste_back_code(pending, pasted):
+    """The authorization code from a pasted redirect address (state checked) or a bare code."""
+    if not pending or time.time() > float(pending.get("expiresAt", 0)):
+        raise ValueError("Phiên đăng nhập Google đã hết hạn. Bấm Đăng nhập Google để bắt đầu lại.")
+    text = str(pasted or "").strip()
+    if not text or len(text) > 4096:
+        raise ValueError("Hãy dán địa chỉ localhost mà Google chuyển tới.")
+    if "://" not in text and "=" not in text:
+        return text
+    query = parse_qs(urlsplit(text).query if "://" in text else text.lstrip("?"))
+    if query.get("error"):
+        raise ValueError(f"Google từ chối đăng nhập: {query['error'][0]}")
+    state = (query.get("state") or [""])[0]
+    code = (query.get("code") or [""])[0]
+    if not state or not hmac.compare_digest(state.encode("utf-8"), str(pending.get("state", "")).encode("utf-8")):
+        raise ValueError("Địa chỉ dán vào không khớp phiên đăng nhập này (state sai). Bấm Đăng nhập Google để thử lại.")
+    if not code:
+        raise ValueError("Địa chỉ dán vào không có mã code của Google.")
+    return code
+
+
+def finish_paste_back_login(base_dir, pending, pasted):
+    code = paste_back_code(pending, pasted)
+    flow = Flow.from_client_secrets_file(
+        client_secret_path(base_dir), scopes=SCOPES, state=pending["state"],
+        redirect_uri=pending["redirectUri"], code_verifier=pending["codeVerifier"],
+    )
+    flow.fetch_token(code=code)
+    write_token(token_path(base_dir), flow.credentials)
     return True
 
 

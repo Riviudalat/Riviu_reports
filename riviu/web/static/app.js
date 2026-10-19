@@ -1,3 +1,13 @@
+// Server mode (shared-password login): an expired or revoked login answers 401; go back to the login page.
+if (typeof document !== 'undefined' && document.body?.dataset?.serverMode === '1' && typeof window !== 'undefined' && window.fetch) {
+    const serverFetch = window.fetch.bind(window);
+    window.fetch = async (...args) => {
+        const response = await serverFetch(...args);
+        if (response.status === 401) window.location.assign('/login');
+        return response;
+    };
+}
+
 // ---- Platform registry ------------------------------------------------------
 // Everything that differs between platforms lives here. Adding a platform means adding
 // one entry (plus its icon in static/platform-icons/ and backend support); the platform
@@ -1067,6 +1077,10 @@ async function connectGoogleOAuth() {
     try {
         const res = await fetch('/google-oauth-login', { method: 'POST' });
         const data = await res.json();
+        if (res.ok && data.pasteBack) {
+            openGooglePasteModal(data.authUrl);
+            return;
+        }
         if (!res.ok || !data.success) throw new Error(data.error || 'Đăng nhập Google thất bại');
         notify('Đăng nhập Google thành công.', 'success');
         await refreshGoogleOauthStatus();
@@ -1077,6 +1091,52 @@ async function connectGoogleOAuth() {
         btn.innerHTML = originalHtml;
         await refreshGoogleOauthStatus();
         await updateFileList();
+    }
+}
+
+// Server mode: the server cannot open a browser, so the user approves in their own browser
+// and pastes back the http://localhost/... address Google redirected to.
+function openGooglePasteModal(authUrl) {
+    const modal = document.getElementById('googlePasteModal');
+    if (!modal) return;
+    document.getElementById('googlePasteAuthLink').href = authUrl;
+    document.getElementById('googlePasteInput').value = '';
+    document.getElementById('googlePasteResult').textContent = '';
+    setModalOpen(modal, true);
+}
+
+function closeGooglePasteModal() {
+    const modal = document.getElementById('googlePasteModal');
+    if (modal) setModalOpen(modal, false);
+}
+
+async function submitGooglePaste() {
+    const input = document.getElementById('googlePasteInput');
+    const result = document.getElementById('googlePasteResult');
+    const submit = document.getElementById('googlePasteSubmit');
+    const pasted = input.value.trim();
+    if (!pasted) {
+        result.textContent = 'Hãy dán địa chỉ localhost mà Google chuyển tới.';
+        return;
+    }
+    submit.disabled = true;
+    result.textContent = 'Đang xác nhận...';
+    try {
+        const res = await fetch('/google-oauth-complete', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: pasted }),
+        });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'Đăng nhập Google thất bại');
+        closeGooglePasteModal();
+        notify('Đăng nhập Google thành công.', 'success');
+        await refreshGoogleOauthStatus();
+        await updateFileList();
+    } catch (error) {
+        result.textContent = error.message;
+    } finally {
+        submit.disabled = false;
     }
 }
 

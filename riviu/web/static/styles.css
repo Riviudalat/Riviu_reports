@@ -582,6 +582,10 @@ body[data-platform="threads"] .scan-toolbar { flex-wrap: wrap; }
     gap: 5px;
 }
 
+.logout-form { display: contents; }
+.google-paste-steps { margin: 0 0 12px; padding-left: 20px; color: #334155; font-size: 13px; line-height: 1.6; }
+.google-paste-steps a { color: #ff6b00; font-weight: 600; }
+
 .compact-page .compact-top-action {
     width: 38px;
     height: 38px;
