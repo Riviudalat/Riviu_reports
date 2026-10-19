@@ -248,6 +248,7 @@ def run(base_url, data_dir):
         shooter.shot("09-tong-ket", summary_tab)
 
         # 10. Partner reports.
+        shooter.shot("10a-mo-doi-tac", "button[title='Đối tác và báo cáo']")
         page.click("button[title='Đối tác và báo cáo']")
         page.wait_for_selector("#partnerList .partner-checkbox")
         settle(800)
