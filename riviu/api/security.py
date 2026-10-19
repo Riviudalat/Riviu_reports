@@ -40,6 +40,9 @@ AUTH_STATUS_PATH = "/auth-status"
 LOGIN_FAILURE_LIMIT = 5
 LOGIN_FAILURE_WINDOW_SECONDS = 15 * 60
 PUBLIC_ASSET_PATHS = {"/logo.png", "/riviu-logo.png", "/favicon.ico"}
+# Server mode: only what the login page loads is public; app.js, icons and the usage
+# guide screenshots stay behind the login.
+SERVER_PUBLIC_ASSET_PATHS = PUBLIC_ASSET_PATHS | {"/static/styles.css"}
 
 
 def _port_of(parts):
@@ -258,7 +261,7 @@ async def protect_server_api(request: Request, call_next):
     public = (
         path == HEALTH_PATH
         or path in {LOGIN_PATH, LOGOUT_PATH, AUTH_STATUS_PATH}
-        or (request.method in {"GET", "HEAD"} and (path.startswith("/static/") or path in PUBLIC_ASSET_PATHS))
+        or (request.method in {"GET", "HEAD"} and path in SERVER_PUBLIC_ASSET_PATHS)
     )
     navigation = (
         request.method in {"GET", "HEAD"}

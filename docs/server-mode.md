@@ -16,7 +16,8 @@ từ `RIVIU_FORWARDED_ALLOW_IPS` (mặc định `127.0.0.1`; trong Docker là ga
 
 - Host/Origin phải khớp `RIVIU_PUBLIC_ORIGIN`; Host loopback chỉ để kiểm tra sức khoẻ trên chính máy chủ.
   Fetch cross-site bị chặn như bản local.
-- Không cần đăng nhập: `GET/POST /login`, `POST /logout`, `GET /auth-status`, `GET /healthz` (trả `ok`), `/static/*`, logo.
+- Không cần đăng nhập: `GET/POST /login`, `POST /logout`, `GET /auth-status`, `GET /healthz` (trả `ok`), và những gì trang đăng nhập tải (`/static/styles.css`, logo, favicon).
+  `app.js`, icon và ảnh hướng dẫn (`/static/guide/`) cần đăng nhập.
   Mọi route khác và `/ws` cần cookie `__Host-riviu_auth` (HttpOnly, Secure, SameSite=Strict, mặc định 7 ngày).
   Thiếu cookie: trang HTML chuyển về `/login`, API trả 401, WebSocket bị đóng.
 - Phiên là token ngẫu nhiên; server chỉ lưu SHA-256 (`data/server_sessions.json`) nên khởi động lại không mất đăng nhập.
