@@ -1,7 +1,9 @@
 """Local, fail-closed Threads session import and read-only authentication checks.
 
 Cookie values and browser content never belong in exceptions, logs, or API status.
-Only OS-native secret storage is supported; there is no plaintext fallback.
+Only OS-native secret storage is supported (DPAPI/Keychain/SecretService), plus an
+AES-GCM file encrypted with an operator-provided key in server mode; there is no
+plaintext fallback.
 """
 from __future__ import annotations
 
@@ -332,6 +334,74 @@ class SecureStore:
                 backend = self._native_backend()
                 if backend.get_password("Riviu.ThreadsSession", self.account) is not None:
                     backend.delete_password("Riviu.ThreadsSession", self.account)
+        except Exception:
+            raise SessionError("storage_unavailable") from None
+
+
+class EncryptedFileStore:
+    """Server mode: AES-256-GCM file keyed by RIVIU_SECRET_KEY_FILE (headless hosts have no keyring).
+
+    The data root is bound in as associated data, so a copied file does not decrypt for
+    another root. Same load/save/delete contract and fail-closed errors as SecureStore.
+    """
+
+    MAGIC = b"RVTS1"
+
+    def __init__(self, base_dir, key: bytes):
+        if not isinstance(key, (bytes, bytearray)) or len(key) != 32:
+            raise SessionError("storage_unavailable")
+        self.base_dir = Path(base_dir).resolve()
+        root = os.path.normcase(str(self.base_dir)).encode("utf-8")
+        self.associated = hashlib.sha256(b"Riviu.ThreadsSession.server.v1\0" + root).digest()
+        self.path = self.base_dir / "data" / "threads_session.aesgcm"
+        self._key = bytes(key)
+
+    def _cipher(self):
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        return AESGCM(self._key)
+
+    def load(self) -> list[dict] | None:
+        try:
+            if not self.path.exists():
+                return None
+            if self.path.stat().st_size > MAX_IMPORT_BYTES + 16384:
+                raise SessionError("storage_unavailable")
+            blob = self.path.read_bytes()
+            if not blob.startswith(self.MAGIC):
+                raise SessionError("storage_unavailable")
+            nonce, sealed = blob[len(self.MAGIC):len(self.MAGIC) + 12], blob[len(self.MAGIC) + 12:]
+            raw = self._cipher().decrypt(nonce, sealed, self.associated)
+            return _normalize(raw.decode("utf-8"), allow_expired=True)
+        except Exception:
+            raise SessionError("storage_unavailable") from None
+
+    def save(self, cookies) -> None:
+        temporary = None
+        try:
+            raw = json.dumps(normalize_cookies(cookies), ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            nonce = os.urandom(12)
+            blob = self.MAGIC + nonce + self._cipher().encrypt(nonce, raw.encode("utf-8"), self.associated)
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            fd, temporary = tempfile.mkstemp(prefix=".threads-session-", suffix=".tmp", dir=self.path.parent)
+            with os.fdopen(fd, "wb") as stream:
+                stream.write(blob)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(temporary, self.path)
+            temporary = None
+        except Exception:
+            raise SessionError("storage_unavailable") from None
+        finally:
+            if temporary is not None:
+                try:
+                    os.unlink(temporary)
+                except OSError:
+                    pass
+
+    def delete(self) -> None:
+        try:
+            self.path.unlink(missing_ok=True)
         except Exception:
             raise SessionError("storage_unavailable") from None
 
