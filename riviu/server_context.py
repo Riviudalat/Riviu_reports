@@ -10,7 +10,7 @@ import asyncio
 import os
 import threading
 
-from riviu import paths
+from riviu import paths, server_mode
 from riviu.platforms.threads_session import ThreadsSession
 
 
@@ -32,7 +32,8 @@ def threads_session_manager():
     global THREADS_SESSION, THREADS_SESSION_ROOT
     root = os.path.realpath(EXCEL_DIR)
     if THREADS_SESSION is None or THREADS_SESSION_ROOT != root:
-        THREADS_SESSION = ThreadsSession(root)
+        # Server mode swaps the OS-native store for the key-file encrypted one.
+        THREADS_SESSION = ThreadsSession(root, store=server_mode.threads_cookie_store(root))
         THREADS_SESSION_ROOT = root
     return THREADS_SESSION
 

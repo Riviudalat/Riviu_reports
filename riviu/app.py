@@ -15,8 +15,8 @@ import types
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from riviu import scan_state, server_context
-from riviu.api import export, google, pages, proxy, scan, security, sources, threads_session
+from riviu import scan_state, server_context, server_mode
+from riviu.api import auth, export, google, pages, proxy, scan, security, sources, threads_session
 from riviu.workbook_utils import ensure_data_dir
 
 # Public names kept importable from `riviu.app` (tests, desktop_server, older callers).
@@ -131,6 +131,10 @@ class _StateForwardingModule(types.ModuleType):
 sys.modules[__name__].__class__ = _StateForwardingModule
 
 
+# Off unless RIVIU_SERVER_MODE=1; a server-mode process with missing settings must not
+# come up without its login, so ServerModeError propagates and stops the import.
+server_mode.activate_from_environment()
+
 os.makedirs(server_context.EXCEL_DIR, exist_ok=True)
 
 app = FastAPI()
@@ -142,6 +146,7 @@ if os.path.isdir(_STATIC_DIR):
 app.middleware("http")(security.protect_local_api)
 
 for _router in (
+    auth.router,
     pages.router,
     sources.router,
     google.router,

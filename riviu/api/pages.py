@@ -7,6 +7,7 @@ from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from riviu import server_context as context
+from riviu import server_mode
 
 
 router = APIRouter()
@@ -27,7 +28,10 @@ async def index(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="index.html",
-        context={"asset_version": static_asset_version(context.APP_RESOURCE_DIR)},
+        context={
+            "asset_version": static_asset_version(context.APP_RESOURCE_DIR),
+            "server_mode": server_mode.ACTIVE is not None,
+        },
     )
 
 
