@@ -1,0 +1,51 @@
+# Riviu Reports server. Run from the repo root:
+#   docker compose -f deploy/server/compose.yaml up -d --build
+# Secrets live on the host under /etc/riviu (see README.md), never in this repo.
+
+name: riviu
+
+services:
+  riviu:
+    build:
+      context: ../..
+      dockerfile: deploy/server/Dockerfile
+    image: riviu-reports:latest
+    restart: unless-stopped
+    init: true
+    env_file:
+      - /etc/riviu/riviu.env
+    environment:
+      RIVIU_SERVER_MODE: "1"
+      RIVIU_HOST: 0.0.0.0
+      RIVIU_PORT: "8000"
+      RIVIU_DATA_DIR: /data
+      RIVIU_PASSWORD_HASH_FILE: /run/secrets/riviu_password_hash
+      RIVIU_SECRET_KEY_FILE: /run/secrets/riviu_secret_key
+      # nginx on the host reaches the container through this network's gateway;
+      # only that address may set X-Forwarded-For/Proto (login rate limit by real IP).
+      RIVIU_FORWARDED_ALLOW_IPS: 172.31.110.1
+    volumes:
+      - /srv/riviu/data:/data
+      - /etc/riviu/password.hash:/run/secrets/riviu_password_hash:ro
+      - /etc/riviu/secret.key:/run/secrets/riviu_secret_key:ro
+    ports:
+      # Loopback only: the public entry is nginx with TLS.
+      - "127.0.0.1:18110:8000"
+    mem_limit: 4g
+    # Chromium needs more than Docker's 64 MB /dev/shm.
+    shm_size: 1gb
+    networks:
+      - riviu
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+networks:
+  riviu:
+    ipam:
+      config:
+        # Change both this subnet and RIVIU_FORWARDED_ALLOW_IPS if it clashes on the host.
+        - subnet: 172.31.110.0/24
+          gateway: 172.31.110.1

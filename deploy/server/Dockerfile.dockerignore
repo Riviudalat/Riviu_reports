@@ -1,0 +1,7 @@
+# Allowlist: user data, tokens, cookies and OAuth files must never reach the image.
+*
+!pyproject.toml
+!uv.lock
+!riviu/
+**/__pycache__
+**/*.pyc

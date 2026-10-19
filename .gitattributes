@@ -1,3 +1,6 @@
 # cmd.exe reads batch files by byte offset and mishandles LF-only files; capnhat.bat
 # relies on fixed offsets (see tests/test_batch_scripts.py). Always check them out CRLF.
 *.bat text eol=crlf
+
+# Shell scripts run on the Linux server (deploy/server/update.sh).
+*.sh text eol=lf
