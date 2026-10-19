@@ -15,7 +15,7 @@
     <li class="guide-step">
         <h3>Nạp Google Sheet hoặc file Excel</h3>
         <p>Dán link vào ô <b>Link Google Sheet TikTok</b> <span class="guide-num">1</span> rồi bấm <b>Nạp sheet</b> <span class="guide-num">2</span>: ứng dụng tải sheet về thành một file mới. Hoặc bấm vùng <b>Nạp file Excel</b> <span class="guide-num">3</span> để tải lên file .xlsx. File đã nạp trước đó chọn lại ở <b>File hiện có</b>.</p>
-        <p>Sheet chia sẻ “Bất kỳ ai có đường liên kết” nạp được mà không cần đăng nhập Google. Sheet riêng tư cần đăng nhập Google trước (bước 11).</p>
+        <p>Sheet chia sẻ “Bất kỳ ai có đường liên kết” nạp được mà không cần đăng nhập Google. Sheet riêng tư cần tài khoản dịch vụ được chia sẻ sheet, hoặc đăng nhập Google (bước 12).</p>
         <img src="/static/guide/03-nap-nguon.png" alt="Bảng Nguồn dữ liệu" loading="lazy" width="1280" height="800">
     </li>
     <li class="guide-step">
@@ -26,8 +26,15 @@
     <li class="guide-step">
         <h3>Chọn chế độ quét và proxy</h3>
         <p>Ô <b>Chế độ</b> <span class="guide-num">1</span>: <b>Request</b> nhanh và nhẹ, nên dùng mặc định. <b>Trình duyệt</b> mở Chromium cho từng link, chậm hơn nhưng đọc được trang mà Request không đọc được. <b>Hybrid (Request + trình duyệt)</b> chạy Request trước rồi chỉ đưa link lỗi sang trình duyệt.</p>
-        <p><b>Luồng</b> <span class="guide-num">2</span> là số link quét song song. Khi bị chặn hoặc giới hạn IP, bật <b>Proxy xoay</b> <span class="guide-num">3</span> và bấm <b>Cấu hình</b> để dán và test proxy.</p>
-        <img src="/static/guide/05-che-do-quet.png" alt="Chế độ, Luồng và Proxy xoay" loading="lazy" width="1280" height="800">
+        <p><b>Luồng</b> <span class="guide-num">2</span> là số link quét song song. Khi bị chặn hoặc giới hạn IP, bật <b>Proxy xoay</b> <span class="guide-num">3</span> và bấm <b>Cấu hình</b> để dán và test proxy. <b>Cookie TikTok</b> <span class="guide-num">4</span> là tùy chọn, xem bước 6.</p>
+        <img src="/static/guide/05-che-do-quet.png" alt="Chế độ, Luồng, Proxy xoay và Cookie TikTok" loading="lazy" width="1280" height="800">
+    </li>
+    <li class="guide-step">
+        <h3>Cookie TikTok (tùy chọn)</h3>
+        <p>Một số bài (thường là bài ảnh) báo “Video không khả dụng” với người xem chưa đăng nhập nhưng vẫn xem được khi đăng nhập; khi quét chúng hiện lỗi “TikTok báo không tìm thấy bài (chưa xác nhận, giữ số cũ)”. Cookie TikTok cho phép quét các bài này bằng phiên đăng nhập.</p>
+        <p><b>Dùng tài khoản TikTok phụ</b> <span class="guide-num">1</span>, không dùng tài khoản chính: quét bằng cookie tài khoản có thể khiến TikTok giới hạn hoặc yêu cầu xác minh tài khoản đó.</p>
+        <p>Cài tiện ích Cookie-Editor, đăng nhập tài khoản phụ ở tiktok.com, chọn <b>Export → JSON</b>. Trong <b>Cookie TikTok</b> → <b>Cấu hình</b>, chọn <b>Chọn file JSON</b> hoặc <b>Dán JSON</b> <span class="guide-num">2</span> rồi bấm <b>Import &amp; kiểm tra</b> <span class="guide-num">3</span>: ứng dụng kiểm tra đăng nhập bằng một yêu cầu nhỏ rồi mới lưu cookie vào kho bảo mật. Bật công tắc cạnh <b>Cấu hình</b> để dùng cookie cho lần quét đó; tắt công tắc thì quét như bình thường. Cookie đi cùng tuyến proxy/direct đang chọn và không bao giờ ghi vào nhật ký hay file kết quả.</p>
+        <img src="/static/guide/05b-cookie-tiktok.png" alt="Hộp thoại Cookie TikTok" loading="lazy" width="1280" height="800">
     </li>
     <li class="guide-step">
         <h3>Bắt đầu quét và theo dõi</h3>
@@ -59,14 +66,16 @@
     </li>
     <li class="guide-step">
         <h3>Đẩy kết quả lên Google Sheet</h3>
-        <p>Cần đăng nhập Google, admin làm một lần: trong bảng <b>Nguồn dữ liệu</b>, bấm <b>Nạp OAuth</b> <span class="guide-num">1</span> để tải file OAuth client (loại Desktop app), rồi bấm nút trạng thái Google bên cạnh <span class="guide-num">2</span>&nbsp;(ghi <b>Chưa đăng nhập</b>) để đăng nhập. Nút <b>Nạp OAuth</b> ẩn đi sau khi đã nạp. Sau đó chọn <b>Sheet</b> và bấm <b>Tạo sheet</b> <span class="guide-num">3</span>: kết quả được ghi vào một tab mới trong Google Sheet ở ô link. Ghi lên Google Sheet luôn cần đăng nhập, kể cả sheet chia sẻ công khai.</p>
-        <img src="/static/guide/11-google.png" alt="Nạp OAuth, Đăng nhập Google, Tạo sheet" loading="lazy" width="1280" height="800">
-        <p>Nút đăng nhập mở hộp thoại <b>Đăng nhập Google</b>: bấm <b>Mở trang đăng nhập Google</b> <span class="guide-num">1</span> và cho phép quyền. Trình duyệt chuyển tới địa chỉ <code>http://localhost:…</code> và báo không tải được trang, đó là bình thường. Sao chép toàn bộ địa chỉ đó, dán vào ô <span class="guide-num">2</span> rồi bấm <b>Xác nhận</b> <span class="guide-num">3</span>. Bản desktop tự mở trình duyệt và không cần dán.</p>
+        <p>Ghi lên Google Sheet luôn cần một tài khoản Google, kể cả sheet chia sẻ công khai. Cách <b>khuyên dùng</b> là <b>tài khoản dịch vụ</b> (tài khoản robot của Google Cloud), admin làm một lần: tạo theo <code>docs/google-service-account.md</code>, rồi trong bảng <b>Nguồn dữ liệu</b> bấm <b>Nạp tài khoản dịch vụ</b> <span class="guide-num">1</span> và chọn file JSON. Cách thay thế là đăng nhập Google cá nhân bằng <b>Nạp OAuth</b> <span class="guide-num">2</span> và nút trạng thái Google <span class="guide-num">3</span> (xem cuối bước này).</p>
+        <img src="/static/guide/11-google.png" alt="Nạp tài khoản dịch vụ, Nạp OAuth, Đăng nhập Google" loading="lazy" width="1280" height="800">
+        <p>Sau khi nạp, ô xanh hiện email tài khoản dịch vụ <span class="guide-num">1</span>. Bấm <b>Copy</b> <span class="guide-num">2</span>, mở Google Sheet → <b>Chia sẻ</b>, dán email đó với quyền <b>Người chỉnh sửa</b>. Làm vậy cho mỗi sheet cần nạp hoặc tạo sheet kết quả; quên chia sẻ thì ứng dụng báo lỗi kèm email cần chia sẻ. Sau đó chọn <b>Sheet</b> và bấm <b>Tạo sheet</b> <span class="guide-num">3</span>: kết quả được ghi vào một tab mới trong Google Sheet ở ô link. <b>Gỡ tài khoản dịch vụ</b> để quay lại dùng đăng nhập Google.</p>
+        <img src="/static/guide/11b-tai-khoan-dich-vu.png" alt="Email tài khoản dịch vụ, nút Copy và Tạo sheet" loading="lazy" width="1280" height="800">
+        <p><b>Cách thay thế, đăng nhập Google:</b> bấm <b>Nạp OAuth</b> để tải file OAuth client (loại Desktop app); nút này ẩn đi sau khi đã nạp. Bấm nút trạng thái Google (ghi <b>Chưa đăng nhập</b>) để mở hộp thoại <b>Đăng nhập Google</b>: bấm <b>Mở trang đăng nhập Google</b> <span class="guide-num">1</span> và cho phép quyền. Trình duyệt chuyển tới địa chỉ <code>http://localhost:…</code> và báo không tải được trang, đó là bình thường. Sao chép toàn bộ địa chỉ đó, dán vào ô <span class="guide-num">2</span> rồi bấm <b>Xác nhận</b> <span class="guide-num">3</span>. Bản desktop tự mở trình duyệt và không cần dán.</p>
         <img src="/static/guide/12-google-dan-link.png" alt="Hộp thoại dán địa chỉ localhost" loading="lazy" width="1280" height="800">
     </li>
     <li class="guide-step">
         <h3>Threads</h3>
-        <p>Bấm <b>Threads</b> trên thanh nền tảng <span class="guide-num">1</span>. Threads có nguồn riêng (file, sheet, link), nên làm lại các bước 2–8 cho Threads; mặc định chế độ là <b>Hybrid</b>, cột LƯỢT LƯU được thay bằng REPOST. Tùy chọn: <b>Cookie Threads</b> <span class="guide-num">2</span> dùng phiên đăng nhập Threads khi quét.</p>
+        <p>Bấm <b>Threads</b> trên thanh nền tảng <span class="guide-num">1</span>. Threads có nguồn riêng (file, sheet, link), nên làm lại các bước 2–5 và 7–9 cho Threads; mặc định chế độ là <b>Hybrid</b>, cột LƯỢT LƯU được thay bằng REPOST. Tùy chọn: <b>Cookie Threads</b> <span class="guide-num">2</span> dùng phiên đăng nhập Threads khi quét.</p>
         <img src="/static/guide/13-threads.png" alt="Nền tảng Threads" loading="lazy" width="1280" height="800">
         <p>Để nhập cookie: cài tiện ích Cookie-Editor, mở threads.com, chọn <b>Export → JSON</b>. Trong <b>Cookie Threads</b> → <b>Cấu hình</b>, chọn <b>Chọn file JSON</b> hoặc <b>Dán JSON</b> <span class="guide-num">1</span> rồi bấm <b>Import &amp; kiểm tra</b> <span class="guide-num">2</span>. Bật công tắc cạnh <b>Cấu hình</b> để dùng cookie khi quét.</p>
         <img src="/static/guide/14-cookie-threads.png" alt="Hộp thoại Cookie Threads" loading="lazy" width="1280" height="800">
@@ -83,5 +92,6 @@
         <li>Mỗi lúc chỉ chạy được một phiên quét cho cả nhóm. Nếu người khác đang quét, hãy chờ phiên đó xong.</li>
         <li>Ô trống nghĩa là chưa biết số liệu, không phải 0. Các dòng tổng chỉ cộng những số đã biết.</li>
         <li>Không đóng tab trong lúc đang xuất báo cáo hoặc tải file.</li>
+        <li>Cookie TikTok: chỉ dùng tài khoản TikTok phụ. Quét bằng cookie tài khoản có thể khiến TikTok giới hạn hoặc yêu cầu xác minh tài khoản đó.</li>
     </ul>
 </section>

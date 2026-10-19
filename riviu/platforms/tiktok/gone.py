@@ -32,6 +32,14 @@ def confirm_tiktok_post_gone(url, resolved_url="", timeout=OEMBED_TIMEOUT_SECOND
     fetches of live posts, while oEmbed answered 200 for every live post (photo
     posts included) and 400 for every deleted or nonexistent id.
     Returns True (gone), False (live) or None (no answer).
+
+    Known issue (live check 2026-10-19): oEmbed now answers 200 with an empty
+    author_name/title for live posts, deleted posts and a made-up id alike, so this
+    signal is currently uninformative and never returns True. That is the safe side:
+    an unconfirmed "not found" keeps the old numbers (should_clear_stale_metrics is
+    unchanged). TODO: find a gone signal that still separates deleted posts from live
+    ones (with fixtures from a live sample) before relying on clearing again; do not
+    treat an empty 200 as "gone".
     """
     target = tiktok_oembed_target(url, resolved_url)
     if not target:
