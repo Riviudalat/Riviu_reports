@@ -107,7 +107,14 @@ def test_unauthenticated_requests_redirect_or_get_401(server):
     assert health.status_code == 200 and health.text == "ok"
     login_page = server.get("/login")
     assert login_page.status_code == 200 and 'name="password"' in login_page.text
-    assert server.get("/static/app.js").status_code == 200
+    assert "Nhập mật khẩu chung" not in login_page.text  # the subtitle was removed
+    # Only what the login page loads is public; the app script and guide screenshots are not.
+    assert server.get("/static/styles.css").status_code == 200
+    assert server.get("/logo.png").status_code == 200
+    assert server.get("/static/app.js").status_code == 401
+    assert server.get("/static/guide/01-dang-nhap.png").status_code == 401
+    login(server)
+    assert server.get("/static/guide/01-dang-nhap.png").status_code == 200
 
 
 def test_wrong_password_is_rejected_without_a_session(server):
@@ -128,6 +135,7 @@ def test_correct_password_sets_secure_cookie_and_grants_access(server):
     page = server.get("/")
     assert page.status_code == 200
     assert "Đăng xuất" in page.text and 'action="/logout"' in page.text
+    assert 'id="guideButton"' in page.text  # the usage guide is in every mode
     assert server.get("/list-files").status_code == 200
     # Only a digest of the token is persisted.
     token = server.cookies.get(security.AUTH_COOKIE)
