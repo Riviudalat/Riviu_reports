@@ -83,9 +83,9 @@ async def list_files(file_id: str | None = None, platform: str = "tiktok"):
     }
     oauth = await asyncio.to_thread(context.google_io, oauth_status, context.EXCEL_DIR)
     state.update({
-        "googlePushReady": bool(target_spreadsheet_id) and oauth.get("valid"),
+        "googlePushReady": bool(target_spreadsheet_id) and oauth.get("ready", oauth.get("valid")),
         "googleOAuthConfigured": oauth.get("configured"),
-        "googleOAuthAuthorized": oauth.get("valid"),
+        "googleOAuthAuthorized": oauth.get("ready", oauth.get("valid")),
     })
     return state
 

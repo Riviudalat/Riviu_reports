@@ -13,14 +13,19 @@ from riviu import scan_state, server_mode
 from riviu import server_context as context
 from riviu import source_files
 from riviu.google_sheets_sync import (
+    SERVICE_ACCOUNT_MAX_BYTES,
+    ServiceAccountAccessError,
+    ServiceAccountError,
     authorize_google,
+    delete_service_account,
     download_google_sheet_authenticated,
     finish_paste_back_login,
+    google_credentials,
     oauth_status,
     push_rows_to_new_sheet,
     save_oauth_client,
+    save_service_account,
     start_paste_back_login,
-    try_load_credentials,
 )
 from riviu.reports import build_google_push_rows
 from riviu.source_files import (
@@ -53,23 +58,30 @@ PENDING_GOOGLE_LOGIN = None
 
 
 def sync_download_google_sheet(base_dir, source_url, spreadsheet_id, destination_path):
-    creds = try_load_credentials(base_dir)
-    if creds and creds.valid:
+    auth_error = None
+    try:
+        creds = google_credentials(base_dir)
+    except ServiceAccountError as error:
+        creds, auth_error = None, error
+    if creds is not None:
         try:
             download_google_sheet_authenticated(base_dir, spreadsheet_id, destination_path)
             return
-        except Exception:
-            pass
+        except Exception as error:
+            auth_error = error
     try:
         download_google_sheet(source_url, destination_path)
     except Exception as public_error:
-        if creds and creds.valid:
+        # A sheet the service account cannot open: say which email to share it with.
+        if isinstance(auth_error, (ServiceAccountAccessError, ServiceAccountError)):
+            raise auth_error from public_error
+        if creds is not None:
             raise public_error
         message = str(public_error)
         if isinstance(public_error, urllib.error.HTTPError) and public_error.code in (401, 403):
-            raise ValueError("Sheet riêng tư — cần đăng nhập Google hợp lệ.") from public_error
+            raise ValueError("Sheet riêng tư — cần tài khoản dịch vụ được chia sẻ sheet hoặc đăng nhập Google hợp lệ.") from public_error
         if "401" in message or "403" in message or "private" in message.lower():
-            raise ValueError("Sheet riêng tư — cần đăng nhập Google hợp lệ.") from public_error
+            raise ValueError("Sheet riêng tư — cần tài khoản dịch vụ được chia sẻ sheet hoặc đăng nhập Google hợp lệ.") from public_error
         raise
 
 
@@ -164,6 +176,37 @@ async def upload_google_oauth_client(file: UploadFile = File(...)):
         return {"success": True}
     except Exception as error:
         return JSONResponse(content={"error": f"Không lưu được OAuth client: {str(error)}"}, status_code=500)
+
+
+@router.post("/google-service-account")
+async def upload_google_service_account(file: UploadFile = File(...)):
+    """Admin upload of a Google Cloud service-account key (JSON). The key is never logged
+    or echoed; only its client_email comes back."""
+    try:
+        if not (file.filename or "").lower().endswith(".json"):
+            return JSONResponse(content={"error": "Chỉ nhận file JSON khoá tài khoản dịch vụ."}, status_code=400)
+        raw = await file.read(SERVICE_ACCOUNT_MAX_BYTES + 1)
+        if len(raw) > SERVICE_ACCOUNT_MAX_BYTES:
+            return JSONResponse(content={"error": "File khoá tài khoản dịch vụ quá lớn."}, status_code=400)
+        try:
+            payload = json.loads(raw.decode("utf-8-sig"))
+        except (UnicodeError, ValueError):
+            return JSONResponse(content={"error": "File không phải JSON hợp lệ."}, status_code=400)
+        email = await asyncio.to_thread(context.google_io, save_service_account, context.EXCEL_DIR, payload)
+        return {"success": True, "email": email}
+    except ServiceAccountError as error:
+        return JSONResponse(content={"error": str(error)}, status_code=400)
+    except Exception:
+        return JSONResponse(content={"error": "Không lưu được tài khoản dịch vụ."}, status_code=500)
+
+
+@router.delete("/google-service-account")
+async def delete_google_service_account():
+    try:
+        await asyncio.to_thread(context.google_io, delete_service_account, context.EXCEL_DIR)
+    except Exception:
+        return JSONResponse(content={"error": "Không gỡ được tài khoản dịch vụ."}, status_code=500)
+    return {"success": True}
 
 
 @router.post("/google-oauth-login")
