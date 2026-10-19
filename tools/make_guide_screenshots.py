@@ -35,6 +35,19 @@ LINK_COUNT = 14
 FAILING_LINK = 3      # shows up under "Lỗi quét"
 NO_STATS_LINK = 6     # shows up under "Không số liệu"
 FAKE_FETCH_SECONDS = 1.0
+# FAKE credentials only: made-up values that are not keys or sessions of any account.
+FAKE_SERVICE_ACCOUNT = {
+    "type": "service_account", "project_id": "demo-project", "private_key_id": "demo",
+    "private_key": "-----BEGIN PRIVATE KEY-----\nFAKE-KEY-FOR-SCREENSHOTS\n-----END PRIVATE KEY-----\n",
+    "client_email": "riviu-reports@demo-project.iam.gserviceaccount.com", "client_id": "000000000000000000000",
+    "token_uri": "https://oauth2.googleapis.com/token",
+}
+FAKE_TIKTOK_COOKIES = [
+    {"domain": ".tiktok.com", "name": "sessionid", "value": "fake-session-for-screenshots", "path": "/",
+     "secure": True, "httpOnly": True, "hostOnly": False, "sameSite": "no_restriction"},
+    {"domain": ".tiktok.com", "name": "tt_csrf_token", "value": "fake-csrf", "path": "/",
+     "secure": True, "httpOnly": False, "hostOnly": False, "sameSite": "lax"},
+]
 
 
 def block_python_network():
@@ -81,6 +94,14 @@ def write_workbooks(data_dir):
         sheet.append([f"{number:02d}/10/2026", f"https://www.threads.com/@demo/post/DEMO{number:04d}", f"demo_{number:02d}",
                       None, None, None, None, None, PARTNERS[number % len(PARTNERS)]])
     threads.save(data_dir / THREADS_FILE)
+
+
+def store_fake_tiktok_cookies(data_dir, key):
+    """Saved straight into the encrypted vault: importing would verify against TikTok."""
+    from riviu.platforms.threads_session import EncryptedFileStore
+    from riviu.platforms.tiktok_session import TIKTOK_STORE, normalize_tiktok_cookies
+
+    EncryptedFileStore(data_dir, key, spec=TIKTOK_STORE).save(normalize_tiktok_cookies(FAKE_TIKTOK_COOKIES))
 
 
 def install_fake_tiktok_fetch():
@@ -219,7 +240,15 @@ def run(base_url, data_dir):
         # 5. Mode, workers and proxy.
         page.select_option("#scrapeModeSelect", "request")
         page.select_option("#workerCountSelect", "1")
-        shooter.shot("05-che-do-quet", "#scrapeModeSelect", "#workerCountSelect", "#proxyCard")
+        shooter.shot("05-che-do-quet", "#scrapeModeSelect", "#workerCountSelect", "#proxyCard", "#tiktokCookieCard")
+
+        # 5b. Cookie TikTok (fake saved cookies; the switch stays off for the scan below).
+        page.click("#tiktokCookieBtn")
+        page.wait_for_selector("#tiktokCookieModal.active")
+        settle(800)
+        shooter.shot("05b-cookie-tiktok", "#tiktokCookieWarning", "#tiktokCookieModal .threads-cookie-tabs", "#tiktokCookieImport")
+        page.evaluate("closeTikTokCookieModal()")
+        settle()
 
         # 6-7. A scan through the real runner and WebSocket, with the fake fetch.
         page.click("#startBtn")
@@ -260,12 +289,19 @@ def run(base_url, data_dir):
         page.keyboard.press("Escape")
         settle()
 
-        # 11. Google: OAuth upload, login status, push button (no OAuth client yet).
+        # 11. Google: service-account upload (recommended), OAuth upload and login status.
         page.click("#sourceDrawerButton")
         settle()
-        shooter.shot("11-google", "#googleOauthBtn", "#googleLoginBtn", "#pushGoogleBtn")
-        # A synthetic Desktop OAuth client enables the login button; the consent URL is built locally.
+        shooter.shot("11-google", "#googleServiceAccountBtn", "#googleOauthBtn", "#googleLoginBtn")
         from riviu import google_sheets_sync
+
+        # A FAKE service-account key (encrypted at rest, as in server mode); nothing calls Google.
+        google_sheets_sync.save_service_account(str(data_dir), FAKE_SERVICE_ACCOUNT)
+        page.evaluate("refreshGoogleOauthStatus()")
+        page.wait_for_selector("#googleServiceAccountBox:not([hidden])")
+        settle(500)
+        shooter.shot("11b-tai-khoan-dich-vu", "#googleServiceAccountEmail", "#googleServiceAccountCopy", "#pushGoogleBtn")
+        # A synthetic Desktop OAuth client enables the login button; the consent URL is built locally.
 
         google_sheets_sync.save_oauth_client(str(data_dir), {"installed": {
             "client_id": "demo.apps.googleusercontent.com", "client_secret": "demo",
@@ -311,7 +347,8 @@ def main():
     data_dir = workdir / "data-root"
     (data_dir / "data").mkdir(parents=True)
     key_file = workdir / "secret.key"
-    key_file.write_text(base64.b64encode(os.urandom(32)).decode())
+    secret_key = os.urandom(32)
+    key_file.write_text(base64.b64encode(secret_key).decode())
     if os.name == "posix":
         key_file.chmod(0o600)
     with socket.socket() as probe:
@@ -330,6 +367,7 @@ def main():
     })
     block_python_network()
     write_workbooks(data_dir / "data")
+    store_fake_tiktok_cookies(data_dir, secret_key)
     install_fake_tiktok_fetch()
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     server, thread = start_server(port)

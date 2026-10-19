@@ -19,7 +19,7 @@ from riviu.workbook_utils import (
     should_highlight_video_link,
     summary_sheet_title_for_data_sheet,
 )
-from riviu.platforms.tiktok import channels, history, workbook_io
+from riviu.platforms.tiktok import channels, cookies, history, workbook_io
 from riviu.platforms.tiktok.constants import DEFAULT_RETRIES, DEFAULT_SAVE_EVERY, DEFAULT_WORKERS
 from riviu.platforms.tiktok.history import _compute_session_totals, _compute_workbook_totals
 from riviu.platforms.tiktok.lifecycle import _SharedBrowser, finish_pending_task, playwright_session
@@ -458,6 +458,7 @@ async def _shutdown_scan(scan, workers, finalize_task, browser, executor, *, sav
         await browser.close()
         executor.shutdown(wait=False, cancel_futures=True)
         set_session_proxies([])
+        cookies.deactivate()
         if browser.launched:
             # Allow the Playwright Node transport to drain.
             await asyncio.sleep(0.3)
@@ -579,7 +580,8 @@ async def _finish_scan(scan, *, create_result_sheet, file_label, base_dir):
     await manager.broadcast_log(message, level="OK")
 
 
-async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None, create_result_sheet=False, base_dir=None, file_label="", sheet_name=None, use_request=True, browser_fallback=False, use_proxy=False, proxy_text=""):
+async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None, create_result_sheet=False, base_dir=None, file_label="", sheet_name=None, use_request=True, browser_fallback=False, use_proxy=False, proxy_text="", session_cookies=None):
+    """session_cookies: the saved "Cookie TikTok" session for this run only (None: anonymous, as before)."""
     if not os.path.exists(file_path):
         if websocket_manager:
             await websocket_manager.broadcast_log(f"Lỗi: Không tìm thấy file {file_path}")
@@ -673,6 +675,12 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
             finalize_task = None
             try:
                 set_session_proxies(proxy_configs if use_proxy else [])
+                # Always set (possibly to nothing), so a run never inherits another run's cookies.
+                cookies.activate(session_cookies or ())
+                if websocket_manager and session_cookies:
+                    await websocket_manager.broadcast_log(
+                        "Đang dùng cookie TikTok đã lưu cho phiên quét này (khuyên dùng tài khoản phụ)."
+                    )
                 if websocket_manager:
                     if use_request and browser_fallback:
                         startup_message = f"Đang khởi tạo {request_worker_count} luồng Request và {browser_worker_count} luồng trình duyệt fallback..."

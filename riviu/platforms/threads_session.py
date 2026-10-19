@@ -117,7 +117,10 @@ def _decode_payload(payload):
         raise SessionError() from None
 
 
-def _normalize(payload, *, allow_expired: bool = False) -> list[dict]:
+def _normalize(payload, *, allow_expired: bool = False, domain_allowed=None,
+               session_names=("sessionid",)) -> list[dict]:
+    """Strict Cookie-Editor normalization. Threads keeps its exact-domain list; another
+    platform (riviu/platforms/tiktok_session.py) passes its own domain rule and session names."""
     entries = _decode_payload(payload)
     cookies = []
     scopes = {}
@@ -126,7 +129,7 @@ def _normalize(payload, *, allow_expired: bool = False) -> list[dict]:
             raise SessionError()
         domain = entry["domain"].lower()
         # Exports commonly contain cookies for many sites. Never retarget them.
-        if domain not in _ALLOWED_DOMAINS:
+        if not (domain in _ALLOWED_DOMAINS if domain_allowed is None else domain_allowed(domain)):
             continue
         name, value = entry.get("name"), entry.get("value")
         if not isinstance(name, str) or len(name) > 256 or not _COOKIE_NAME.fullmatch(name):
@@ -177,7 +180,7 @@ def _normalize(payload, *, allow_expired: bool = False) -> list[dict]:
             continue
         scopes[scope] = cookie
         cookies.append(cookie)
-    session_cookies = [cookie for cookie in cookies if cookie["name"] == "sessionid" and cookie["value"]]
+    session_cookies = [cookie for cookie in cookies if cookie["name"] in session_names and cookie["value"]]
     if not session_cookies:
         raise SessionError("missing_session")
     if not allow_expired and not any("expires" not in cookie or cookie["expires"] > time.time() for cookie in session_cookies):
@@ -195,8 +198,8 @@ def normalize_cookies(payload: bytes | str | dict | list) -> list[dict]:
         raise SessionError() from None
 
 
-def _expired(cookies) -> bool:
-    return not any(cookie["name"] == "sessionid" and cookie["value"] and
+def _expired(cookies, session_names=("sessionid",)) -> bool:
+    return not any(cookie["name"] in session_names and cookie["value"] and
                    ("expires" not in cookie or cookie["expires"] > time.time()) for cookie in cookies)
 
 
@@ -261,15 +264,35 @@ def _dpapi(data: bytes, entropy: bytes, *, decrypt: bool) -> bytes:
             kernel32.LocalFree(ctypes.cast(output.pbData, ctypes.c_void_p))
 
 
+class StoreSpec:
+    """What one cookie vault is called and how its cookies are validated.
+
+    `name` keys the keyring service and the DPAPI/AES-GCM binding, `filename` the file
+    under data/, `normalize` validates before save and `load_normalize` after load
+    (expired cookies allowed, so status can still say "expired").
+    """
+
+    def __init__(self, name, filename, magic, normalize, load_normalize):
+        self.name, self.filename, self.magic = name, filename, magic
+        self.normalize, self.load_normalize = normalize, load_normalize
+
+
+THREADS_STORE = StoreSpec(
+    "Riviu.ThreadsSession", "threads_session", b"RVTS1",
+    lambda cookies: normalize_cookies(cookies), lambda raw: _normalize(raw, allow_expired=True),
+)
+
+
 class SecureStore:
     """DPAPI on Windows; explicitly selected native Keychain/SecretService elsewhere."""
 
-    def __init__(self, base_dir):
+    def __init__(self, base_dir, spec: StoreSpec = THREADS_STORE):
+        self.spec = spec
         self.base_dir = Path(base_dir).resolve()
         root = os.path.normcase(str(self.base_dir)).encode("utf-8")
-        self.entropy = hashlib.sha256(b"Riviu.ThreadsSession.v1\0" + root).digest()
+        self.entropy = hashlib.sha256(spec.name.encode("ascii") + b".v1\0" + root).digest()
         self.account = self.entropy.hex()
-        self.path = self.base_dir / "data" / "threads_session.enc"
+        self.path = self.base_dir / "data" / f"{spec.filename}.enc"
         self._backend = None
 
     def _native_backend(self):
@@ -294,23 +317,23 @@ class SecureStore:
                     raise SessionError("storage_unavailable")
                 raw = _dpapi(self.path.read_bytes(), self.entropy, decrypt=True)
             else:
-                raw = self._native_backend().get_password("Riviu.ThreadsSession", self.account)
+                raw = self._native_backend().get_password(self.spec.name, self.account)
                 if raw is None:
                     return None
-            return _normalize(raw, allow_expired=True)
+            return self.spec.load_normalize(raw)
         except Exception:
             raise SessionError("storage_unavailable") from None
 
     def save(self, cookies) -> None:
         temporary = None
         try:
-            raw = json.dumps(normalize_cookies(cookies), ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            raw = json.dumps(self.spec.normalize(cookies), ensure_ascii=False, allow_nan=False, separators=(",", ":"))
             if sys.platform != "win32":
-                self._native_backend().set_password("Riviu.ThreadsSession", self.account, raw)
+                self._native_backend().set_password(self.spec.name, self.account, raw)
                 return
             encrypted = _dpapi(raw.encode("utf-8"), self.entropy, decrypt=False)
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd, temporary = tempfile.mkstemp(prefix=".threads-session-", suffix=".tmp", dir=self.path.parent)
+            fd, temporary = tempfile.mkstemp(prefix=f".{self.spec.filename.replace('_', '-')}-", suffix=".tmp", dir=self.path.parent)
             with os.fdopen(fd, "wb") as stream:
                 stream.write(encrypted)
                 stream.flush()
@@ -332,8 +355,8 @@ class SecureStore:
                 self.path.unlink(missing_ok=True)
             else:
                 backend = self._native_backend()
-                if backend.get_password("Riviu.ThreadsSession", self.account) is not None:
-                    backend.delete_password("Riviu.ThreadsSession", self.account)
+                if backend.get_password(self.spec.name, self.account) is not None:
+                    backend.delete_password(self.spec.name, self.account)
         except Exception:
             raise SessionError("storage_unavailable") from None
 
@@ -345,15 +368,15 @@ class EncryptedFileStore:
     another root. Same load/save/delete contract and fail-closed errors as SecureStore.
     """
 
-    MAGIC = b"RVTS1"
-
-    def __init__(self, base_dir, key: bytes):
+    def __init__(self, base_dir, key: bytes, spec: StoreSpec = THREADS_STORE):
         if not isinstance(key, (bytes, bytearray)) or len(key) != 32:
             raise SessionError("storage_unavailable")
+        self.spec = spec
+        self.MAGIC = spec.magic
         self.base_dir = Path(base_dir).resolve()
         root = os.path.normcase(str(self.base_dir)).encode("utf-8")
-        self.associated = hashlib.sha256(b"Riviu.ThreadsSession.server.v1\0" + root).digest()
-        self.path = self.base_dir / "data" / "threads_session.aesgcm"
+        self.associated = hashlib.sha256(spec.name.encode("ascii") + b".server.v1\0" + root).digest()
+        self.path = self.base_dir / "data" / f"{spec.filename}.aesgcm"
         self._key = bytes(key)
 
     def _cipher(self):
@@ -372,18 +395,18 @@ class EncryptedFileStore:
                 raise SessionError("storage_unavailable")
             nonce, sealed = blob[len(self.MAGIC):len(self.MAGIC) + 12], blob[len(self.MAGIC) + 12:]
             raw = self._cipher().decrypt(nonce, sealed, self.associated)
-            return _normalize(raw.decode("utf-8"), allow_expired=True)
+            return self.spec.load_normalize(raw.decode("utf-8"))
         except Exception:
             raise SessionError("storage_unavailable") from None
 
     def save(self, cookies) -> None:
         temporary = None
         try:
-            raw = json.dumps(normalize_cookies(cookies), ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+            raw = json.dumps(self.spec.normalize(cookies), ensure_ascii=False, allow_nan=False, separators=(",", ":"))
             nonce = os.urandom(12)
             blob = self.MAGIC + nonce + self._cipher().encrypt(nonce, raw.encode("utf-8"), self.associated)
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            fd, temporary = tempfile.mkstemp(prefix=".threads-session-", suffix=".tmp", dir=self.path.parent)
+            fd, temporary = tempfile.mkstemp(prefix=f".{self.spec.filename.replace('_', '-')}-", suffix=".tmp", dir=self.path.parent)
             with os.fdopen(fd, "wb") as stream:
                 stream.write(blob)
                 stream.flush()

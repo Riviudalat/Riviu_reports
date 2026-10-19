@@ -30,6 +30,11 @@ từ `RIVIU_FORWARDED_ALLOW_IPS` (mặc định `127.0.0.1`; trong Docker là ga
 - **Cookie Threads**: không có DPAPI/keyring trên server headless, nên lưu ở `data/threads_session.aesgcm`,
   mã hoá AES-256-GCM bằng khoá `RIVIU_SECRET_KEY_FILE` (thư mục dữ liệu gắn vào dữ liệu liên kết). Không bao giờ ghi bản rõ,
   không ghi cookie vào log.
+- **Cookie TikTok** (tuỳ chọn, mặc định tắt): lưu ở `data/tiktok_session.aesgcm`, cùng khoá và cùng quy tắc
+  như cookie Threads (bản desktop dùng DPAPI/keyring). Chỉ gửi kèm khi bật công tắc **Cookie TikTok** cho phiên quét.
+- **Tài khoản dịch vụ Google** (khuyên dùng trên server): `data/google_service_account.json` được mã hoá
+  AES-256-GCM bằng khoá `RIVIU_SECRET_KEY_FILE`; khi có, nó được dùng thay cho đăng nhập Google.
+  Cách tạo: `docs/google-service-account.md`.
 - **Đăng nhập Google**: server không mở được trình duyệt. `/google-oauth-login` trả URL đồng ý của Google
   (redirect `http://localhost:<cổng ngẫu nhiên>/`, PKCE S256). Người dùng duyệt trên máy mình, dán lại địa chỉ
   localhost (không tải được) vào hộp thoại; `/google-oauth-complete` kiểm tra `state`, đổi mã bằng code verifier

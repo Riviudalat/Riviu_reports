@@ -108,6 +108,22 @@
                             </div>
                         </div>
                     </div>
+                    <div class="toolbar-group tiktok-session-controls" id="tiktokSessionControls">
+                        <div class="toolbar-field">
+                            <div class="toolbar-label"><svg class="cookie-icon" aria-hidden="true"><use href="#cookieShield"/></svg> Cookie TikTok</div>
+                            <div class="threads-cookie-card" id="tiktokCookieCard">
+                                <label class="proxy-toggle" for="tiktokSessionUse" title="Dùng cookie TikTok đã lưu khi quét (nên dùng tài khoản phụ)">
+                                    <input type="checkbox" id="tiktokSessionUse" class="proxy-toggle-input" aria-label="Dùng cookie TikTok">
+                                    <span class="proxy-switch" aria-hidden="true"><span class="proxy-switch-knob"></span></span>
+                                    <span class="threads-cookie-dot" aria-hidden="true"></span>
+                                </label>
+                                <button class="proxy-setup-btn" id="tiktokCookieBtn" type="button" onclick="openTikTokCookieModal()" aria-label="Cấu hình cookie TikTok">
+                                    <svg class="cookie-icon" aria-hidden="true"><use href="#cookieSettings"/></svg><span>Cấu hình</span>
+                                </button>
+                            </div>
+                            <span id="tiktokCookieStatus" class="threads-cookie-status sr-only" role="status">Chưa tải trạng thái</span>
+                        </div>
+                    </div>
                     <div class="toolbar-group threads-session-controls" id="threadsSessionControls" hidden>
                         <div class="toolbar-field">
                             <div class="toolbar-label"><svg class="cookie-icon" aria-hidden="true"><use href="#cookieShield"/></svg> Cookie Threads</div>
@@ -191,6 +207,8 @@
                     <div class="controls-shell-title">Nguồn dữ liệu</div>
                 </div>
                 <div class="controls-shell-actions">
+                    <button class="btn btn-soft btn-compact" id="googleServiceAccountBtn" onclick="document.getElementById('googleServiceAccountFileInput').click()" title="Khuyên dùng: tài khoản robot của Google Cloud, không cần đăng nhập Google cá nhân">Nạp tài khoản dịch vụ</button>
+                    <input type="file" id="googleServiceAccountFileInput" hidden accept=".json,application/json" onchange="uploadGoogleServiceAccount(this)">
                     <button class="btn btn-outline btn-compact" id="googleOauthBtn" onclick="document.getElementById('googleOauthFileInput').click()">Nạp OAuth</button>
                     <button class="btn btn-soft btn-compact google-login-btn" id="googleLoginBtn" onclick="connectGoogleOAuth()">Đăng nhập Google</button>
                     <input type="file" id="googleOauthFileInput" hidden accept=".json" onchange="uploadGoogleOauthClient(this)">
@@ -198,6 +216,20 @@
                         <span class="material-icons-outlined">close</span>
                     </button>
                 </div>
+            </div>
+
+            <div class="google-sa-box" id="googleServiceAccountBox" hidden>
+                <div class="google-sa-row">
+                    <span class="material-icons-outlined google-sa-icon" aria-hidden="true">verified_user</span>
+                    <div class="google-sa-text">
+                        <div class="google-sa-title">Tài khoản dịch vụ Google</div>
+                        <code class="google-sa-email" id="googleServiceAccountEmail"></code>
+                    </div>
+                    <button class="btn btn-outline btn-compact" id="googleServiceAccountCopy" type="button" onclick="copyGoogleServiceAccountEmail()" title="Copy email tài khoản dịch vụ"><span class="material-icons-outlined">content_copy</span> Copy</button>
+                    <button class="btn btn-compact google-sa-remove" id="googleServiceAccountRemove" type="button" onclick="removeGoogleServiceAccount()">Gỡ tài khoản dịch vụ</button>
+                </div>
+                <p class="google-sa-help" id="googleServiceAccountHelp">Chia sẻ Google Sheet cho email này với quyền <b>Người chỉnh sửa</b>.</p>
+                <p class="google-sa-error" id="googleServiceAccountError" role="status" hidden></p>
             </div>
 
             <div class="controls-grid">
@@ -621,6 +653,56 @@
             <div class="modal-footer">
                 <button class="btn btn-outline threads-cookie-close" onclick="closeThreadsCookieModal()">Đóng</button>
                 <button class="btn btn-primary" id="threadsCookieImport" onclick="importThreadsCookie()"><svg class="cookie-icon" aria-hidden="true"><use href="#cookieUpload"/></svg> Import &amp; kiểm tra</button>
+            </div>
+        </div>
+    </div>
+    <div class="modal-backdrop" id="tiktokCookieModal" aria-hidden="true">
+        <div class="report-modal tiktok-cookie-modal" role="dialog" aria-modal="true" aria-labelledby="tiktokCookieTitle" tabindex="-1">
+            <div class="modal-header">
+                <div class="threads-cookie-heading"><span class="tiktok-cookie-heading-icon"><img class="platform-brand-icon" src="/static/platform-icons/tiktok.svg" alt="" aria-hidden="true"></span><div>
+                    <div class="modal-title" id="tiktokCookieTitle">Cookie TikTok</div>
+                    <div class="modal-subtitle">Cho bài chỉ xem được khi đăng nhập. Dùng tuyến proxy/direct đang chọn khi quét.</div>
+                </div></div>
+                <button class="icon-btn tiktok-cookie-close" onclick="closeTikTokCookieModal()" aria-label="Đóng"><svg class="cookie-icon" aria-hidden="true"><use href="#cookieClose"/></svg></button>
+            </div>
+            <div class="modal-body">
+                <p class="tiktok-cookie-warning" id="tiktokCookieWarning" role="note"><b>Dùng tài khoản TikTok phụ.</b> Quét bằng cookie tài khoản có thể khiến TikTok giới hạn hoặc yêu cầu xác minh tài khoản đó.</p>
+                <section class="threads-cookie-saved" aria-labelledby="tiktokCookieSavedTitle">
+                    <div class="threads-cookie-section-head"><h3 id="tiktokCookieSavedTitle">Phiên đã lưu</h3><span class="threads-cookie-badge" id="tiktokCookieSavedBadge">Chưa import</span></div>
+                    <p id="tiktokCookieSavedMeta" class="threads-cookie-help">Chưa có cookie để sử dụng.</p>
+                    <p id="tiktokCookieSavedMessage" class="threads-cookie-help" hidden></p>
+                    <div class="threads-cookie-session-actions">
+                        <button class="btn btn-soft" id="tiktokCookieVerify" onclick="verifyTikTokCookie()"><svg class="cookie-icon" aria-hidden="true"><use href="#cookieCheck"/></svg> Kiểm tra lại</button>
+                        <button class="btn threads-cookie-delete" id="tiktokCookieDelete" onclick="deleteTikTokCookie()"><svg class="cookie-icon" aria-hidden="true"><use href="#cookieDelete"/></svg> Xóa phiên</button>
+                    </div>
+                    <div class="threads-cookie-confirm" id="tiktokCookieDeleteConfirm" hidden>
+                        <span>Xóa cookie đã lưu khỏi máy này?</span>
+                        <button class="btn btn-outline" id="tiktokCookieDeleteCancel" onclick="cancelTikTokCookieDelete()">Giữ lại</button>
+                        <button class="btn threads-cookie-delete" id="tiktokCookieDeleteAccept" onclick="confirmTikTokCookieDelete()">Xóa phiên</button>
+                    </div>
+                </section>
+                <section class="threads-cookie-import-section" aria-labelledby="tiktokCookieImportTitle">
+                    <h3 id="tiktokCookieImportTitle">Import phiên mới</h3>
+                    <p class="threads-cookie-help">Cookie-Editor ở tiktok.com → <strong>Export → JSON</strong>. Cần cookie <code>sessionid</code>, <code>sessionid_ss</code> hoặc <code>sid_tt</code>.</p>
+                    <div class="threads-cookie-tabs" role="tablist" aria-label="Nguồn cookie">
+                        <button id="tiktokCookieTabFile" class="threads-cookie-tab" role="tab" aria-selected="true" aria-controls="tiktokCookiePanelFile" onclick="setTikTokCookieSource('file')">Chọn file JSON</button>
+                        <button id="tiktokCookieTabPaste" class="threads-cookie-tab" role="tab" aria-selected="false" aria-controls="tiktokCookiePanelPaste" tabindex="-1" onclick="setTikTokCookieSource('paste')">Dán JSON</button>
+                    </div>
+                    <div id="tiktokCookiePanelFile" role="tabpanel" aria-labelledby="tiktokCookieTabFile">
+                        <label class="threads-cookie-file" for="tiktokCookieFile"><svg class="cookie-icon" aria-hidden="true"><use href="#cookieUpload"/></svg><strong>Chọn file cookie .json</strong><span>JSON export từ Cookie-Editor · tối đa 256 KiB</span></label>
+                        <input type="file" id="tiktokCookieFile" class="threads-cookie-file-input sr-only" accept=".json,application/json" aria-label="Chọn file cookie TikTok JSON">
+                        <p id="tiktokCookieFileMeta" class="threads-cookie-help" role="status"></p>
+                    </div>
+                    <div id="tiktokCookiePanelPaste" role="tabpanel" aria-labelledby="tiktokCookieTabPaste" hidden>
+                        <label class="threads-cookie-input-label" for="tiktokCookieText">Dán nguyên mảng JSON đã export</label>
+                        <textarea id="tiktokCookieText" class="proxy-textarea" rows="5" autocomplete="off" spellcheck="false" placeholder='[{"domain":".tiktok.com", "name":"sessionid", ...}]'></textarea>
+                    </div>
+                </section>
+                <div id="tiktokCookieModalStatus" class="threads-cookie-feedback" role="status" aria-live="polite"></div>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-outline tiktok-cookie-close" onclick="closeTikTokCookieModal()">Đóng</button>
+                <button class="btn btn-primary" id="tiktokCookieImport" onclick="importTikTokCookie()"><svg class="cookie-icon" aria-hidden="true"><use href="#cookieUpload"/></svg> Import &amp; kiểm tra</button>
             </div>
         </div>
     </div>

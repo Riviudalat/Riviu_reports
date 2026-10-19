@@ -10,7 +10,8 @@ Environment:
     RIVIU_PUBLIC_ORIGIN        e.g. https://113-161-254-76.sslip.io (required)
     RIVIU_PASSWORD_HASH        output of `python -m riviu.server_mode hash-password`
     RIVIU_PASSWORD_HASH_FILE   ... or a file holding it (required: one of the two)
-    RIVIU_SECRET_KEY_FILE      32-byte base64 key for the Threads cookie store (required),
+    RIVIU_SECRET_KEY_FILE      32-byte base64 key that encrypts the Threads and TikTok cookie
+                               stores and the Google service-account key at rest (required),
                                owner-only (0600) and outside the data dir
     RIVIU_FORWARDED_ALLOW_IPS  proxies whose X-Forwarded-* headers are trusted (default 127.0.0.1)
     RIVIU_SESSION_DAYS         login lifetime in days (default 7)
@@ -124,7 +125,7 @@ def password_fingerprint(encoded: str) -> str:
     return hashlib.sha256(str(encoded).strip().encode("utf-8")).hexdigest()[:32]
 
 
-# ---- Secret key for the Threads cookie store ---------------------------------------
+# ---- Secret key for the encrypted stores (cookies, service-account key) ---------------------------------------
 
 def read_secret_key(path: str) -> bytes:
     """The 32-byte key in `path` (base64 text, as `openssl rand -base64 32` writes it)."""
@@ -253,6 +254,23 @@ def threads_cookie_store(base_dir):
     from riviu.platforms.threads_session import EncryptedFileStore
 
     return EncryptedFileStore(base_dir, read_secret_key(config.secret_key_file))
+
+
+def tiktok_cookie_store(base_dir):
+    """The TikTok cookie vault: same key file, its own file and binding; None off server mode."""
+    config = ACTIVE
+    if config is None:
+        return None
+    from riviu.platforms.threads_session import EncryptedFileStore
+    from riviu.platforms.tiktok_session import TIKTOK_STORE
+
+    return EncryptedFileStore(base_dir, read_secret_key(config.secret_key_file), spec=TIKTOK_STORE)
+
+
+def secret_key():
+    """The server's 32-byte at-rest key (RIVIU_SECRET_KEY_FILE), or None off server mode."""
+    config = ACTIVE
+    return None if config is None else read_secret_key(config.secret_key_file)
 
 
 # ---- CLI -----------------------------------------------------------------------------

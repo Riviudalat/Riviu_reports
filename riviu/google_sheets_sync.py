@@ -1,14 +1,21 @@
+import base64
+import hashlib
 import hmac
 import json
 import os
 import secrets
 import time
 import urllib.request
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 from google.auth.transport.requests import Request
+from google.oauth2 import service_account
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import Flow, InstalledAppFlow, WSGITimeoutError
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
+
+from riviu import server_mode
 
 from riviu.workbook_utils import (
     format_google_sheet_datetime,
@@ -29,8 +36,24 @@ PASTE_BACK_TTL_SECONDS = 600
 class GoogleLoginRequired(RuntimeError):
     """Raised instead of opening a browser login from a background push or sync."""
 
-    def __init__(self, message="Cần đăng nhập Google lại trong phần Cấu hình Google."):
+    def __init__(self, message="Cần nạp tài khoản dịch vụ Google hoặc đăng nhập Google lại trong phần Nguồn dữ liệu."):
         super().__init__(message)
+
+
+class ServiceAccountError(ValueError):
+    """A service-account key that cannot be used; the message never contains the key."""
+
+
+class ServiceAccountAccessError(RuntimeError):
+    """Google answered 403/404 under the service account: the sheet is not shared with it."""
+
+    def __init__(self, email, status):
+        self.email = email
+        self.status = status
+        super().__init__(
+            f"Tài khoản dịch vụ {email} chưa có quyền với Google Sheet này (Google trả lỗi {status}). "
+            f"Chia sẻ Google Sheet cho email {email} với quyền Người chỉnh sửa rồi thử lại."
+        )
 
 
 def fetch_account_email(access_token):
@@ -282,6 +305,151 @@ def token_path(base_dir):
     return os.path.join(base_dir, "data", TOKEN_FILENAME)
 
 
+# ---- Service account ----------------------------------------------------------------
+# A Google Cloud service account (x@project.iam.gserviceaccount.com) reads and writes every
+# sheet shared with its email as Editor, so a shared server does not depend on one person's
+# Google login. Once its key is uploaded it is used for sync, download and push in
+# preference to the OAuth token; without it the OAuth behaviour is unchanged.
+# Only the Sheets API is called, so the key gets the spreadsheets scope and nothing else.
+SERVICE_ACCOUNT_FILENAME = "google_service_account.json"
+SERVICE_ACCOUNT_SCOPES = ["https://www.googleapis.com/auth/spreadsheets"]
+SERVICE_ACCOUNT_MAX_BYTES = 64 * 1024
+SEALED_FORMAT = "riviu-aesgcm-v1"
+_SERVICE_ACCOUNT_FIELDS = ("type", "project_id", "private_key_id", "private_key", "client_email", "client_id", "token_uri")
+_DEFAULT_TOKEN_URI = "https://oauth2.googleapis.com/token"
+
+
+def service_account_path(base_dir):
+    return os.path.join(base_dir, "data", SERVICE_ACCOUNT_FILENAME)
+
+
+def validate_service_account_info(payload):
+    """The fields google-auth needs, after checking this really is a service-account key."""
+    if not isinstance(payload, dict) or payload.get("type") != "service_account":
+        raise ServiceAccountError('File không phải khoá tài khoản dịch vụ Google (cần "type": "service_account").')
+    email = payload.get("client_email")
+    if (not isinstance(email, str) or len(email) > 320 or email.count("@") != 1
+            or any(char.isspace() for char in email) or not email.split("@")[0] or not email.split("@")[1]):
+        raise ServiceAccountError("Khoá tài khoản dịch vụ thiếu client_email hợp lệ.")
+    key = payload.get("private_key")
+    if not isinstance(key, str) or "PRIVATE KEY" not in key or len(key) > 16384:
+        raise ServiceAccountError("Khoá tài khoản dịch vụ thiếu private_key.")
+    token_uri = payload.get("token_uri", _DEFAULT_TOKEN_URI)
+    parsed = urlsplit(token_uri) if isinstance(token_uri, str) else None
+    # google-auth posts the signed assertion to token_uri: only ever to Google.
+    if parsed is None or parsed.scheme != "https" or not (parsed.hostname or "").endswith(".googleapis.com"):
+        raise ServiceAccountError("token_uri của khoá tài khoản dịch vụ phải là địa chỉ googleapis.com.")
+    info = {field: payload[field] for field in _SERVICE_ACCOUNT_FIELDS if isinstance(payload.get(field), str)}
+    info["token_uri"] = token_uri
+    return info
+
+
+def _sealing_binding(base_dir):
+    # Bound to the data root, so a copied file does not decrypt for another root.
+    root = os.path.normcase(str(Path(base_dir).resolve())).encode("utf-8")
+    return hashlib.sha256(b"Riviu.GoogleServiceAccount.server.v1\0" + root).digest()
+
+
+def _seal(key, base_dir, info):
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    nonce = os.urandom(12)
+    sealed = AESGCM(key).encrypt(nonce, json.dumps(info).encode("utf-8"), _sealing_binding(base_dir))
+    return {"format": SEALED_FORMAT, "nonce": base64.b64encode(nonce).decode("ascii"),
+            "data": base64.b64encode(sealed).decode("ascii")}
+
+
+def _unseal(key, base_dir, envelope):
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+    try:
+        nonce = base64.b64decode(envelope["nonce"], validate=True)
+        sealed = base64.b64decode(envelope["data"], validate=True)
+        return json.loads(AESGCM(key).decrypt(nonce, sealed, _sealing_binding(base_dir)).decode("utf-8"))
+    except Exception:
+        raise ServiceAccountError("Không giải mã được khoá tài khoản dịch vụ đã lưu. Nạp lại file JSON.") from None
+
+
+def save_service_account(base_dir, payload):
+    """Store a validated key in the data dir and return its email. In server mode the file
+    is AES-GCM encrypted at rest with RIVIU_SECRET_KEY_FILE, like the cookie stores."""
+    info = validate_service_account_info(payload)
+    path = service_account_path(base_dir)
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    key = server_mode.secret_key()
+    write_json_atomic(path, _seal(key, base_dir, info) if key is not None else info)
+    return info["client_email"]
+
+
+def load_service_account_info(base_dir):
+    """The stored key, or None when no service account is configured."""
+    path = service_account_path(base_dir)
+    if not os.path.exists(path):
+        return None
+    try:
+        with open(path, "r", encoding="utf-8") as file_obj:
+            stored = json.load(file_obj)
+    except (OSError, ValueError):
+        raise ServiceAccountError("File tài khoản dịch vụ đã lưu bị hỏng. Nạp lại file JSON.") from None
+    if isinstance(stored, dict) and stored.get("format") == SEALED_FORMAT:
+        key = server_mode.secret_key()
+        if key is None:
+            raise ServiceAccountError("Khoá tài khoản dịch vụ được mã hoá cho chế độ server; nạp lại file JSON trên máy này.")
+        stored = _unseal(key, base_dir, stored)
+    return validate_service_account_info(stored)
+
+
+def delete_service_account(base_dir):
+    path = service_account_path(base_dir)
+    if os.path.exists(path):
+        os.remove(path)
+
+
+def service_account_status(base_dir):
+    try:
+        info = load_service_account_info(base_dir)
+    except ServiceAccountError as error:
+        return {"configured": True, "email": "", "error": str(error)}
+    return {"configured": info is not None, "email": info["client_email"] if info else "", "error": ""}
+
+
+def service_account_credentials(base_dir):
+    info = load_service_account_info(base_dir)
+    if info is None:
+        return None
+    try:
+        return service_account.Credentials.from_service_account_info(info, scopes=SERVICE_ACCOUNT_SCOPES)
+    except Exception:
+        raise ServiceAccountError("Không đọc được private_key của tài khoản dịch vụ. Tải lại file JSON từ Google Cloud.") from None
+
+
+def google_credentials(base_dir):
+    """The credential Sheets calls use: the service account when one is configured, else a
+    valid OAuth token, else None. Never opens a browser."""
+    creds = service_account_credentials(base_dir)
+    if creds is not None:
+        return creds
+    creds = try_load_credentials(base_dir)
+    return creds if creds and creds.valid else None
+
+
+def service_account_access_error(base_dir, error):
+    """For a Google 403/404 while the service account is the active credential: an error
+    that names the email to share the sheet with. None otherwise."""
+    status = getattr(getattr(error, "resp", None), "status", None)
+    try:
+        status = int(status)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(error, HttpError) or status not in (403, 404):
+        return None
+    try:
+        info = load_service_account_info(base_dir)
+    except ServiceAccountError:
+        return None
+    return ServiceAccountAccessError(info["client_email"], status) if info else None
+
+
 def write_token(token_file, creds):
     write_json_atomic(token_file, json.loads(creds.to_json()))
 
@@ -324,11 +492,18 @@ def oauth_status(base_dir):
         except (OSError, json.JSONDecodeError):
             account_email = ""
     creds = try_load_credentials(base_dir)
+    valid = bool(creds and creds.valid)
+    service = service_account_status(base_dir)
+    usable_service = service["configured"] and not service["error"]
     return {
         "configured": os.path.exists(client_secret_path(base_dir)),
         "authorized": os.path.exists(token_file),
-        "valid": bool(creds and creds.valid),
+        "valid": valid,
         "accountEmail": account_email,
+        "serviceAccount": service,
+        # The credential Sheets calls use now; the service account wins over OAuth.
+        "activeCredential": "service_account" if usable_service else ("oauth" if valid else "none"),
+        "ready": usable_service or valid,
     }
 
 
@@ -340,8 +515,8 @@ def save_oauth_client(base_dir, payload):
 
 
 def load_credentials(base_dir):
-    creds = try_load_credentials(base_dir)
-    if creds and creds.valid:
+    creds = google_credentials(base_dir)
+    if creds is not None:
         return creds
     raise GoogleLoginRequired()
 
@@ -424,12 +599,22 @@ def sheets_service(base_dir):
 
 
 def download_google_sheet_authenticated(base_dir, spreadsheet_id, destination_path):
-    from openpyxl import Workbook
-
-    creds = try_load_credentials(base_dir)
-    if not creds or not creds.valid:
+    creds = google_credentials(base_dir)
+    if creds is None:
         raise RuntimeError("Chưa đăng nhập Google hợp lệ.")
     service = build("sheets", "v4", credentials=creds, cache_discovery=False)
+    try:
+        return _download_google_sheet(service, spreadsheet_id, destination_path)
+    except HttpError as error:
+        access_error = service_account_access_error(base_dir, error)
+        if access_error is not None:
+            raise access_error from None
+        raise
+
+
+def _download_google_sheet(service, spreadsheet_id, destination_path):
+    from openpyxl import Workbook
+
     spreadsheet = service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
     workbook = Workbook()
     workbook.remove(workbook.active)
@@ -478,6 +663,16 @@ def ensure_unique_sheet_title(existing_titles, desired_title):
 
 def push_rows_to_new_sheet(base_dir, spreadsheet_id, rows, source_sheet_name="", *, platform="tiktok"):
     service = sheets_service(base_dir)
+    try:
+        return _push_rows(service, spreadsheet_id, rows, source_sheet_name, platform)
+    except HttpError as error:
+        access_error = service_account_access_error(base_dir, error)
+        if access_error is not None:
+            raise access_error from None
+        raise
+
+
+def _push_rows(service, spreadsheet_id, rows, source_sheet_name, platform):
     spreadsheet = service.spreadsheets().get(
         spreadsheetId=spreadsheet_id,
         fields="sheets.properties.title",

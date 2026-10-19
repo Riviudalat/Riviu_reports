@@ -4,7 +4,7 @@ import urllib.request
 
 from riviu.proxy_utils import urlopen_request
 from riviu.workbook_utils import is_scrapable_tiktok_url, normalize_tiktok_url
-from riviu.platforms.tiktok import throttle
+from riviu.platforms.tiktok import cookies, throttle
 from riviu.platforms.tiktok.constants import DEFAULT_REQUEST_TIMEOUT, USER_AGENTS
 
 
@@ -25,6 +25,10 @@ def fetch_tiktok_html(url, timeout=DEFAULT_REQUEST_TIMEOUT):
             "Sec-Fetch-Site": "none",
         },
     )
+    # Only while "Cookie TikTok" is on for this scan; redirects stay on TikTok hosts.
+    cookie_header = cookies.cookie_header_for(url)
+    if cookie_header:
+        request.add_header("Cookie", cookie_header)
     with throttle._request_semaphore:
         with urlopen_request(request, timeout=timeout, redirect_validator=is_scrapable_tiktok_url) as response:
             final_url = normalize_tiktok_url(response.geturl())

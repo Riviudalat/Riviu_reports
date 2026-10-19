@@ -1,7 +1,7 @@
 """Process-wide server context shared by the routers and the scan service.
 
 Holds the resource/data directories, the legacy "current" selection used by callers that
-omit `file_id`, the Google I/O locks and the Threads cookie-session singleton. Read and
+omit `file_id`, the Google I/O locks and the Threads and TikTok cookie-session singletons. Read and
 write these names through the module object (`server_context.EXCEL_DIR`) so that a test
 monkeypatching `riviu.app.EXCEL_DIR` (forwarded here) changes what every router sees.
 """
@@ -12,6 +12,7 @@ import threading
 
 from riviu import paths, server_mode
 from riviu.platforms.threads_session import ThreadsSession
+from riviu.platforms.tiktok_session import TikTokSession
 
 
 # Web resources (templates, static, logo) and user data; see riviu/paths.py.
@@ -36,6 +37,19 @@ def threads_session_manager():
         THREADS_SESSION = ThreadsSession(root, store=server_mode.threads_cookie_store(root))
         THREADS_SESSION_ROOT = root
     return THREADS_SESSION
+
+
+TIKTOK_SESSION = None
+TIKTOK_SESSION_ROOT = ""
+
+
+def tiktok_session_manager():
+    global TIKTOK_SESSION, TIKTOK_SESSION_ROOT
+    root = os.path.realpath(EXCEL_DIR)
+    if TIKTOK_SESSION is None or TIKTOK_SESSION_ROOT != root:
+        TIKTOK_SESSION = TikTokSession(root, store=server_mode.tiktok_cookie_store(root))
+        TIKTOK_SESSION_ROOT = root
+    return TIKTOK_SESSION
 
 
 GOOGLE_IO_LOCK = threading.RLock()

@@ -16,18 +16,20 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from riviu import scan_state, server_context, server_mode
-from riviu.api import auth, export, google, pages, proxy, scan, security, sources, threads_session
+from riviu.api import auth, export, google, pages, proxy, scan, security, sources, threads_session, tiktok_session
 from riviu.workbook_utils import ensure_data_dir
 
 # Public names kept importable from `riviu.app` (tests, desktop_server, older callers).
 from riviu.api.export import export_report, report_partners  # noqa: F401
 from riviu.api.google import (  # noqa: F401
+    delete_google_service_account,
     google_oauth_login,
     google_oauth_status,
     push_google_sheet,
     sync_download_google_sheet,
     sync_google_sheet,
     upload_google_oauth_client,
+    upload_google_service_account,
 )
 from riviu.api.pages import api_version, favicon, index, logo_png, riviu_logo, static_asset_version, templates  # noqa: F401
 from riviu.api.proxy import get_proxy_list, save_proxy_list, test_proxy_list  # noqa: F401
@@ -61,6 +63,12 @@ from riviu.api.threads_session import (  # noqa: F401
     threads_session_status,
     verify_threads_session,
 )
+from riviu.api.tiktok_session import (  # noqa: F401
+    delete_tiktok_session,
+    import_tiktok_session,
+    tiktok_session_status,
+    verify_tiktok_session,
+)
 from riviu.google_sheets_sync import GoogleLoginRequired  # noqa: F401
 from riviu.scan_service import (  # noqa: F401
     PROXY_VALIDATORS,
@@ -78,7 +86,7 @@ from riviu.scan_service import (  # noqa: F401
     validate_proxy_start,
 )
 from riviu.scan_state import ConnectionManager, scan_running, source_mutation_blocked  # noqa: F401
-from riviu.server_context import complete_blocking, google_io, threads_session_manager  # noqa: F401
+from riviu.server_context import complete_blocking, google_io, threads_session_manager, tiktok_session_manager  # noqa: F401
 from riviu.source_files import (  # noqa: F401
     SourceRequestError,
     content_disposition,
@@ -100,7 +108,8 @@ _STATE_OWNERS = {
     **{name: server_context for name in (
         "APP_RESOURCE_DIR", "EXCEL_DIR", "LOGO_PATH",
         "CURRENT_SELECTED_FILE", "CURRENT_SELECTED_SHEET", "CURRENT_SCAN_SHEET",
-        "THREADS_SESSION", "THREADS_SESSION_ROOT", "GOOGLE_IO_LOCK", "GOOGLE_LOGIN_LOCK",
+        "THREADS_SESSION", "THREADS_SESSION_ROOT", "TIKTOK_SESSION", "TIKTOK_SESSION_ROOT",
+        "GOOGLE_IO_LOCK", "GOOGLE_LOGIN_LOCK",
     )},
     **{name: scan_state for name in (
         "manager", "SCRAPE_TASK", "SCAN_STARTING", "SOURCE_BUSY", "DESKTOP_UPDATE_PENDING",
@@ -153,6 +162,7 @@ for _router in (
     proxy.router,
     export.router,
     threads_session.router,
+    tiktok_session.router,
     scan.router,
 ):
     app.include_router(_router)

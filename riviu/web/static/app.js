@@ -29,6 +29,8 @@ const PLATFORMS = Object.freeze({
         summaryTag: '',
         hidesResultSheetTabs: false,
         cookieSession: false,
+        // Opt-in logged-in TikTok cookie ("Cookie TikTok", /tiktok-session); off by default.
+        accountCookie: true,
         partialWithMetricsIsSuccess: false,
         reconcileCountsFromRows: false,
         noStatsTag: 'Ẩn số liệu',
@@ -49,6 +51,7 @@ const PLATFORMS = Object.freeze({
         summaryTag: 'Threads',
         hidesResultSheetTabs: true,
         cookieSession: true,
+        accountCookie: false,
         partialWithMetricsIsSuccess: true,
         reconcileCountsFromRows: true,
         noStatsTag: 'Thiếu số',
@@ -145,6 +148,12 @@ let threadsCookieBusy = false;
 let threadsCookieFocus = null;
 let threadsCookieSource = 'file';
 let threadsCookieRevision = 0;
+let tiktokCookieState = { configured: false, state: 'none', generation: '' };
+let tiktokCookieBusy = false;
+let tiktokCookieFocus = null;
+let tiktokCookieSource = 'file';
+let tiktokCookieRevision = 0;
+let googleServiceAccountEmail = '';
 
 // ---- DOM handles and button markup ------------------------------------------
 const startBtn = document.getElementById('startBtn');
@@ -305,6 +314,8 @@ function applyPlatformUI(platform) {
     document.body.dataset.platform = platform;
     const sessionControls = document.getElementById('threadsSessionControls');
     if (sessionControls) sessionControls.hidden = !config.cookieSession;
+    const tiktokControls = document.getElementById('tiktokSessionControls');
+    if (tiktokControls) tiktokControls.hidden = !config.accountCookie;
     scrapeModeSelect.value = platformScrapeModes[platform];
     document.querySelectorAll('.platform-option').forEach(button => {
         const selected = button.id === config.dom.button;
@@ -1031,7 +1042,8 @@ async function refreshGoogleOauthStatus() {
         const data = await res.json();
         const loginBtn = document.getElementById('googleLoginBtn');
         const oauthBtn = document.getElementById('googleOauthBtn');
-        googleOAuthAuthorized = Boolean(data.valid ?? data.authorized);
+        // A configured service account wins over the OAuth login (see /google-oauth-status).
+        googleOAuthAuthorized = Boolean(data.ready ?? data.valid ?? data.authorized);
         if (loginBtn) {
             const accountEmail = String(data.accountEmail || '').trim();
             loginBtn.disabled = !data.configured;
@@ -1046,9 +1058,73 @@ async function refreshGoogleOauthStatus() {
         if (oauthBtn) {
             oauthBtn.style.display = data.configured ? 'none' : '';
         }
+        renderGoogleServiceAccount(data.serviceAccount || {}, data.activeCredential || '');
         setGooglePushState();
     } catch (error) {
         console.error(error);
+    }
+}
+
+function renderGoogleServiceAccount(account, activeCredential) {
+    const box = document.getElementById('googleServiceAccountBox');
+    const button = document.getElementById('googleServiceAccountBtn');
+    const configured = Boolean(account.configured);
+    googleServiceAccountEmail = String(account.email || '').trim();
+    if (box) box.hidden = !configured;
+    if (button) button.style.display = configured ? 'none' : '';
+    const email = document.getElementById('googleServiceAccountEmail');
+    if (email) email.textContent = googleServiceAccountEmail;
+    const copy = document.getElementById('googleServiceAccountCopy');
+    if (copy) copy.disabled = !googleServiceAccountEmail;
+    const error = document.getElementById('googleServiceAccountError');
+    if (error) {
+        error.hidden = !account.error;
+        error.textContent = account.error || '';
+    }
+    const loginBtn = document.getElementById('googleLoginBtn');
+    if (loginBtn && activeCredential === 'service_account') loginBtn.title = `Đang dùng tài khoản dịch vụ ${googleServiceAccountEmail}; đăng nhập Google là cách thay thế.`;
+}
+
+async function uploadGoogleServiceAccount(input) {
+    const file = input.files[0];
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('file', file);
+    try {
+        const res = await fetch('/google-service-account', { method: 'POST', body: formData });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'Không nạp được tài khoản dịch vụ');
+        notify(`Đã nạp tài khoản dịch vụ ${data.email}. Chia sẻ Google Sheet cho email này với quyền Người chỉnh sửa.`, 'success');
+        await refreshGoogleOauthStatus();
+        await updateFileList();
+    } catch (error) {
+        notify(`Lỗi tài khoản dịch vụ: ${error.message}`, 'error');
+    }
+    input.value = '';
+}
+
+async function copyGoogleServiceAccountEmail() {
+    if (!googleServiceAccountEmail) return;
+    try {
+        await navigator.clipboard.writeText(googleServiceAccountEmail);
+        notify('Đã copy email tài khoản dịch vụ.', 'success');
+    } catch {
+        notify(`Không copy được, hãy chọn và copy: ${googleServiceAccountEmail}`, 'warn');
+    }
+}
+
+async function removeGoogleServiceAccount() {
+    if (!window.confirm('Gỡ tài khoản dịch vụ Google khỏi ứng dụng? Tạo sheet sẽ dùng lại đăng nhập Google (nếu có).')) return;
+    try {
+        const res = await fetch('/google-service-account', { method: 'DELETE' });
+        const data = await res.json();
+        if (!res.ok || !data.success) throw new Error(data.error || 'Không gỡ được tài khoản dịch vụ');
+        notify('Đã gỡ tài khoản dịch vụ.', 'success');
+    } catch (error) {
+        notify(`Lỗi tài khoản dịch vụ: ${error.message}`, 'error');
+    } finally {
+        await refreshGoogleOauthStatus();
+        await updateFileList();
     }
 }
 
@@ -1883,7 +1959,7 @@ function scanIsBusy() {
 // A scan, an update install, a Threads cookie action or a source operation is in flight;
 // controls that start another of these stay disabled meanwhile.
 function uiIsBusy() {
-    return scanIsBusy() || desktopUpdateInstalling || threadsCookieBusy || sourceBusy;
+    return scanIsBusy() || desktopUpdateInstalling || threadsCookieBusy || tiktokCookieBusy || sourceBusy;
 }
 
 // Why an idle Start button cannot start a scan right now ('' when it can); shown as its tooltip.
@@ -1902,6 +1978,11 @@ function syncScanControls() {
         if (input) input.disabled = busy || (['threadsSessionUse', 'threadsCookieVerify', 'threadsCookieDelete'].includes(id) && !threadsCookieState.configured);
     }
     document.querySelectorAll('.threads-cookie-close').forEach(button => { button.disabled = threadsCookieBusy; });
+    for (const id of ['tiktokCookieBtn', 'tiktokCookieImport', 'tiktokCookieVerify', 'tiktokCookieDelete', 'tiktokCookieDeleteAccept', 'tiktokCookieDeleteCancel', 'tiktokCookieTabFile', 'tiktokCookieTabPaste', 'tiktokSessionUse', 'tiktokCookieFile', 'tiktokCookieText']) {
+        const input = document.getElementById(id);
+        if (input) input.disabled = busy || (['tiktokSessionUse', 'tiktokCookieVerify', 'tiktokCookieDelete'].includes(id) && !tiktokCookieState.configured);
+    }
+    document.querySelectorAll('.tiktok-cookie-close').forEach(button => { button.disabled = tiktokCookieBusy; });
     const startBlocked = busy ? '' : startBlockedReason();
     startBtn.disabled = busy || Boolean(startBlocked);
     startBtn.title = startBlocked;
@@ -2246,6 +2327,145 @@ function confirmThreadsCookieDelete() {
     return threadsCookieAction('delete');
 }
 
+// ---- TikTok cookie session (opt-in "Cookie TikTok") -------------------------
+function renderTikTokCookieStatus(status) {
+    const previousGeneration = tiktokCookieState.generation;
+    tiktokCookieState = status || { configured: false, state: 'unknown', generation: '' };
+    const use = document.getElementById('tiktokSessionUse');
+    // A new or removed session never stays switched on by itself.
+    if (use && (previousGeneration !== tiktokCookieState.generation || !tiktokCookieState.configured)) use.checked = false;
+    const labels = { none: 'Chưa import', unchecked: 'Chưa kiểm tra', valid: 'Hợp lệ', expired: 'Hết hạn', invalid: 'Không hợp lệ', unknown: 'Chưa xác định', storage_unavailable: 'Kho bảo mật không khả dụng' };
+    const text = labels[tiktokCookieState.state] || 'Chưa xác định';
+    const badge = document.getElementById('tiktokCookieStatus');
+    if (badge) { badge.textContent = text; badge.dataset.state = tiktokCookieState.state; badge.title = tiktokCookieState.message || text; }
+    const card = document.getElementById('tiktokCookieCard');
+    if (card) card.dataset.state = tiktokCookieState.state;
+    const savedBadge = document.getElementById('tiktokCookieSavedBadge');
+    if (savedBadge) { savedBadge.textContent = text; savedBadge.dataset.state = tiktokCookieState.state; }
+    const meta = document.getElementById('tiktokCookieSavedMeta');
+    if (meta) meta.textContent = tiktokCookieState.configured
+        ? `${tiktokCookieState.count || 0} cookie${tiktokCookieState.checkedAt ? ` • ${formatCookieCheckedAt(tiktokCookieState.checkedAt)}` : ' • Chưa kiểm tra'}`
+        : 'Chưa có cookie để sử dụng.';
+    const savedMessage = document.getElementById('tiktokCookieSavedMessage');
+    if (savedMessage) {
+        savedMessage.hidden = ['valid', 'none', 'unchecked'].includes(tiktokCookieState.state);
+        savedMessage.textContent = savedMessage.hidden ? '' : tiktokCookieState.message || '';
+    }
+    if (!tiktokCookieState.configured) cancelTikTokCookieDelete();
+    syncScanControls();
+}
+
+async function refreshTikTokCookieStatus() {
+    const revision = ++tiktokCookieRevision;
+    try {
+        const response = await fetch('/tiktok-session/status', { cache: 'no-store' });
+        const status = await response.json();
+        if (revision === tiktokCookieRevision && !tiktokCookieBusy) renderTikTokCookieStatus(status);
+    } catch {
+        if (revision === tiktokCookieRevision && !tiktokCookieBusy) renderTikTokCookieStatus({ configured: false, state: 'unknown', message: 'Không tải được trạng thái cookie.' });
+    }
+}
+
+function clearTikTokCookieInputs() {
+    for (const id of ['tiktokCookieText', 'tiktokCookieFile']) {
+        const input = document.getElementById(id);
+        if (input) input.value = '';
+    }
+    const meta = document.getElementById('tiktokCookieFileMeta');
+    if (meta) meta.textContent = '';
+}
+
+function setTikTokCookieSource(source) {
+    if (tiktokCookieBusy || !['file', 'paste'].includes(source)) return;
+    if (tiktokCookieSource !== source) clearTikTokCookieInputs();
+    tiktokCookieSource = source;
+    for (const [value, suffix] of [['file', 'File'], ['paste', 'Paste']]) {
+        const tab = document.getElementById(`tiktokCookieTab${suffix}`);
+        const panel = document.getElementById(`tiktokCookiePanel${suffix}`);
+        if (tab) { tab.setAttribute('aria-selected', String(value === source)); tab.tabIndex = value === source ? 0 : -1; }
+        if (panel) panel.hidden = value !== source;
+    }
+}
+
+function cancelTikTokCookieDelete() {
+    if (tiktokCookieBusy) return;
+    const confirm = document.getElementById('tiktokCookieDeleteConfirm');
+    if (confirm) confirm.hidden = true;
+}
+
+function openTikTokCookieModal() {
+    if (uiIsBusy()) return;
+    tiktokCookieFocus = document.activeElement;
+    setModalOpen(document.getElementById('tiktokCookieModal'), true);
+    cancelTikTokCookieDelete();
+    document.getElementById('tiktokCookieModalStatus').textContent = '';
+    setTikTokCookieSource(tiktokCookieSource);
+    document.getElementById(tiktokCookieSource === 'file' ? 'tiktokCookieFile' : 'tiktokCookieText').focus();
+    void refreshTikTokCookieStatus();
+}
+
+function closeTikTokCookieModal() {
+    if (tiktokCookieBusy) return;
+    setModalOpen(document.getElementById('tiktokCookieModal'), false);
+    clearTikTokCookieInputs();
+    cancelTikTokCookieDelete();
+    if (tiktokCookieFocus?.focus) tiktokCookieFocus.focus();
+}
+
+async function tiktokCookieAction(action) {
+    if (uiIsBusy()) return;
+    const source = tiktokCookieSource;
+    const file = document.getElementById('tiktokCookieFile').files?.[0];
+    let body = '';
+    tiktokCookieBusy = true;
+    ++tiktokCookieRevision;
+    syncScanControls();
+    document.querySelector('#tiktokCookieModal [role="dialog"]')?.focus();
+    const detail = document.getElementById('tiktokCookieModalStatus');
+    detail.textContent = action === 'import' ? 'Đang đọc và kiểm tra cookie...' : 'Đang xử lý phiên TikTok...';
+    try {
+        if (action === 'import') {
+            if (source === 'file') {
+                if (!file) throw new Error('Chọn file JSON trước khi import.');
+                if (file.size > COOKIE_IMPORT_MAX_BYTES) throw new Error('File cookie quá lớn, tối đa 256 KiB.');
+                body = await file.text();
+            } else {
+                body = document.getElementById('tiktokCookieText').value;
+            }
+            if (!body.trim() || new TextEncoder().encode(body).length > COOKIE_IMPORT_MAX_BYTES) throw new Error('Nhập JSON cookie hợp lệ, tối đa 256 KiB.');
+        }
+        const response = await fetch(action === 'delete' ? '/tiktok-session' : `/tiktok-session/${action}`, {
+            method: action === 'delete' ? 'DELETE' : 'POST', headers: { 'Content-Type': 'application/json' },
+            body: action === 'import' ? body : undefined, cache: 'no-store'
+        });
+        const data = await response.json();
+        if (!response.ok) throw new Error(data.error || 'Không xử lý được phiên TikTok.');
+        renderTikTokCookieStatus(data.status || data);
+        detail.textContent = action === 'delete' ? 'Đã xóa phiên khỏi kho bảo mật.' : action === 'verify' ? 'Đã kiểm tra lại phiên.' : 'Đã import và lưu phiên an toàn.';
+        if (data.check && data.check.state !== 'valid') detail.textContent = `${data.check.message || 'Cookie chưa xác minh hợp lệ.'}${action === 'import' ? ' Phiên đã lưu trước đó được giữ nguyên.' : ''}`;
+    } catch (error) {
+        detail.textContent = error.message || 'Không xử lý được phiên TikTok.';
+    } finally {
+        body = '';
+        clearTikTokCookieInputs();
+        tiktokCookieBusy = false;
+        cancelTikTokCookieDelete();
+        syncScanControls();
+    }
+}
+
+function importTikTokCookie() { return tiktokCookieAction('import'); }
+function verifyTikTokCookie() { return tiktokCookieAction('verify'); }
+function deleteTikTokCookie() {
+    if (uiIsBusy() || !tiktokCookieState.configured) return;
+    document.getElementById('tiktokCookieDeleteConfirm').hidden = false;
+    document.getElementById('tiktokCookieDeleteCancel').focus();
+}
+function confirmTikTokCookieDelete() {
+    if (document.getElementById('tiktokCookieDeleteConfirm').hidden) return;
+    return tiktokCookieAction('delete');
+}
+
 // ---- Scan start and cancel --------------------------------------------------
 const SCRAPE_MODE_LABELS = Object.freeze({
     browser: 'trình duyệt',
@@ -2269,6 +2489,12 @@ function buildScanRequest(partners, sheetName) {
         openThreadsCookieModal();
         return null;
     }
+    const useTikTokSession = config.accountCookie && Boolean(document.getElementById('tiktokSessionUse')?.checked);
+    if (useTikTokSession && !tiktokCookieState.configured) {
+        notify('Import và kiểm tra cookie TikTok trước khi dùng phiên.', 'warn');
+        openTikTokCookieModal();
+        return null;
+    }
     if (useProxy && !proxyText.trim()) {
         notify('Bật proxy nhưng chưa có danh sách. Bấm Cấu hình để dán proxy.', 'warn');
         openProxyModal();
@@ -2281,7 +2507,7 @@ function buildScanRequest(partners, sheetName) {
     }
     currentScanSheetName = scanSheet;
     const modeLabel = SCRAPE_MODE_LABELS[scrapeMode] || SCRAPE_MODE_LABELS.request;
-    const proxyLabel = useProxy ? ' • proxy bật' : '';
+    const proxyLabel = (useProxy ? ' • proxy bật' : '') + (useTikTokSession ? ' • cookie TikTok' : '');
     return {
         // Never include proxy text or cookies in the log line.
         logLine: `Bắt đầu quét ${config.label} • sheet "${scanSheet}" • file: ${currentFileId || 'chưa rõ'} • ${modeLabel}${proxyLabel} • luồng: ${workers} • đối tác: ${selected.length ? selected.join(', ') : 'tất cả'}.`,
@@ -2294,6 +2520,7 @@ function buildScanRequest(partners, sheetName) {
             use_proxy: useProxy,
             proxy_text: proxyText,
             ...(useThreadsSession ? { use_threads_session: true, threads_session_generation: threadsCookieState.generation } : {}),
+            ...(useTikTokSession ? { use_tiktok_session: true } : {}),
             sheet_name: scanSheet,
             partners: selected,
             partner: selected.length === 1 ? selected[0] : '',
@@ -3202,10 +3429,27 @@ document.getElementById('threadsCookieFile')?.addEventListener('change', event =
     const file = event.target.files?.[0];
     document.getElementById('threadsCookieFileMeta').textContent = file ? `${file.name} · ${(file.size / 1024).toFixed(1)} KiB` : '';
 });
+document.getElementById('tiktokCookieModal')?.addEventListener('click', (event) => {
+    if (event.target.id === 'tiktokCookieModal') closeTikTokCookieModal();
+});
+for (const [source, suffix] of [['file', 'File'], ['paste', 'Paste']]) {
+    document.getElementById(`tiktokCookieTab${suffix}`)?.addEventListener('keydown', event => {
+        if (tiktokCookieBusy || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+        event.preventDefault();
+        const next = event.key === 'Home' ? 'file' : event.key === 'End' ? 'paste' : source === 'file' ? 'paste' : 'file';
+        setTikTokCookieSource(next);
+        document.getElementById(next === 'file' ? 'tiktokCookieTabFile' : 'tiktokCookieTabPaste').focus();
+    });
+}
+document.getElementById('tiktokCookieFile')?.addEventListener('change', event => {
+    const file = event.target.files?.[0];
+    document.getElementById('tiktokCookieFileMeta').textContent = file ? `${file.name} · ${(file.size / 1024).toFixed(1)} KiB` : '';
+});
 
 document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
     if (document.getElementById('threadsCookieModal')?.classList.contains('active')) { closeThreadsCookieModal(); return; }
+    if (document.getElementById('tiktokCookieModal')?.classList.contains('active')) { closeTikTokCookieModal(); return; }
     if (document.getElementById('guideModal')?.classList.contains('active')) { closeGuideModal(); return; }
     if (document.getElementById('reportModal').classList.contains('active')) {
         closeReportModal();
@@ -3273,6 +3517,7 @@ window.onload = async () => {
     await loadPreview();
     await refreshProxyStatus();
     await refreshThreadsCookieStatus();
+    await refreshTikTokCookieStatus();
     connectWS();
     scheduleDesktopUpdates();
 };
