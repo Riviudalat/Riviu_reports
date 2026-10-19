@@ -13,6 +13,7 @@ from riviu.google_sheets_sync import GoogleLoginRequired, push_rows_to_new_sheet
 from riviu.platforms.threads import resolve_threads_proxies, run_threads_scraper
 from riviu.platforms.threads_session import SessionError, chromium_proxy_unsupported
 from riviu.platforms.tiktok import clamp_worker_count, run_scraper
+from riviu.platforms.tiktok_session import TikTokSessionError
 from riviu.proxy_utils import resolve_proxy_configs
 from riviu.reports import build_google_push_rows
 from riviu.source_files import (
@@ -74,6 +75,8 @@ class RunEvents:
 
 
 async def run_tiktok_scan(target_path, events, options):
+    # Only a scan started with "Cookie TikTok" on passes cookies; the default call is unchanged.
+    session_options = {"session_cookies": options["tiktok_cookies"]} if options.get("tiktok_cookies") else {}
     await run_scraper(
         target_path,
         events,
@@ -88,6 +91,7 @@ async def run_tiktok_scan(target_path, events, options):
         browser_fallback=options["scrape_mode"] == "hybrid",
         use_proxy=options["use_proxy"],
         proxy_text=options["proxy_text"],
+        **session_options,
     )
 
 
@@ -113,7 +117,7 @@ def scan_options(**overrides):
         "use_proxy": False, "proxy_text": "", "partner": None, "partners": [],
         "create_result_sheet": False, "push_to_google": False,
     }
-    unknown = set(overrides) - set(options) - {"threads_cookies", "threads_proxies", "threads_generation"}
+    unknown = set(overrides) - set(options) - {"threads_cookies", "threads_proxies", "threads_generation", "tiktok_cookies"}
     if unknown:
         raise TypeError(f"Unknown scan options: {sorted(unknown)}")
     return {**options, **overrides}
@@ -166,6 +170,8 @@ async def run_scraper_safely(target_path, options, run_context=None):
         if options.get("threads_cookies") is not None and not isinstance(error, (SessionError, ValueError)):
             # Unexpected errors from a logged-in run may echo request details; keep them out of the log.
             message = "Phiên quét Threads đăng nhập gặp lỗi kỹ thuật; cookie vẫn được giữ, hãy thử lại."
+        if options.get("tiktok_cookies") and not isinstance(error, ValueError):
+            message = "Phiên quét TikTok dùng cookie gặp lỗi kỹ thuật; cookie vẫn được giữ, hãy thử lại."
         if isinstance(error, SessionError) and options.get("threads_cookies") is not None:
             # Only a session failure says anything about the cookies; other errors leave them valid.
             try:
@@ -241,4 +247,11 @@ async def prepare_scan_start(payload):
                 raise ValueError(str(error)) from error
             except Exception as error:
                 raise ValueError("Không nạp được phiên Threads đã lưu.") from error
+    if platform == "tiktok" and payload.get("use_tiktok_session") is True:
+        try:
+            options["tiktok_cookies"] = await context.complete_blocking(context.tiktok_session_manager().snapshot)
+        except TikTokSessionError as error:
+            raise ValueError(str(error)) from error
+        except Exception as error:
+            raise ValueError("Không nạp được cookie TikTok đã lưu.") from error
     return target_path, options

@@ -12,7 +12,7 @@ from riviu.workbook_utils import (
     is_scrapable_tiktok_url,
     normalize_tiktok_url,
 )
-from riviu.platforms.tiktok import gone
+from riviu.platforms.tiktok import cookies, gone
 from riviu.platforms.tiktok.constants import (
     BROWSER_GEOLOCATION,
     BROWSER_LOCALE,
@@ -234,7 +234,15 @@ async def make_browser_context(browser, proxy_configs=None):
         proxy_config = random.choice(configs)
         context_kwargs["proxy"] = playwright_proxy_settings(proxy_config)
     context = await browser.new_context(**context_kwargs)
-    await context.route("**/*", block_heavy_resources)
+    try:
+        # Only while "Cookie TikTok" is on for this scan; the context's own proxy carries them.
+        session_cookies = cookies.playwright_cookies()
+        if session_cookies:
+            await context.add_cookies(session_cookies)
+        await context.route("**/*", block_heavy_resources)
+    except BaseException:
+        await asyncio.gather(context.close(), return_exceptions=True)
+        raise
     return context
 
 
