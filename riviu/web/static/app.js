@@ -2910,6 +2910,21 @@ function closeReportModal() {
     document.body.style.overflow = '';
 }
 
+function openGuideModal() {
+    const modal = document.getElementById('guideModal');
+    if (!modal) return;
+    closeCompactDrawers();
+    setModalOpen(modal, true);
+    document.body.style.overflow = 'hidden';
+}
+
+function closeGuideModal() {
+    const modal = document.getElementById('guideModal');
+    if (!modal) return;
+    setModalOpen(modal, false);
+    document.body.style.overflow = '';
+}
+
 async function openHistoryModal() {
     const modal = document.getElementById('historyModal');
     closeCompactDrawers();
@@ -3191,6 +3206,7 @@ document.getElementById('threadsCookieFile')?.addEventListener('change', event =
 document.addEventListener('keydown', (event) => {
     if (event.key !== 'Escape') return;
     if (document.getElementById('threadsCookieModal')?.classList.contains('active')) { closeThreadsCookieModal(); return; }
+    if (document.getElementById('guideModal')?.classList.contains('active')) { closeGuideModal(); return; }
     if (document.getElementById('reportModal').classList.contains('active')) {
         closeReportModal();
     } else if (document.getElementById('historyModal').classList.contains('active')) {
