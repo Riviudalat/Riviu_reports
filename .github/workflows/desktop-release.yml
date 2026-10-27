@@ -1,9 +1,8 @@
-name: Desktop release
+name: Desktop release (manual)
 
+# Riviu Reports ships as the web app (report.taskscatt.click) now. Desktop installers
+# are no longer published on every push to main; run this by hand only if one is needed.
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:

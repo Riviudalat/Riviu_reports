@@ -43,6 +43,9 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             action = payload.get("action")
+            if action in {"start", "cancel"} and not security.is_admin(websocket):
+                await reject_start(security.VIEWER_FORBIDDEN)
+                continue
             if action == "start":
                 if scan_state.source_mutation_blocked():
                     await websocket.send_json({"type": "session", "data": manager.snapshot(), **manager.context})

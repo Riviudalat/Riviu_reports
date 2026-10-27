@@ -23,6 +23,26 @@ từ `RIVIU_FORWARDED_ALLOW_IPS` (mặc định `127.0.0.1`; trong Docker là ga
 - Phiên là token ngẫu nhiên; server chỉ lưu SHA-256 (`data/server_sessions.json`) nên khởi động lại không mất đăng nhập.
   Đăng xuất thu hồi token; đổi mật khẩu làm mọi phiên cũ hết hiệu lực.
 - Sai mật khẩu 5 lần trong 15 phút từ một IP: trả 429 tới khi hết cửa sổ, kể cả khi nhập đúng.
+
+## Tài khoản và vai trò (`riviu/server_users.py`)
+
+- Mỗi người một tài khoản trong `data/server_users.json` (băm scrypt, không lưu mật khẩu). Hai vai trò:
+  - `admin`: toàn quyền (quét, đổi nguồn, đồng bộ/đẩy Google, proxy, cookie, cài đặt).
+  - `viewer` (nhân viên): chỉ xem sheet, danh sách đối tác, lịch sử và tải báo cáo đối tác
+    (`security.VIEWER_ROUTES`). Mọi route khác trả 403; `/ws` vẫn xem được tiến trình nhưng lệnh `start`/`cancel` bị từ chối.
+- Khi **chưa có tài khoản nào**, mật khẩu chung (`RIVIU_PASSWORD_HASH`) vẫn đăng nhập với quyền admin.
+  Tạo tài khoản đầu tiên là mật khẩu chung hết tác dụng và các phiên đăng nhập bằng nó bị huỷ; từ đó phải nhập tên đăng nhập.
+- Đổi mật khẩu hoặc xoá tài khoản thì các phiên của người đó hết hiệu lực; đổi vai trò có hiệu lực ngay. Luôn phải còn ít nhất một admin.
+- `GET /auth-status` trả `{"authenticated": true, "user": {"username": "...", "role": "admin|viewer"}}` để giao diện ẩn/hiện chức năng.
+- Quản lý (trên server: `docker compose -f deploy/server/compose.yaml exec riviu python -m riviu.server_mode ...`):
+
+  ```
+  python -m riviu.server_mode add-user <tên> admin|viewer   # mật khẩu đọc từ stdin hoặc hỏi ẩn
+  python -m riviu.server_mode set-password <tên>
+  python -m riviu.server_mode set-role <tên> admin|viewer
+  python -m riviu.server_mode remove-user <tên>
+  python -m riviu.server_mode list-users
+  ```
 - `/_desktop/*` không tồn tại trên server (404); sidecar desktop từ chối chạy khi bật chế độ server.
 
 ## Khác với desktop

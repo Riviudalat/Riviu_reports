@@ -1,4 +1,7 @@
-"""Opt-in server mode: one shared password in front of the app, hosted behind nginx.
+"""Opt-in server mode: a login in front of the app, hosted behind nginx.
+
+Logins are per-person accounts with a role (`riviu.server_users`); until the first account
+exists, the shared password below logs in as an admin.
 
 Off unless ``RIVIU_SERVER_MODE=1``; desktop and source mode never read the other
 variables. ``load_config`` refuses to start (``ServerModeError``) when a required
@@ -285,16 +288,58 @@ def _read_new_password(stdin=None) -> str:
     return stdin.readline().rstrip("\r\n")
 
 
+USAGE = """Dùng: python -m riviu.server_mode <lệnh>
+  hash-password                     băm mật khẩu chung (đọc từ stdin hoặc hỏi ẩn)
+  list-users                        liệt kê tài khoản
+  add-user <tên> <admin|viewer>     thêm tài khoản (mật khẩu đọc từ stdin hoặc hỏi ẩn)
+  set-password <tên>                đổi mật khẩu (đăng xuất các phiên của người đó)
+  set-role <tên> <admin|viewer>     đổi vai trò
+  remove-user <tên>                 xoá tài khoản
+Tài khoản lưu trong <RIVIU_DATA_DIR>/data/server_users.json."""
+
+
+def _cli_store():
+    from riviu import server_users
+
+    data_dir = os.path.abspath(str(os.environ.get("RIVIU_DATA_DIR", "")).strip() or paths.RESOURCE_ROOT)
+    return server_users.store_for(data_dir)
+
+
 def main(argv=None) -> int:
+    from riviu import server_users
+
     argv = list(sys.argv[1:] if argv is None else argv)
-    if argv != ["hash-password"]:
-        print("Dùng: python -m riviu.server_mode hash-password  (đọc mật khẩu từ stdin hoặc hỏi ẩn)", file=sys.stderr)
+    command, args = (argv[0], argv[1:]) if argv else ("", [])
+    arity = {"hash-password": 0, "list-users": 0, "add-user": 2, "set-password": 1, "set-role": 2, "remove-user": 1}
+    if arity.get(command) != len(args):
+        print(USAGE, file=sys.stderr)
         return 2
     try:
-        password = _read_new_password()
-        if len(password) < 8:
-            raise ValueError("Mật khẩu cần ít nhất 8 ký tự.")
-        print(hash_password(password))
+        if command == "hash-password":
+            password = _read_new_password()
+            if len(password) < 8:
+                raise ValueError("Mật khẩu cần ít nhất 8 ký tự.")
+            print(hash_password(password))
+            return 0
+        store = _cli_store()
+        if command == "list-users":
+            users = store.users()
+            for name in sorted(users):
+                print(f"{name}  {users[name]['role']}")
+            if not users:
+                print("Chưa có tài khoản nào (đang dùng mật khẩu chung).")
+        elif command == "add-user":
+            store.add(args[0], _read_new_password(), args[1])
+            print(f"Đã thêm {server_users.normalize_username(args[0])} ({args[1]}).")
+        elif command == "set-password":
+            store.set_password(args[0], _read_new_password())
+            print("Đã đổi mật khẩu.")
+        elif command == "set-role":
+            store.set_role(args[0], args[1])
+            print("Đã đổi vai trò.")
+        elif command == "remove-user":
+            store.remove(args[0])
+            print("Đã xoá tài khoản.")
     except ValueError as error:
         print(str(error), file=sys.stderr)
         return 1

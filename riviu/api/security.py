@@ -4,10 +4,14 @@ Desktop/source mode: loopback-only Host/Origin checks and the per-process sessio
 
 Server mode (`riviu.server_mode.ACTIVE`): Host/Origin must match RIVIU_PUBLIC_ORIGIN (or
 loopback, for health checks on the box), and every route except the login page, logout,
-public assets and `/healthz` needs a login session from the shared password. Sessions are
-random tokens kept server side (only their SHA-256 is stored), in an HttpOnly, Secure,
-SameSite=Strict cookie with an expiry; logout revokes the token. Failed logins are
-rate-limited per client IP (uvicorn resolves X-Forwarded-For only from trusted proxies).
+public assets and `/healthz` needs a login session. A session belongs to one account from
+`riviu.server_users` (or, while no account exists, to the shared RIVIU_PASSWORD_HASH as an
+admin). Sessions are random tokens kept server side (only their SHA-256 is stored), in an
+HttpOnly, Secure, SameSite=Strict cookie with an expiry; logout revokes the token, and a
+changed or removed account ends its sessions. A `viewer` account may only use the
+read-only routes in `VIEWER_ROUTES` (browse sheets, download partner reports); everything
+else answers 403. Failed logins are rate-limited per client IP (uvicorn resolves
+X-Forwarded-For only from trusted proxies).
 """
 
 import hashlib
@@ -22,7 +26,7 @@ from urllib.parse import urlsplit
 from fastapi import Request
 from fastapi.responses import JSONResponse, RedirectResponse
 
-from riviu import server_mode
+from riviu import server_mode, server_users
 from riviu.workbook_utils import write_json_atomic
 
 
@@ -43,6 +47,24 @@ PUBLIC_ASSET_PATHS = {"/logo.png", "/riviu-logo.png", "/favicon.ico"}
 # Server mode: only what the login page loads is public; app.js, icons and the usage
 # guide screenshots stay behind the login.
 SERVER_PUBLIC_ASSET_PATHS = PUBLIC_ASSET_PATHS | {"/static/styles.css"}
+# What a viewer (staff, read-only) may call besides the page itself and its assets: browse
+# the sheets and download partner reports. Scans (the /ws "start" action is checked in
+# riviu.api.scan), uploads, Google sync/push, proxy, cookie sessions and saving the shared
+# source preferences stay admin-only.
+VIEWER_ROUTES = {
+    ("GET", "/"),
+    ("GET", "/api/version"),
+    ("GET", "/list-files"),
+    ("GET", "/preview-excel"),
+    ("GET", "/summary-dashboard"),
+    ("GET", "/source-preferences"),
+    ("GET", "/report-partners"),
+    ("GET", "/scrape-history"),
+    ("POST", "/export-report"),
+    ("GET", "/ws"),
+}
+VIEWER_ASSET_PREFIXES = ("/static/", "/app/")
+VIEWER_FORBIDDEN = "Tài khoản của bạn chỉ có quyền xem và tải báo cáo đối tác."
 
 
 def _port_of(parts):
@@ -107,7 +129,11 @@ def _digest(token: str) -> str:
 
 
 class LoginSessions:
-    """Session tokens persisted as SHA-256 digests, so restarts keep people logged in."""
+    """Session tokens persisted as SHA-256 digests, so restarts keep people logged in.
+
+    Each record names its account (`user`) and that account's password fingerprint
+    (`credential`); a record without `user` is a shared-password admin session.
+    """
 
     def __init__(self, path: str, lifetime_seconds: int, password_fingerprint: str):
         self.path = path
@@ -136,23 +162,29 @@ class LoginSessions:
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
         write_json_atomic(self.path, {"sessions": self._sessions})
 
-    def create(self) -> str:
+    def create(self, user: str | None = None, credential: str | None = None) -> str:
         token = secrets.token_urlsafe(32)
         with self._lock:
             sessions = self._load()
             now = time.time()
             for key in [key for key, value in sessions.items() if value["expires"] <= now]:
                 del sessions[key]
-            sessions[_digest(token)] = {"expires": now + self.lifetime, "password": self.fingerprint}
+            record = {"expires": now + self.lifetime, "password": self.fingerprint}
+            if user:
+                record.update(user=user, credential=credential)
+            sessions[_digest(token)] = record
             self._save()
         return token
 
-    def valid(self, token: str) -> bool:
+    def record(self, token: str) -> dict | None:
         if not token or len(token) > 256:
-            return False
+            return None
         with self._lock:
             record = self._load().get(_digest(token))
-            return bool(record) and record["expires"] > time.time()
+            return dict(record) if record and record["expires"] > time.time() else None
+
+    def valid(self, token: str) -> bool:
+        return self.record(token) is not None
 
     def revoke(self, token: str) -> None:
         if not token:
@@ -214,8 +246,45 @@ def client_address(request) -> str:
     return request.client.host if request.client else "unknown"
 
 
+def session_identity(token: str) -> dict | None:
+    """{"username", "role"} for a live server session, else None."""
+    record = login_sessions().record(token)
+    if record is None:
+        return None
+    store = server_users.active_store()
+    user = record.get("user")
+    if user:
+        account = store.get(user) if store else None
+        if not account or server_mode.password_fingerprint(account["hash"]) != record.get("credential"):
+            return None
+        return {"username": user, "role": account["role"]}
+    # Shared-password session: only while no account exists.
+    if store is not None and store.has_users():
+        return None
+    return {"username": "admin", "role": server_users.ROLE_ADMIN}
+
+
+def request_identity(request) -> dict | None:
+    return session_identity(request.cookies.get(AUTH_COOKIE, ""))
+
+
 def valid_server_session(request) -> bool:
-    return login_sessions().valid(request.cookies.get(AUTH_COOKIE, ""))
+    return request_identity(request) is not None
+
+
+def is_admin(request) -> bool:
+    """Server mode: the session is an admin's. Desktop/source mode has no accounts: always True."""
+    if server_mode.ACTIVE is None:
+        return True
+    identity = request_identity(request)
+    return bool(identity) and identity["role"] == server_users.ROLE_ADMIN
+
+
+def viewer_may_access(method: str, path: str) -> bool:
+    method = "GET" if method == "HEAD" else method
+    if method == "GET" and path.startswith(VIEWER_ASSET_PREFIXES):
+        return True
+    return (method, path) in VIEWER_ROUTES
 
 
 def valid_local_session(request):
@@ -271,10 +340,14 @@ async def protect_server_api(request: Request, call_next):
     cross_site = request.headers.get("sec-fetch-site") == "cross-site"
     if cross_site and not navigation:
         return JSONResponse({"error": "Nguồn truy cập không hợp lệ"}, status_code=403)
-    if not public and not valid_server_session(request):
-        if _wants_html(request):
-            return _security_headers(RedirectResponse(LOGIN_PATH, status_code=303))
-        return _security_headers(JSONResponse({"error": "Cần đăng nhập"}, status_code=401))
+    if not public:
+        identity = request_identity(request)
+        if identity is None:
+            if _wants_html(request):
+                return _security_headers(RedirectResponse(LOGIN_PATH, status_code=303))
+            return _security_headers(JSONResponse({"error": "Cần đăng nhập"}, status_code=401))
+        if identity["role"] != server_users.ROLE_ADMIN and not viewer_may_access(request.method, path):
+            return _security_headers(JSONResponse({"error": VIEWER_FORBIDDEN}, status_code=403))
     response = await call_next(request)
     if path.startswith("/threads-session") or path in {"/", LOGIN_PATH}:
         response.headers["Cache-Control"] = "no-store"
