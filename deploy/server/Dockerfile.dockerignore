@@ -3,5 +3,8 @@
 !pyproject.toml
 !uv.lock
 !riviu/
+!frontend/
+frontend/node_modules
+riviu/web/app
 **/__pycache__
 **/*.pyc

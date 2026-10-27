@@ -12,6 +12,11 @@ from riviu import server_mode
 
 router = APIRouter()
 templates = Jinja2Templates(directory=os.path.join(context.APP_RESOURCE_DIR, "templates"))
+# The React web app built from frontend/ (`npm run build`); while it is missing, `/` keeps
+# serving the classic page. The classic page stays reachable at /classic during the switch.
+WEB_APP_DIR = os.path.join(context.APP_RESOURCE_DIR, "app")
+WEB_APP_INDEX = os.path.join(WEB_APP_DIR, "index.html")
+CLASSIC_PATH = "/classic"
 
 
 def static_asset_version(base_dir: str) -> str:
@@ -25,6 +30,13 @@ def static_asset_version(base_dir: str) -> str:
 
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request):
+    if os.path.isfile(WEB_APP_INDEX):
+        return FileResponse(WEB_APP_INDEX, media_type="text/html", headers={"Cache-Control": "no-store"})
+    return await classic_index(request)
+
+
+@router.get(CLASSIC_PATH, response_class=HTMLResponse)
+async def classic_index(request: Request):
     return templates.TemplateResponse(
         request=request,
         name="index.html",

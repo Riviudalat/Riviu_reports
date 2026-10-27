@@ -53,6 +53,7 @@ SERVER_PUBLIC_ASSET_PATHS = PUBLIC_ASSET_PATHS | {"/static/styles.css"}
 # source preferences stay admin-only.
 VIEWER_ROUTES = {
     ("GET", "/"),
+    ("GET", "/classic"),
     ("GET", "/api/version"),
     ("GET", "/list-files"),
     ("GET", "/preview-excel"),
@@ -349,7 +350,7 @@ async def protect_server_api(request: Request, call_next):
         if identity["role"] != server_users.ROLE_ADMIN and not viewer_may_access(request.method, path):
             return _security_headers(JSONResponse({"error": VIEWER_FORBIDDEN}, status_code=403))
     response = await call_next(request)
-    if path.startswith("/threads-session") or path in {"/", LOGIN_PATH}:
+    if path.startswith("/threads-session") or path in {"/", "/classic", LOGIN_PATH}:
         response.headers["Cache-Control"] = "no-store"
     return _security_headers(response)
 
@@ -361,7 +362,7 @@ async def protect_local_api(request: Request, call_next):
         return JSONResponse({"error": "Nguồn truy cập không hợp lệ"}, status_code=403)
     bootstrap = request.method == "GET" and request.url.path == "/"
     public_asset = request.method in {"GET", "HEAD"} and (
-        request.url.path.startswith("/static/") or request.url.path in PUBLIC_ASSET_PATHS
+        request.url.path.startswith(("/static/", "/app/")) or request.url.path in PUBLIC_ASSET_PATHS
     )
     desktop_control = request.url.path.startswith("/_desktop/")
     if not (bootstrap or public_asset or desktop_control) and not valid_local_session(request):

@@ -121,3 +121,19 @@ def test_account_cli_manages_users_in_the_data_dir(tmp_path, monkeypatch, capsys
     assert "cli-password-123" not in (tmp_path / "data" / "server_users.json").read_text(encoding="utf-8")
     assert server_mode.main(["remove-user", "nv"]) == 0 and store.get("nv") is None
     assert server_mode.main(["bogus"]) == 2
+
+
+def test_root_serves_the_web_app_build_and_keeps_the_classic_page(server, accounts, tmp_path, monkeypatch):  # noqa: F811
+    from riviu.api import pages
+
+    account_login(server, "nhanvien", VIEWER_PASSWORD)
+    monkeypatch.setattr(pages, "WEB_APP_INDEX", str(tmp_path / "missing" / "index.html"))
+    assert 'id="platformBar"' in server.get("/").text  # no build yet: the classic page
+    index = tmp_path / "index.html"
+    index.write_text('<!doctype html><div id="root"></div>', encoding="utf-8")
+    monkeypatch.setattr(pages, "WEB_APP_INDEX", str(index))
+    page = server.get("/")
+    assert page.text == '<!doctype html><div id="root"></div>' and page.headers["cache-control"] == "no-store"
+    assert 'id="platformBar"' in server.get("/classic").text
+    assert security.viewer_may_access("GET", "/app/assets/index-abc.js")
+    assert not security.viewer_may_access("POST", "/app/assets/index-abc.js")
