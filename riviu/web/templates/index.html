@@ -587,6 +587,8 @@
     </div>
     {% endif %}
 
+    {% if is_admin %}
+    {#- The usage guide describes admin steps; staff on the viewer don't get it. -#}
     <div class="modal-backdrop" id="guideModal" aria-hidden="true">
         <div class="report-modal guide-modal" role="dialog" aria-modal="true" aria-labelledby="guideModalTitle">
             <div class="modal-header">
@@ -606,6 +608,7 @@
             </div>
         </div>
     </div>
+    {% endif %}
 
     {% if server_mode and is_admin %}
     <div class="modal-backdrop" id="googlePasteModal" aria-hidden="true">

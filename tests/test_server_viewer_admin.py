@@ -114,9 +114,9 @@ ADMIN_ONLY_IDS = (
     "startBtn", "cancelBtn", "scanSettingsButton", "workerCountSelect", "proxyUseCheckbox", "proxyModal",
     "threadsCookieModal", "tiktokCookieModal", "threadsSessionUse", "tiktokSessionUse", "uploadArea", "fileInput",
     "googleServiceAccountBtn", "googleOauthBtn", "googleLoginBtn", "googlePasteModal", "refreshPartnerBtn",
-    "logoutButton", "scheduleButton", "scheduleModal",
+    "logoutButton", "scheduleButton", "scheduleModal", "guideButton", "guideModal",
 )
-SHARED_IDS = ("platformBar", "excelFileSelect", "reportModal", "exportReportBtn", "historyModal", "guideButton", "previewTable")
+SHARED_IDS = ("platformBar", "excelFileSelect", "reportModal", "exportReportBtn", "historyModal", "previewTable")
 # The viewer's own report layout (KPIs, partner export, link table) and the admin's scan workspace.
 VIEWER_ONLY_IDS = ("vwExportButton", "vwDataPanel", "vwTableSearch")
 ADMIN_WORKSPACE_IDS = ("sourceDrawerButton", "sourceDrawer", "scanSettingsDrawer")

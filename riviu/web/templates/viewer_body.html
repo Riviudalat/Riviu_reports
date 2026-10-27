@@ -8,8 +8,7 @@
         </div>
         <!-- Platform buttons are rendered from PLATFORMS in static/app.js -->
         <div class="platform-bar vw-platforms" id="platformBar" role="group" aria-label="Nền tảng báo cáo"></div>
-        <nav class="vw-header-links" aria-label="Trợ giúp và quản trị">
-            <button class="vw-link" id="guideButton" type="button" onclick="openGuideModal()" aria-label="Hướng dẫn sử dụng">Hướng dẫn</button>
+        <nav class="vw-header-links" aria-label="Lịch sử và quản trị">
             <button class="vw-link" type="button" onclick="openHistoryModal()">Lịch sử quét</button>
             {% if server_mode %}
             <a class="vw-link vw-admin-link" id="adminLink" href="/admin" title="Quản trị (cần đăng nhập)">Quản trị</a>
