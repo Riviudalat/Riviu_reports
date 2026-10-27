@@ -41,3 +41,7 @@ src-tauri/gen/
 src-tauri/binaries/riviu-server-*
 src-tauri/binaries/riviu-server/
 .keys/
+
+# React web app build output (built by `npm run build` in frontend/, and by the server image)
+riviu/web/app/
+frontend/dist/
