@@ -4,7 +4,7 @@
 <ol class="guide-steps">
     <li class="guide-step">
         <h3>Đăng nhập</h3>
-        <p>Mở địa chỉ server, nhập <b>Mật khẩu</b> chung của nhóm <span class="guide-num">1</span> rồi bấm <b>Đăng nhập</b> <span class="guide-num">2</span>. Bản desktop không có bước này.</p>
+        <p>Trên server, trang chính ai cũng mở được để <b>xem</b> dữ liệu, lịch sử và xuất báo cáo đối tác, không cần mật khẩu. Để quét và quản trị, mở <code>/admin</code> (hoặc bấm <b>Quản trị</b>), nhập <b>Mật khẩu</b> chung của nhóm <span class="guide-num">1</span> rồi bấm <b>Đăng nhập</b> <span class="guide-num">2</span>. Bản desktop không có bước này.</p>
         <img src="/static/guide/01-dang-nhap.png" alt="Trang đăng nhập" loading="lazy" width="1280" height="800">
     </li>
     <li class="guide-step">
@@ -82,7 +82,7 @@
     </li>
     <li class="guide-step">
         <h3>Đăng xuất</h3>
-        <p>Bấm <b>Đăng xuất</b> <span class="guide-num">1</span> ở góc trên. Lần sau mở lại cần nhập mật khẩu.</p>
+        <p>Bấm <b>Đăng xuất</b> <span class="guide-num">1</span> ở góc trên để về trang xem. Lần sau vào <code>/admin</code> cần nhập lại mật khẩu.</p>
         <img src="/static/guide/15-dang-xuat.png" alt="Nút Đăng xuất" loading="lazy" width="1280" height="800">
     </li>
 </ol>
@@ -90,6 +90,7 @@
     <h3>Lưu ý</h3>
     <ul>
         <li>Mỗi lúc chỉ chạy được một phiên quét cho cả nhóm. Nếu người khác đang quét, hãy chờ phiên đó xong.</li>
+        <li><b>Lịch tự động</b> (trang quản trị trên server): chọn các giờ trong ngày cho từng nền tảng. Đến giờ, server tự <b>Nạp sheet</b> từ link Google Sheet đã lưu của nền tảng rồi quét file mới, không tự <b>Tạo sheet</b>. Giờ nào đang có phiên quét khác thì bỏ qua và ghi vào nhật ký của hộp thoại.</li>
         <li>Ô trống nghĩa là chưa biết số liệu, không phải 0. Các dòng tổng chỉ cộng những số đã biết.</li>
         <li>Không đóng tab trong lúc đang xuất báo cáo hoặc tải file.</li>
         <li>Cookie TikTok: chỉ dùng tài khoản TikTok phụ. Quét bằng cookie tài khoản có thể khiến TikTok giới hạn hoặc yêu cầu xác minh tài khoản đó.</li>

@@ -16,14 +16,44 @@ từ `RIVIU_FORWARDED_ALLOW_IPS` (mặc định `127.0.0.1`; trong Docker là ga
 
 - Host/Origin phải khớp `RIVIU_PUBLIC_ORIGIN`; Host loopback chỉ để kiểm tra sức khoẻ trên chính máy chủ.
   Fetch cross-site bị chặn như bản local.
-- Không cần đăng nhập: `GET/POST /login`, `POST /logout`, `GET /auth-status`, `GET /healthz` (trả `ok`), và những gì trang đăng nhập tải (`/static/styles.css`, logo, favicon).
-  `app.js`, icon và ảnh hướng dẫn (`/static/guide/`) cần đăng nhập.
-  Mọi route khác và `/ws` cần cookie `__Host-riviu_auth` (HttpOnly, Secure, SameSite=Strict, mặc định 7 ngày).
-  Thiếu cookie: trang HTML chuyển về `/login`, API trả 401, WebSocket bị đóng.
+- **Trang xem công khai `/`** (không cần đăng nhập, `data-role="viewer"`): chọn nền tảng/file/sheet để xem dữ liệu,
+  Tổng kết, lịch sử quét, mở **Đối tác & báo cáo** và xuất báo cáo. Chủ dự án đã chấp nhận dữ liệu này là công khai.
+  Trang không render nút quản trị (quét/hủy, cấu hình quét, proxy, cookie, nạp file, Google, Nạp sheet, Tạo sheet,
+  Cập nhật đối tác, Tải sheet, Đăng xuất), chỉ có nút **Quản trị** tới `/admin`. Lựa chọn file của người xem chỉ nằm
+  trong `sessionStorage` của tab đó, không gửi lên server.
+- **Danh sách cho phép không cần đăng nhập** (`security.viewer_request_allowed`, server mới là chốt chặn):
+  `GET /`, `/static/*`, logo/favicon, `/api/version`, `/list-files`, `/preview-excel`, `/summary-dashboard`,
+  `GET /source-preferences`, `/report-partners`, `/scrape-history`, `POST /export-report`, cùng `GET/POST /login`,
+  `POST /logout`, `GET /auth-status` (trả `{authenticated, role}`) và `GET /healthz` (trả `ok`).
+  `/ws` mở cho người xem nhưng chỉ đọc: lệnh `start`/`cancel` cần phiên quản trị, kiểm tra ở `riviu/api/scan.py` cho từng lệnh
+  (middleware HTTP không chạy cho websocket). Với người xem, `/list-files` không đọc trạng thái Google.
+- **Trang quản trị `/admin`** và mọi route khác cần cookie `__Host-riviu_auth` (HttpOnly, Secure, SameSite=Strict, mặc định 7 ngày).
+  Thiếu cookie: `/admin` chuyển tới `/login?next=/admin` (đăng nhập xong quay lại `/admin`; `next` chỉ nhận `/admin` hoặc `/`),
+  trang HTML khác chuyển về `/login`, API trả 401. Đăng xuất quay về `/`.
 - Phiên là token ngẫu nhiên; server chỉ lưu SHA-256 (`data/server_sessions.json`) nên khởi động lại không mất đăng nhập.
   Đăng xuất thu hồi token; đổi mật khẩu làm mọi phiên cũ hết hiệu lực.
 - Sai mật khẩu 5 lần trong 15 phút từ một IP: trả 429 tới khi hết cửa sổ, kể cả khi nhập đúng.
 - `/_desktop/*` không tồn tại trên server (404); sidecar desktop từ chối chạy khi bật chế độ server.
+
+## Lịch tự động (`riviu/scheduler.py`)
+
+Chỉ chạy ở chế độ server (task asyncio khởi động cùng app). Quản trị viên mở **Lịch tự động** trên `/admin`
+để thêm/xoá/bật/tắt khung giờ `HH:MM` (giờ Asia/Ho_Chi_Minh, UTC+7) cho từng nền tảng và chọn tuỳ chọn quét
+(luồng, chế độ, proxy = danh sách proxy đã lưu, cookie). API: `GET/POST /schedule` (chỉ quản trị).
+
+- Đến giờ, với nền tảng đó: (1) **Nạp sheet** từ link Google Sheet đã lưu của nền tảng (`data/source_preferences.json`,
+  hoặc link đăng ký của file hiện tại) bằng đúng code của `/sync-google-sheet`, rồi đặt file mới làm nguồn của nền tảng
+  (giữ sheet quét đã lưu nếu file mới còn sheet đó, không thì sheet dữ liệu đầu tiên); (2) quét file đó qua
+  `prepare_scan_start` / `start_scan_task`, nên trang đang mở thấy tiến độ trực tiếp; (3) **không** tạo sheet trên Google.
+- Từ lúc nạp tới khi phiên quét bắt đầu, lịch giữ `scan_state.scan_starting()`: quét tay và thao tác nguồn phải chờ.
+- Bỏ qua (và ghi lại) khi đang có phiên quét hoặc thao tác nguồn, hay khi nền tảng chưa có link. Nạp lỗi
+  (ví dụ cần đăng nhập Google) thì ghi lỗi và không quét. Hai nền tảng cùng giờ chạy lần lượt, không bao giờ song song.
+- Vòng lặp thức dậy mỗi phút. Giờ bị lỡ khi server tắt (hoặc vòng lặp kẹt quá 3 phút) bị bỏ qua, không chạy bù.
+- Quy tắc Threads giữ nguyên (giãn nhịp, dừng khi HTTP 429 và ghi là "Dừng sớm", không xoay proxy né 403/429).
+- `data/scan_schedule.json` (cấu hình):
+  `{"version": 1, "platforms": {"tiktok": {"slots": [{"time": "08:00", "enabled": true}], "options": {"workers": 10, "scrapeMode": "request", "useProxy": false, "useSession": false}}, "threads": {...}}}`.
+  `data/scan_schedule_runs.json`: 50 kết quả gần nhất (`status`: completed, failed, skipped, stopped, cancelled).
+  Cả hai ghi nguyên tử bằng `write_json_atomic`.
 
 ## Khác với desktop
 
