@@ -1,9 +1,14 @@
-// Server mode (shared-password login): an expired or revoked login answers 401; go back to the login page.
-if (typeof document !== 'undefined' && document.body?.dataset?.serverMode === '1' && typeof window !== 'undefined' && window.fetch) {
+// Server mode serves this page twice: `/` is the public read-only viewer (data-role="viewer",
+// no admin controls rendered) and `/admin` is the full page behind the shared-password login.
+// The viewer never calls an admin endpoint; the server refuses them anyway.
+const IS_VIEWER = typeof document !== 'undefined' && document.body?.dataset?.role === 'viewer';
+
+// Admin page: an expired or revoked login answers 401; go back to the login page.
+if (!IS_VIEWER && typeof document !== 'undefined' && document.body?.dataset?.serverMode === '1' && typeof window !== 'undefined' && window.fetch) {
     const serverFetch = window.fetch.bind(window);
     window.fetch = async (...args) => {
         const response = await serverFetch(...args);
-        if (response.status === 401) window.location.assign('/login');
+        if (response.status === 401) window.location.assign('/login?next=/admin');
         return response;
     };
 }
@@ -143,6 +148,9 @@ let proxySavedCount = 0;
 const SERVER_BUILD_KEY = 'serverProxyBuild';
 // localStorage copy of the source preferences, kept only while the server cannot save them.
 const SOURCE_PREFERENCES_FALLBACK_KEY = 'riviuPlatformSourcesV1';
+// A viewer's explicit file choice: kept in this browser tab only (sessionStorage), never posted
+// to the server, so a new visit opens on the admin's current source (the newest synced report).
+const VIEWER_SOURCES_KEY = 'riviuViewerSourcesV1';
 let threadsCookieState = { configured: false, state: 'none', generation: '' };
 let threadsCookieBusy = false;
 let threadsCookieFocus = null;
@@ -293,8 +301,14 @@ function renderPlatformSourceRows() {
         const config = PLATFORMS[key];
         const id = Object.fromEntries(Object.entries(config.dom).map(([name, value]) => [name, escapeHtml(value)]));
         const platform = escapeHtml(key), label = escapeHtml(config.label);
-        return `<div class="field-stack platform-source-row" data-source-platform="${platform}"> `
-            + `<div class="platform-source-label"><span class="platform-source-name"><img class="platform-brand-icon" src="${escapeHtml(config.icon)}" alt="" aria-hidden="true">${label}</span> <span id="${id.sourceLabel}" class="platform-source-file">Chưa chọn file</span></div> `
+        const head = `<div class="field-stack platform-source-row" data-source-platform="${platform}"> `
+            + `<div class="platform-source-label"><span class="platform-source-name"><img class="platform-brand-icon" src="${escapeHtml(config.icon)}" alt="" aria-hidden="true">${label}</span> <span id="${id.sourceLabel}" class="platform-source-file">Chưa chọn file</span></div> `;
+        if (IS_VIEWER) {
+            return head + `<div class="google-action-row"> `
+                + `<label class="scan-setting"><span>Sheet</span><select id="${id.sheet}" class="sheet-select" aria-label="Sheet ${label}"></select></label> `
+                + `</div> </div>`;
+        }
+        return head
             + `<div class="source-inline"> `
             + `<input class="text-input" id="${id.url}" type="url" placeholder="Link Google Sheet ${label}" aria-label="Link Google Sheet ${label}"> `
             + `<button class="btn btn-primary btn-compact" id="${id.sync}" onclick="syncGoogleSheet('${platform}')"><span class="material-icons-outlined">sync</span> Nạp sheet</button> `
@@ -308,7 +322,7 @@ function renderPlatformSourceRows() {
 
 function applyPlatformUI(platform) {
     if (!isPlatform(platform)) return;
-    platformScrapeModes[activePlatform] = scrapeModeSelect.value;
+    if (scrapeModeSelect) platformScrapeModes[activePlatform] = scrapeModeSelect.value;
     activePlatform = platform;
     const config = platformConfig(platform);
     document.body.dataset.platform = platform;
@@ -316,7 +330,7 @@ function applyPlatformUI(platform) {
     if (sessionControls) sessionControls.hidden = !config.cookieSession;
     const tiktokControls = document.getElementById('tiktokSessionControls');
     if (tiktokControls) tiktokControls.hidden = !config.accountCookie;
-    scrapeModeSelect.value = platformScrapeModes[platform];
+    if (scrapeModeSelect) scrapeModeSelect.value = platformScrapeModes[platform];
     document.querySelectorAll('.platform-option').forEach(button => {
         const selected = button.id === config.dom.button;
         button.classList.toggle('active', selected);
@@ -827,6 +841,7 @@ function syncProxyCardActiveState() {
 }
 
 async function loadProxyList() {
+    if (IS_VIEWER) return { text: '', count: 0, samples: [] };
     try {
         const res = await fetch('/proxy-list');
         const data = await res.json();
@@ -1037,6 +1052,7 @@ async function checkServerVersion() {
 }
 
 async function refreshGoogleOauthStatus() {
+    if (IS_VIEWER) return;
     try {
         const res = await fetch('/google-oauth-status');
         const data = await res.json();
@@ -1287,6 +1303,18 @@ function storeSourcePreferencesFallback(sources) {
     try { localStorage.setItem(SOURCE_PREFERENCES_FALLBACK_KEY, JSON.stringify(sources)); } catch {}
 }
 
+function loadViewerSources() {
+    try { return validatedSourcePreferences(JSON.parse(globalThis.sessionStorage?.getItem(VIEWER_SOURCES_KEY) || 'null')); } catch { return null; }
+}
+
+function rememberViewerChoice(platform) {
+    try {
+        const own = loadViewerSources() || validatedSourcePreferences({});
+        own[platform] = sourcePreferencesSnapshot()[platform];
+        globalThis.sessionStorage?.setItem(VIEWER_SOURCES_KEY, JSON.stringify(own));
+    } catch {}
+}
+
 function loadSourcePreferences() {
     if (sourcePreferencesLoad) return sourcePreferencesLoad;
     const generation = sourcePreferencesGeneration;
@@ -1299,7 +1327,17 @@ function loadSourcePreferences() {
             sources = validatedSourcePreferences(data.sources);
         } catch {
             sourcePreferencesSaveFailed = true;
-            try { sources = validatedSourcePreferences(JSON.parse(localStorage.getItem(SOURCE_PREFERENCES_FALLBACK_KEY) || 'null')); } catch {}
+            if (!IS_VIEWER) {
+                try { sources = validatedSourcePreferences(JSON.parse(localStorage.getItem(SOURCE_PREFERENCES_FALLBACK_KEY) || 'null')); } catch {}
+            }
+        }
+        if (IS_VIEWER) {
+            // A platform the viewer picked a file for opens on that file; the others on the admin's.
+            const own = loadViewerSources();
+            if (own) {
+                sources ||= own;
+                for (const platform of PLATFORM_KEYS) if (own[platform].fileId) sources[platform] = own[platform];
+            }
         }
         if (sources && generation === sourcePreferencesGeneration) {
             for (const platform of PLATFORM_KEYS) Object.assign(platformSources[platform], sources[platform]);
@@ -1311,6 +1349,7 @@ function loadSourcePreferences() {
 }
 
 function scheduleSourcePreferencesSave() {
+    if (IS_VIEWER) return;
     if (!sourcePreferencesReady || !sourcePreferencesPending || sourcePreferencesScheduled || sourcePreferencesWriting
         || sourceBusy || scanIsBusy() || desktopUpdateInstalling) return;
     sourcePreferencesScheduled = true;
@@ -1350,6 +1389,8 @@ async function flushSourcePreferences() {
 
 function persistSources() {
     ++sourcePreferencesGeneration;
+    // The viewer saves nothing on the server; selectFile() remembers its explicit choice.
+    if (IS_VIEWER) return;
     try {
         sourcePreferencesPending = { sources: sourcePreferencesSnapshot() };
         if (sourcePreferencesSaveFailed) storeSourcePreferencesFallback(sourcePreferencesPending.sources);
@@ -1403,6 +1444,13 @@ async function activateSource(platform) {
     }
     const known = source.sheets || [];
     const keep = sheet => (sheet && (!known.length || known.includes(sheet)) ? sheet : '');
+    if (IS_VIEWER) {
+        // No /select-file: the viewer's choice stays in this browser.
+        source.displaySheet = keep(source.displaySheet) || keep(source.scanSheet) || known[0] || '';
+        source.scanSheet = keep(source.scanSheet) || source.displaySheet;
+        source.pushSheet = source.scanSheet;
+        return;
+    }
     const select = (sheetName, scanSheet) => postJson('/select-file', { filename: source.fileId, platform, sheet_name: sheetName, scan_sheet: scanSheet });
     const sheetName = keep(source.displaySheet), scanSheet = keep(source.scanSheet);
     let response = await select(sheetName, scanSheet);
@@ -1552,6 +1600,13 @@ async function selectFile(fileId) {
     try {
         source.displaySheet = '';
         setGooglePushState();
+        if (IS_VIEWER) {
+            Object.assign(source, { fileId, displaySheet: '', scanSheet: '', pushSheet: '', sheets: [], hiddenSheets: [], dirty: false });
+            await updateFileList();
+            rememberViewerChoice(platform);
+            await loadPreview();
+            return;
+        }
         const res = await postJson('/select-file', { filename: fileId, platform });
         const data = await res.json();
         if (!data.success) throw new Error(data.error || 'Không chọn được file');
@@ -1567,7 +1622,7 @@ async function selectFile(fileId) {
 }
 
 async function syncGoogleSheet(platform = activePlatform) {
-    if (!isPlatform(platform) || uiIsBusy()) return;
+    if (IS_VIEWER || !isPlatform(platform) || uiIsBusy()) return;
     const controls = sourceControls(platform);
     const url = controls.url.value.trim();
     if (!url) {
@@ -1608,7 +1663,7 @@ async function syncGoogleSheet(platform = activePlatform) {
 }
 
 async function uploadFile(input) {
-    if (uiIsBusy()) return;
+    if (IS_VIEWER || uiIsBusy()) return;
     const platform = activePlatform;
     const file = input.files[0];
     if (!file) return;
@@ -1639,7 +1694,7 @@ async function uploadFile(input) {
 }
 
 async function pushCurrentSheetToGoogle(event, platform = activePlatform) {
-    if (uiIsBusy()) return;
+    if (IS_VIEWER || uiIsBusy()) return;
     if (platform === activePlatform) saveActiveSource();
     const source = platformSources[platform], controls = sourceControls(platform);
     const fileId = source.fileId, sourceSheet = controls.sheet.value || source.pushSheet;
@@ -1680,7 +1735,7 @@ async function pushCurrentSheetToGoogle(event, platform = activePlatform) {
 }
 
 async function downloadCurrentWorkbook() {
-    if (!currentFileId || sourceBusy) return;
+    if (IS_VIEWER || !currentFileId || sourceBusy) return;
     const link = document.createElement('a');
     link.href = `/download-excel?${sourceQuery()}`;
     link.click();
@@ -1984,11 +2039,15 @@ function syncScanControls() {
     }
     document.querySelectorAll('.tiktok-cookie-close').forEach(button => { button.disabled = tiktokCookieBusy; });
     const startBlocked = busy ? '' : startBlockedReason();
-    startBtn.disabled = busy || Boolean(startBlocked);
-    startBtn.title = startBlocked;
-    startBtn.innerHTML = busy ? BTN_START_BUSY : BTN_START_IDLE;
-    cancelBtn.disabled = !scanIsBusy() || ['saving', 'cancelling'].includes(scanPhase) || wsReconnectFailures > 0;
-    cancelBtn.innerHTML = scanPhase === 'cancelling' ? BTN_CANCEL_BUSY : BTN_CANCEL_IDLE;
+    if (startBtn) {
+        startBtn.disabled = busy || Boolean(startBlocked);
+        startBtn.title = startBlocked;
+        startBtn.innerHTML = busy ? BTN_START_BUSY : BTN_START_IDLE;
+    }
+    if (cancelBtn) {
+        cancelBtn.disabled = !scanIsBusy() || ['saving', 'cancelling'].includes(scanPhase) || wsReconnectFailures > 0;
+        cancelBtn.innerHTML = scanPhase === 'cancelling' ? BTN_CANCEL_BUSY : BTN_CANCEL_IDLE;
+    }
     for (const input of [workerCountSelect, scrapeModeSelect, scanSheetSelect, proxyUseCheckbox, proxyConfigBtn]) {
         if (input) input.disabled = busy;
     }
@@ -2002,7 +2061,8 @@ function syncScanControls() {
         for (const input of [url, sync, sheet]) if (input) input.disabled = busy;
     }
     document.querySelectorAll('.platform-option').forEach(button => { button.disabled = busy; });
-    document.getElementById('refreshPartnerBtn').disabled = busy || selectedPartners.size === 0;
+    const refreshPartnerBtn = document.getElementById('refreshPartnerBtn');
+    if (refreshPartnerBtn) refreshPartnerBtn.disabled = busy || selectedPartners.size === 0;
     setGooglePushState();
 }
 
@@ -2040,7 +2100,7 @@ function showRunSource({ platform, fileId, sheetName }) {
         restoreActiveSource();
         persistSources();
         void reloadActiveSource();
-    } else if (sheetName) {
+    } else if (sheetName && scanSheetSelect) {
         scanSheetSelect.value = sheetName;
     }
 }
@@ -2154,7 +2214,8 @@ function scheduleReconnect() {
 async function probeLocalSession() {
     let reachable = false;
     try {
-        const response = await fetch('/', { cache: 'no-store', credentials: 'same-origin' });
+        const pagePath = window.location?.pathname === '/admin' ? '/admin' : '/';
+        const response = await fetch(pagePath, { cache: 'no-store', credentials: 'same-origin' });
         reachable = Boolean(response.ok);
     } catch {}
     wsRetryPending = false;
@@ -2212,6 +2273,7 @@ function renderThreadsCookieStatus(status) {
 }
 
 async function refreshThreadsCookieStatus() {
+    if (IS_VIEWER) return;
     const revision = ++threadsCookieRevision;
     try {
         const response = await fetch('/threads-session/status', { cache: 'no-store' });
@@ -2356,6 +2418,7 @@ function renderTikTokCookieStatus(status) {
 }
 
 async function refreshTikTokCookieStatus() {
+    if (IS_VIEWER) return;
     const revision = ++tiktokCookieRevision;
     try {
         const response = await fetch('/tiktok-session/status', { cache: 'no-store' });
@@ -2529,7 +2592,7 @@ function buildScanRequest(partners, sheetName) {
 }
 
 function startScraping(partners = [], sheetName = '') {
-    if (uiIsBusy()) return;
+    if (IS_VIEWER || uiIsBusy()) return;
     if (sourcesInitialized && !currentFileId) { notify('Chưa chọn nguồn cho nền tảng này.', 'warn'); return; }
     if (!ws || ws.readyState !== WebSocket.OPEN) {
         notify('Lỗi: Chưa kết nối được server. Vui lòng kiểm tra CMD.', 'error');
@@ -2549,6 +2612,7 @@ function startScraping(partners = [], sheetName = '') {
 }
 
 function cancelScraping() {
+    if (IS_VIEWER) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
         notify('Lỗi: Chưa kết nối được server. Vui lòng kiểm tra CMD.', 'error');
         return;
@@ -3021,6 +3085,7 @@ function partnerNamesFromSelection() {
 }
 
 async function refreshPartnerLinks() {
+    if (IS_VIEWER) return;
     const partners = partnerNamesFromSelection();
     if (partners.length === 0) {
         addLog('Hãy chọn ít nhất 1 đối tác để cập nhật lại link.');
@@ -3288,9 +3353,11 @@ function updateReportSummary() {
 
     summary.textContent = count === 0
         ? 'Chưa chọn đối tác nào.'
-        : `Đã chọn ${count}/${total} đối tác. Cập nhật lại và xuất báo cáo đều hỗ trợ một hoặc nhiều đối tác.`;
+        : (IS_VIEWER
+            ? `Đã chọn ${count}/${total} đối tác. Xuất báo cáo hỗ trợ một hoặc nhiều đối tác.`
+            : `Đã chọn ${count}/${total} đối tác. Cập nhật lại và xuất báo cáo đều hỗ trợ một hoặc nhiều đối tác.`);
     exportBtn.disabled = count === 0;
-    refreshBtn.disabled = count === 0 || scanIsBusy() || desktopUpdateInstalling;
+    if (refreshBtn) refreshBtn.disabled = count === 0 || scanIsBusy() || desktopUpdateInstalling;
     renderSelectedPartnerList();
 }
 
@@ -3345,9 +3412,9 @@ async function exportPartnerReport() {
 
 // ---- Event wiring and startup -----------------------------------------------
 const area = document.getElementById('uploadArea');
-area.addEventListener('dragover', (event) => { event.preventDefault(); area.classList.add('dragover'); });
-area.addEventListener('dragleave', () => area.classList.remove('dragover'));
-area.addEventListener('drop', (event) => {
+area?.addEventListener('dragover', (event) => { event.preventDefault(); area.classList.add('dragover'); });
+area?.addEventListener('dragleave', () => area.classList.remove('dragover'));
+area?.addEventListener('drop', (event) => {
     event.preventDefault();
     area.classList.remove('dragover');
     const file = event.dataTransfer.files[0];
@@ -3405,7 +3472,7 @@ document.getElementById('historyModal').addEventListener('click', (event) => {
     if (event.target.id === 'historyModal') closeHistoryModal();
 });
 
-document.getElementById('proxyModal').addEventListener('click', (event) => {
+document.getElementById('proxyModal')?.addEventListener('click', (event) => {
     if (event.target.id === 'proxyModal') closeProxyModal();
 });
 
@@ -3459,7 +3526,7 @@ document.addEventListener('keydown', (event) => {
         closeReportModal();
     } else if (document.getElementById('historyModal').classList.contains('active')) {
         closeHistoryModal();
-    } else if (document.getElementById('proxyModal').classList.contains('active')) {
+    } else if (document.getElementById('proxyModal')?.classList.contains('active')) {
         closeProxyModal();
     } else {
         closeCompactDrawers();
@@ -3471,7 +3538,7 @@ document.addEventListener('keydown', (event) => {
 renderPlatformBar();
 renderPlatformSourceRows();
 
-scanSheetSelect.addEventListener('change', () => {
+scanSheetSelect?.addEventListener('change', () => {
     currentScanSheetName = scanSheetSelect.value;
     syncCompactSourceSummary('', currentScanSheetName);
     saveActiveSource();

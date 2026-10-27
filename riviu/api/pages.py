@@ -3,11 +3,12 @@
 import os
 
 from fastapi import APIRouter, Request
-from fastapi.responses import FileResponse, HTMLResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.templating import Jinja2Templates
 
 from riviu import server_context as context
 from riviu import server_mode
+from riviu.api import security
 
 
 router = APIRouter()
@@ -23,16 +24,33 @@ def static_asset_version(base_dir: str) -> str:
     return str(max(mtimes)) if mtimes else "1"
 
 
-@router.get("/", response_class=HTMLResponse)
-async def index(request: Request):
+def render_app_page(request: Request, role: str):
+    """The one app page; `role` "viewer" leaves out every admin-only control (server mode `/`)."""
     return templates.TemplateResponse(
         request=request,
         name="index.html",
         context={
             "asset_version": static_asset_version(context.APP_RESOURCE_DIR),
             "server_mode": server_mode.ACTIVE is not None,
+            "role": role,
+            "is_admin": role == "admin",
         },
     )
+
+
+@router.get("/", response_class=HTMLResponse)
+async def index(request: Request):
+    # Server mode: `/` is the public read-only viewer for everyone (logged in or not);
+    # administration lives at /admin. Desktop/source mode keeps the full app here.
+    return render_app_page(request, "viewer" if server_mode.ACTIVE is not None else "admin")
+
+
+@router.get(security.ADMIN_PATH, response_class=HTMLResponse, include_in_schema=False)
+async def admin_page(request: Request):
+    if server_mode.ACTIVE is None:
+        return JSONResponse({"error": "Not Found"}, status_code=404)
+    # The middleware already sent requests without a login to /login?next=/admin.
+    return render_app_page(request, "admin")
 
 
 @router.get("/favicon.ico", include_in_schema=False)

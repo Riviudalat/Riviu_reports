@@ -3,8 +3,9 @@
 Desktop/source mode: loopback-only Host/Origin checks and the per-process session cookie.
 
 Server mode (`riviu.server_mode.ACTIVE`): Host/Origin must match RIVIU_PUBLIC_ORIGIN (or
-loopback, for health checks on the box), and every route except the login page, logout,
-public assets and `/healthz` needs a login session from the shared password. Sessions are
+loopback, for health checks on the box). Anyone may use the read-only viewer allowlist
+(`viewer_request_allowed`: the page at `/`, its assets and the read APIs it calls); every
+other route, `/admin` included, needs a login session from the shared password. Sessions are
 random tokens kept server side (only their SHA-256 is stored), in an HttpOnly, Secure,
 SameSite=Strict cookie with an expiry; logout revokes the token. Failed logins are
 rate-limited per client IP (uvicorn resolves X-Forwarded-For only from trusted proxies).
@@ -40,9 +41,20 @@ AUTH_STATUS_PATH = "/auth-status"
 LOGIN_FAILURE_LIMIT = 5
 LOGIN_FAILURE_WINDOW_SECONDS = 15 * 60
 PUBLIC_ASSET_PATHS = {"/logo.png", "/riviu-logo.png", "/favicon.ico"}
-# Server mode: only what the login page loads is public; app.js, icons and the usage
-# guide screenshots stay behind the login.
+# Server mode: what the login page loads (it is also inside the viewer allowlist below).
 SERVER_PUBLIC_ASSET_PATHS = PUBLIC_ASSET_PATHS | {"/static/styles.css"}
+ADMIN_PATH = "/admin"
+# Where a login may send the browser back to; anything else would be an open redirect.
+LOGIN_NEXT_PATHS = {"/", ADMIN_PATH}
+# Server mode, no login: the read-only viewer at `/` and exactly the reads it makes. The data
+# behind them (workbooks, previews, partner reports, scan history) is public by the owner's
+# decision; uploads, selection, Google, proxy, cookies, workbook download, the scheduler and
+# scan start/cancel (checked in riviu/api/scan.py, since this middleware never sees /ws) are not.
+VIEWER_GET_PATHS = frozenset({
+    "/", "/api/version", "/list-files", "/preview-excel", "/summary-dashboard",
+    "/source-preferences", "/report-partners", "/scrape-history",
+})
+VIEWER_POST_PATHS = frozenset({"/export-report"})
 
 
 def _port_of(parts):
@@ -218,6 +230,27 @@ def valid_server_session(request) -> bool:
     return login_sessions().valid(request.cookies.get(AUTH_COOKIE, ""))
 
 
+def viewer_request_allowed(method: str, path: str) -> bool:
+    """Server mode: may this request run without a login (the public read-only viewer)?"""
+    if method in {"GET", "HEAD"}:
+        return (
+            path in VIEWER_GET_PATHS or path in SERVER_PUBLIC_ASSET_PATHS
+            or (path.startswith("/static/") and ".." not in path)
+        )
+    return method == "POST" and path in VIEWER_POST_PATHS
+
+
+def safe_login_next(value) -> str:
+    return value if isinstance(value, str) and value in LOGIN_NEXT_PATHS else ADMIN_PATH
+
+
+def request_role(request) -> str:
+    """`admin` with a valid login (or outside server mode, where the local cookie is the gate), else `viewer`."""
+    if server_mode.ACTIVE is None:
+        return "admin"
+    return "admin" if valid_server_session(request) else "viewer"
+
+
 def valid_local_session(request):
     if server_mode.ACTIVE is not None:
         return valid_server_session(request)
@@ -261,7 +294,7 @@ async def protect_server_api(request: Request, call_next):
     public = (
         path == HEALTH_PATH
         or path in {LOGIN_PATH, LOGOUT_PATH, AUTH_STATUS_PATH}
-        or (request.method in {"GET", "HEAD"} and path in SERVER_PUBLIC_ASSET_PATHS)
+        or viewer_request_allowed(request.method, path)
     )
     navigation = (
         request.method in {"GET", "HEAD"}
@@ -273,10 +306,11 @@ async def protect_server_api(request: Request, call_next):
         return JSONResponse({"error": "Nguồn truy cập không hợp lệ"}, status_code=403)
     if not public and not valid_server_session(request):
         if _wants_html(request):
-            return _security_headers(RedirectResponse(LOGIN_PATH, status_code=303))
+            target = f"{LOGIN_PATH}?next={ADMIN_PATH}" if path == ADMIN_PATH else LOGIN_PATH
+            return _security_headers(RedirectResponse(target, status_code=303))
         return _security_headers(JSONResponse({"error": "Cần đăng nhập"}, status_code=401))
     response = await call_next(request)
-    if path.startswith("/threads-session") or path in {"/", LOGIN_PATH}:
+    if path.startswith("/threads-session") or path in {"/", ADMIN_PATH, LOGIN_PATH}:
         response.headers["Cache-Control"] = "no-store"
     return _security_headers(response)
 

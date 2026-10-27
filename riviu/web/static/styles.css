@@ -1240,3 +1240,7 @@ body[data-workspace-tab="success"] #dataFeed tr[data-result-status]:not([data-re
 .google-sa-help { margin: 0; font-size: 12px; color: #166534; }
 .google-sa-error { margin: 0; font-size: 12px; color: #b91c1c; overflow-wrap: anywhere; }
 .google-sa-error[hidden] { display: none; }
+
+/* Server mode: the public viewer's admin link. */
+a.compact-top-action { text-decoration: none; }
+body[data-role="viewer"] .scan-toolbar { display: none !important; }

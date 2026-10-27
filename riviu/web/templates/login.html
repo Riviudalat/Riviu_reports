@@ -24,6 +24,7 @@
         {% if error %}<p class="login-error" role="alert">{{ error }}</p>{% endif %}
         <label for="password">Mật khẩu</label>
         <input type="password" id="password" name="password" required autofocus autocomplete="current-password" maxlength="1024">
+        <input type="hidden" name="next" value="{{ next_path }}">
         <button class="btn btn-primary" type="submit">Đăng nhập</button>
     </form>
     <script>
@@ -31,7 +32,7 @@
         // this same-origin probe carries it, so a logged-in user goes straight back in.
         fetch('/auth-status', { credentials: 'same-origin' })
             .then(response => response.ok ? response.json() : null)
-            .then(data => { if (data && data.authenticated) window.location.replace('/'); })
+            .then(data => { if (data && data.authenticated) window.location.replace({{ next_path | tojson }}); })
             .catch(() => {});
     </script>
 </body>

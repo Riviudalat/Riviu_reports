@@ -9,7 +9,9 @@
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">
     <link rel="stylesheet" href="/static/styles.css?v={{ asset_version }}">
 </head>
-<body class="compact-page" data-workspace-tab="sheet" data-platform="tiktok"{% if server_mode %} data-server-mode="1"{% endif %}>
+{#- role "viewer" (server mode `/`) leaves out every admin-only control; the server enforces the same split. -#}
+{%- set is_admin = role != "viewer" -%}
+<body class="compact-page" data-workspace-tab="sheet" data-platform="tiktok" data-role="{{ 'admin' if is_admin else 'viewer' }}"{% if server_mode %} data-server-mode="1"{% endif %}>
     <div class="toast-stack" id="toastStack" aria-live="assertive"></div>
     <div class="server-banner" id="serverBanner" hidden>Server đã cập nhật — restart Khoidong.bat rồi F5 trang này.</div>
     <div class="server-banner" id="connectionBanner" role="alert" hidden>Mất kết nối tới server. Ứng dụng vẫn tự thử lại, hoặc tải lại trang (F5).</div>
@@ -40,16 +42,22 @@
                     <button class="btn btn-outline btn-compact compact-top-action" id="guideButton" type="button" onclick="openGuideModal()" title="Hướng dẫn sử dụng" aria-label="Hướng dẫn sử dụng">
                         <span class="material-icons-outlined">help_outline</span><span class="compact-action-label">Hướng dẫn sử dụng</span>
                     </button>
-                    {% if server_mode %}
+                    {% if server_mode and is_admin %}
                     <form class="logout-form" method="post" action="/logout">
                         <button class="btn btn-outline btn-compact compact-top-action" id="logoutButton" type="submit" title="Đăng xuất" aria-label="Đăng xuất">
                             <span class="material-icons-outlined">logout</span><span class="compact-action-label">Đăng xuất</span>
                         </button>
                     </form>
+                    {% elif server_mode %}
+                    <a class="btn btn-outline btn-compact compact-top-action" id="adminLink" href="/admin" title="Quản trị (cần đăng nhập)" aria-label="Quản trị">
+                        <span class="material-icons-outlined">admin_panel_settings</span><span class="compact-action-label">Quản trị</span>
+                    </a>
                     {% endif %}
                 </div>
             </header>
+            {#- The viewer gets no scan controls; styles.css hides its toolbar, which only keeps the sheet state. -#}
             <div class="scan-toolbar" role="toolbar" aria-label="Cấu hình quét">
+                {% if is_admin %}
                 <button class="btn btn-outline btn-compact compact-settings-button" id="scanSettingsButton" onclick="openScanSettingsDrawer()" title="Cấu hình quét" aria-label="Cấu hình quét">
                     <span class="material-icons-outlined">settings</span>
                 </button>
@@ -141,6 +149,7 @@
                         </div>
                     </div>
                 </div>
+                {% endif %}
                 <div class="toolbar-group toolbar-sheet">
                     <div class="toolbar-field toolbar-field-grow">
                         <label class="toolbar-label" for="scanSheetSelect">
@@ -151,6 +160,7 @@
                     </div>
                 </div>
 
+                {% if is_admin %}
                 <div class="toolbar-divider toolbar-divider-actions" aria-hidden="true"></div>
 
                 <div class="toolbar-group toolbar-actions">
@@ -163,6 +173,7 @@
                         <span>Bắt đầu quét</span>
                     </button>
                 </div>
+                {% endif %}
             </div>
         </div>
 
@@ -207,17 +218,20 @@
                     <div class="controls-shell-title">Nguồn dữ liệu</div>
                 </div>
                 <div class="controls-shell-actions">
+                    {% if is_admin %}
                     <button class="btn btn-soft btn-compact" id="googleServiceAccountBtn" onclick="document.getElementById('googleServiceAccountFileInput').click()" title="Khuyên dùng: tài khoản robot của Google Cloud, không cần đăng nhập Google cá nhân">Nạp tài khoản dịch vụ</button>
                     <input type="file" id="googleServiceAccountFileInput" hidden accept=".json,application/json" onchange="uploadGoogleServiceAccount(this)">
                     <button class="btn btn-outline btn-compact" id="googleOauthBtn" onclick="document.getElementById('googleOauthFileInput').click()">Nạp OAuth</button>
                     <button class="btn btn-soft btn-compact google-login-btn" id="googleLoginBtn" onclick="connectGoogleOAuth()">Đăng nhập Google</button>
                     <input type="file" id="googleOauthFileInput" hidden accept=".json" onchange="uploadGoogleOauthClient(this)">
+                    {% endif %}
                     <button class="icon-btn" type="button" onclick="closeSourceDrawer()" title="Đóng" aria-label="Đóng nguồn dữ liệu">
                         <span class="material-icons-outlined">close</span>
                     </button>
                 </div>
             </div>
 
+            {% if is_admin %}
             <div class="google-sa-box" id="googleServiceAccountBox" hidden>
                 <div class="google-sa-row">
                     <span class="material-icons-outlined google-sa-icon" aria-hidden="true">verified_user</span>
@@ -231,6 +245,7 @@
                 <p class="google-sa-help" id="googleServiceAccountHelp">Chia sẻ Google Sheet cho email này với quyền <b>Người chỉnh sửa</b>.</p>
                 <p class="google-sa-error" id="googleServiceAccountError" role="status" hidden></p>
             </div>
+            {% endif %}
 
             <div class="controls-grid">
                 <div class="source-block" id="platformSourceRows">
@@ -254,13 +269,16 @@
                         <select id="excelFileSelect" onchange="selectFile(this.value)"></select>
                         <div class="source-actions">
                             <button class="btn btn-outline btn-compact" onclick="updateFileList()">Làm mới danh sách</button>
+                            {% if is_admin %}
                             <button class="btn btn-outline btn-compact" onclick="downloadCurrentWorkbook()">
                                 <span class="material-icons-outlined">download</span> Tải sheet
                             </button>
+                            {% endif %}
                         </div>
                     </div>
                 </div>
 
+                {% if is_admin %}
                 <div class="source-block">
                     <div class="source-block-head">
                         <div class="source-icon"><span class="material-icons-outlined">upload_file</span></div>
@@ -274,6 +292,7 @@
                         <input type="file" id="fileInput" hidden accept=".xlsx" onchange="uploadFile(this)">
                     </div>
                 </div>
+                {% endif %}
             </div>
         </aside>
 
@@ -291,9 +310,11 @@
                     <button class="btn btn-outline btn-compact workspace-action" data-action-for="sheet" onclick="loadPreview()" title="Làm mới dữ liệu">
                         <span class="material-icons-outlined">refresh</span><span class="workspace-action-label">Làm mới</span>
                     </button>
+                    {% if is_admin %}
                     <button class="btn btn-outline btn-compact workspace-action" data-action-for="sheet" onclick="downloadCurrentWorkbook()" title="Tải sheet">
                         <span class="material-icons-outlined">download</span><span class="workspace-action-label">Tải sheet</span>
                     </button>
+                    {% endif %}
                     <button class="btn btn-outline btn-compact workspace-action" data-action-for="nostats" onclick="copyFailedLinks('nostats')" title="Copy link không số liệu">
                         <span class="material-icons-outlined">content_copy</span><span class="workspace-action-label">Copy link</span>
                     </button>
@@ -424,7 +445,7 @@
             <div class="modal-header">
                 <div>
                     <div class="modal-title report-platform-title" id="reportModalTitle"><img id="reportPlatformIcon" class="platform-brand-icon" src="/static/platform-icons/tiktok.svg" alt="" aria-hidden="true"><span id="reportPlatformLabel">Đối tác &amp; báo cáo TikTok</span></div>
-                    <div class="modal-subtitle" id="reportModalSubtitle">Chọn đối tác để cập nhật lại link hoặc xuất báo cáo.</div>
+                    <div class="modal-subtitle" id="reportModalSubtitle">{% if is_admin %}Chọn đối tác để cập nhật lại link hoặc xuất báo cáo.{% else %}Chọn đối tác để xuất báo cáo.{% endif %}</div>
                 </div>
                 <button class="icon-btn" onclick="closeReportModal()" aria-label="Đóng">
                     <span class="material-icons-outlined">close</span>
@@ -469,9 +490,11 @@
             </div>
             <div class="modal-footer">
                 <button class="btn btn-outline" onclick="closeReportModal()">Hủy</button>
+                {% if is_admin %}
                 <button class="btn btn-soft" id="refreshPartnerBtn" onclick="refreshPartnerLinks()" disabled>
                     <span class="material-icons-outlined">refresh</span> Cập nhật đối tác
                 </button>
+                {% endif %}
                 <button class="btn btn-primary" id="exportReportBtn" onclick="exportPartnerReport()" disabled>
                     <span class="material-icons-outlined">download</span> Xuất báo cáo
                 </button>
@@ -520,6 +543,7 @@
         </div>
     </div>
 
+    {% if is_admin %}
     <div class="modal-backdrop" id="proxyModal" aria-hidden="true">
         <div class="report-modal proxy-modal" role="dialog" aria-modal="true" aria-labelledby="proxyModalTitle">
             <div class="modal-header">
@@ -549,6 +573,7 @@
             </div>
         </div>
     </div>
+    {% endif %}
 
     <div class="modal-backdrop" id="guideModal" aria-hidden="true">
         <div class="report-modal guide-modal" role="dialog" aria-modal="true" aria-labelledby="guideModalTitle">
@@ -570,7 +595,7 @@
         </div>
     </div>
 
-    {% if server_mode %}
+    {% if server_mode and is_admin %}
     <div class="modal-backdrop" id="googlePasteModal" aria-hidden="true">
         <div class="report-modal proxy-modal" role="dialog" aria-modal="true" aria-labelledby="googlePasteTitle">
             <div class="modal-header">
@@ -599,6 +624,7 @@
     </div>
     {% endif %}
 
+    {% if is_admin %}
     <svg width="0" height="0" aria-hidden="true" style="position:absolute;pointer-events:none"><defs>
         <symbol id="cookieShield" viewBox="0 0 24 24"><path d="M12 3 4 6v6c0 5 8 9 8 9s8-4 8-9V6Z"/><path d="m8 12 3 3 5-6"/></symbol>
         <symbol id="cookieSettings" viewBox="0 0 24 24"><path d="M4 7h16M4 17h16"/><circle cx="9" cy="7" r="3"/><circle cx="15" cy="17" r="3"/></symbol>
@@ -706,6 +732,7 @@
             </div>
         </div>
     </div>
+    {% endif %}
     <script src="/static/app.js?v={{ asset_version }}"></script>
 </body>
 </html>

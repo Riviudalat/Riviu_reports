@@ -204,9 +204,9 @@ def run(base_url, data_dir):
         shooter = Shooter(page)
         settle = lambda ms=600: page.wait_for_timeout(ms)
 
-        # 1. Login.
-        page.goto(base_url + "/")
-        page.wait_for_url("**/login")
+        # 1. Login (server mode: `/` is the public viewer; the admin page is /admin).
+        page.goto(base_url + "/admin")
+        page.wait_for_url("**/login?next=/admin")
         page.fill("#password", PASSWORD)
         settle(300)
         shooter.shot("01-dang-nhap", "#password", "button[type=submit]")

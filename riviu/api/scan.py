@@ -1,11 +1,15 @@
-"""The `/ws` scan channel (start/cancel and progress events) and the scrape history."""
+"""The `/ws` scan channel (start/cancel and progress events) and the scrape history.
+
+Server mode: the socket also serves the public viewer, read-only. Starlette's HTTP
+middleware never sees websockets, so the admin check for start/cancel lives here.
+"""
 
 import asyncio
 import json
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 
-from riviu import scan_service, scan_state
+from riviu import scan_service, scan_state, server_mode
 from riviu import server_context as context
 from riviu.api import security
 from riviu.platforms.tiktok import read_scrape_history
@@ -13,6 +17,15 @@ from riviu.source_files import SourceRequestError
 
 
 router = APIRouter()
+VIEWER_REFUSED = "Chỉ quản trị viên mới bắt đầu hoặc hủy phiên quét. Đăng nhập tại /admin."
+
+
+def websocket_admitted(websocket) -> bool:
+    """Trusted origin plus, outside server mode, the local session cookie. In server mode a
+    connection without a login is admitted as a read-only viewer."""
+    if not security.trusted_local_request(websocket, require_origin=True):
+        return False
+    return server_mode.ACTIVE is not None or security.valid_local_session(websocket)
 
 
 @router.get("/scrape-history")
@@ -23,7 +36,7 @@ async def scrape_history(limit: int = Query(default=50)):
 
 @router.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
-    if not security.trusted_local_request(websocket, require_origin=True) or not security.valid_local_session(websocket):
+    if not websocket_admitted(websocket):
         await websocket.close(code=1008)
         return
     manager = scan_state.manager
@@ -43,6 +56,11 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             action = payload.get("action")
+            # Checked per command (not once at connect), so a logout or password change applies at once.
+            if action in {"start", "cancel"} and security.request_role(websocket) != "admin":
+                # Only to this socket: a viewer must not stop or start anything, nor spam others.
+                await websocket.send_json({"type": "log", "message": VIEWER_REFUSED, "level": "WARN"})
+                continue
             if action == "start":
                 if scan_state.source_mutation_blocked():
                     await websocket.send_json({"type": "session", "data": manager.snapshot(), **manager.context})

@@ -1,5 +1,8 @@
 """Server-mode login: the shared-password page, logout, the health probe and the auth probe.
 
+The login guards administration (`/admin` and every non-viewer API); after a login the
+browser returns to `next` (only `/admin` or `/`), and logout returns to the public viewer `/`.
+
 The routes exist in every mode but answer 404 outside server mode (the local middleware
 also keeps them behind the per-process cookie there), so desktop/source mode is unchanged.
 """
@@ -25,11 +28,15 @@ def _not_found():
     return JSONResponse({"error": "Not Found"}, status_code=404)
 
 
-def _login_page(request: Request, error: str = "", status_code: int = 200):
+def _login_page(request: Request, error: str = "", status_code: int = 200, next_path: str = security.ADMIN_PATH):
     return templates.TemplateResponse(
         request=request,
         name="login.html",
-        context={"error": error, "asset_version": static_asset_version(context.APP_RESOURCE_DIR)},
+        context={
+            "error": error,
+            "next_path": security.safe_login_next(next_path),
+            "asset_version": static_asset_version(context.APP_RESOURCE_DIR),
+        },
         status_code=status_code,
     )
 
@@ -43,16 +50,18 @@ async def healthz():
 async def auth_status(request: Request):
     if server_mode.ACTIVE is None:
         return _not_found()
-    return {"authenticated": security.valid_server_session(request)}
+    authenticated = security.valid_server_session(request)
+    return {"authenticated": authenticated, "role": "admin" if authenticated else "viewer"}
 
 
 @router.get(security.LOGIN_PATH, include_in_schema=False)
 async def login_page(request: Request):
     if server_mode.ACTIVE is None:
         return _not_found()
+    next_path = security.safe_login_next(request.query_params.get("next"))
     if security.valid_server_session(request):
-        return RedirectResponse("/", status_code=303)
-    return _login_page(request)
+        return RedirectResponse(next_path, status_code=303)
+    return _login_page(request, next_path=next_path)
 
 
 @router.post(security.LOGIN_PATH, include_in_schema=False)
@@ -68,6 +77,7 @@ async def login(request: Request):
     if limiter.blocked(client):
         return _login_page(request, TOO_MANY_ATTEMPTS, status_code=429)
     form = await request.form()
+    next_path = security.safe_login_next(form.get("next"))
     password = form.get("password")
     password = password if isinstance(password, str) else ""
     ok = 0 < len(password) <= MAX_PASSWORD_LENGTH and await asyncio.to_thread(
@@ -76,11 +86,11 @@ async def login(request: Request):
     if not ok:
         limiter.record_failure(client)
         if limiter.blocked(client):
-            return _login_page(request, TOO_MANY_ATTEMPTS, status_code=429)
-        return _login_page(request, WRONG_PASSWORD, status_code=401)
+            return _login_page(request, TOO_MANY_ATTEMPTS, status_code=429, next_path=next_path)
+        return _login_page(request, WRONG_PASSWORD, status_code=401, next_path=next_path)
     limiter.reset(client)
     token = await asyncio.to_thread(security.login_sessions().create)
-    response = RedirectResponse("/", status_code=303)
+    response = RedirectResponse(next_path, status_code=303)
     security.set_auth_cookie(response, token)
     return response
 
@@ -92,7 +102,8 @@ async def logout(request: Request):
     if not security.trusted_server_request(request, require_origin=True):
         return JSONResponse({"error": "Nguồn truy cập không hợp lệ"}, status_code=403)
     await asyncio.to_thread(security.login_sessions().revoke, request.cookies.get(security.AUTH_COOKIE, ""))
-    response = RedirectResponse(security.LOGIN_PATH, status_code=303)
+    # Back to the public viewer, which needs no login.
+    response = RedirectResponse("/", status_code=303)
     security.clear_auth_cookie(response)
     return response
 
