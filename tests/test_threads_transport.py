@@ -803,7 +803,7 @@ def quarantine_run(tmp_path, monkeypatch, proxies, limited):
     saved = openpyxl.load_workbook(path)
     try:
         sheet = saved["Data"]
-        status = worksheet_find_column_index(sheet, [threads.THREADS_SCAN_STATUS_HEADER])
+        status = worksheet_find_column_index(sheet, [threads.SCAN_STATUS_HEADER])
         statuses = [sheet.cell(row, status).value for row in range(2, 8)]
     finally:
         saved.close()
