@@ -764,7 +764,7 @@ def test_rate_limit_stops_the_run_and_leaves_unrequested_rows_untouched(tmp_path
     try:
         sheet = saved["Data"]
         likes = worksheet_find_column_index(sheet, ["TIM"])
-        status = worksheet_find_column_index(sheet, [threads.THREADS_SCAN_STATUS_HEADER])
+        status = worksheet_find_column_index(sheet, [threads.SCAN_STATUS_HEADER])
         assert [sheet.cell(row, likes).value for row in range(2, 8)] == [5, 5, 99, 99, 99, 99]
         assert [sheet.cell(row, status).value for row in range(2, 8)] == [
             "Success", "Success", "Error: HTTP 429", None, None, None]

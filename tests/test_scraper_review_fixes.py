@@ -789,7 +789,7 @@ def test_scan_setup_and_finish_read_each_header_row_once_per_step(tmp_path, monk
         # The missing columns are still appended right after the 9 headers.
         data = scan.workbook["Data"]
         assert [data.cell(row=1, column=index).value for index in range(10, 14)] == [
-            "Cập nhật lần cuối", "__TTBD_SCAN_STATUS", "__TTBD_RESOLVED_URL", "__TTBD_SOURCE_URL",
+            "TRẠNG THÁI QUÉT", "Cập nhật lần cuối", "__TTBD_RESOLVED_URL", "__TTBD_SOURCE_URL",
         ]
     finally:
         scan.workbook.close()

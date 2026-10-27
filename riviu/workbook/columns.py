@@ -4,9 +4,18 @@ Scanners, previews and reports must find the same column for the same header, so
 sheet go through the same header-list helpers here.
 """
 
-from openpyxl.utils import get_column_letter
+from copy import copy
 
-from riviu.workbook.constants import COLUMN_ALIASES, LAST_UPDATE_COLUMN, TTBD_INTERNAL_HEADERS
+from openpyxl.utils import column_index_from_string, get_column_letter
+
+from riviu.workbook.constants import (
+    COLUMN_ALIASES,
+    LAST_UPDATE_COLUMN,
+    LEGACY_SCAN_STATUS_HEADERS,
+    SCAN_STATUS_ALIASES,
+    SCAN_STATUS_HEADER,
+    TTBD_INTERNAL_HEADERS,
+)
 from riviu.workbook.links import is_post_url
 from riviu.workbook.text import normalize_header, normalize_key
 
@@ -62,7 +71,7 @@ def pick_link_column(headers, sample_values):
     `sample_values(index)` yields cell values of that column. Account/profile link columns are
     skipped unless they are the only ones holding post URLs; a column with post URLs wins.
     """
-    internal_keys = {normalize_key(header) for header in TTBD_INTERNAL_HEADERS}
+    internal_keys = {normalize_key(header) for header in (*TTBD_INTERNAL_HEADERS, *LEGACY_SCAN_STATUS_HEADERS)}
     post_candidates = []
     account_candidates = []
     for index, header in enumerate(headers):
@@ -136,6 +145,49 @@ def worksheet_ensure_column(worksheet, header, aliases=None, *, hidden=False, he
         worksheet.cell(row=1, column=index).value = header
     if hidden:
         worksheet.column_dimensions[get_column_letter(index)].hidden = True
+    return index
+
+
+def worksheet_show_column(worksheet, index):
+    """Unhide one column without unhiding its neighbours.
+
+    Excel saves adjacent columns with the same width/visibility as one <col min max> range, and
+    openpyxl keeps that range under its first letter, so the range is split around `index` first.
+    """
+    dimensions = worksheet.column_dimensions
+    for key, dimension in list(dimensions.items()):
+        low = dimension.min or column_index_from_string(key)
+        high = dimension.max or low
+        if low == high or not low <= index <= high:
+            continue
+        del dimensions[key]
+        for start, end in ((low, index - 1), (index, index), (index + 1, high)):
+            if start > end:
+                continue
+            piece = copy(dimension)
+            piece.index = get_column_letter(start)
+            piece.min = start
+            piece.max = end
+            dimensions[piece.index] = piece
+    letter = get_column_letter(index)
+    if letter in dimensions:
+        dimensions[letter].hidden = False
+
+
+def worksheet_ensure_scan_status_column(worksheet, headers=None):
+    """Index of the visible "TRẠNG THÁI QUÉT" column, migrating a legacy hidden one in place.
+
+    Older scans kept the status in a hidden "__TTBD_SCAN_STATUS"/"__THREADS_SCAN_STATUS" column.
+    That column is renamed and unhidden where it stands, so its values are kept and no duplicate
+    status column is appended.
+    """
+    index = worksheet_ensure_column(worksheet, SCAN_STATUS_HEADER, SCAN_STATUS_ALIASES, headers=headers)
+    cell = worksheet.cell(row=1, column=index)
+    if cell.value != SCAN_STATUS_HEADER:
+        cell.value = SCAN_STATUS_HEADER
+        if headers is not None and index <= len(headers):
+            headers[index - 1] = SCAN_STATUS_HEADER
+    worksheet_show_column(worksheet, index)
     return index
 
 

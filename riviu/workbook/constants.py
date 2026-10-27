@@ -17,15 +17,20 @@ VIDEO_LINK_FILL_COLOR = "BDD7EE"
 LEGACY_PHOTO_LINK_FILL_COLOR = "C6EFCE"
 TIKTOK_MEDIA_VIDEO = "video"
 TIKTOK_MEDIA_PHOTO = "photo"
+# Visible per-row scan status ("Success" / "Error: ..." / Threads statuses), shared by both platforms.
+SCAN_STATUS_HEADER = "TRẠNG THÁI QUÉT"
+# Hidden headers older scans wrote the status under. Readers still accept them, and the next
+# scan renames that column to SCAN_STATUS_HEADER and unhides it in place (never a duplicate).
 TTBD_SCAN_STATUS_HEADER = "__TTBD_SCAN_STATUS"
+THREADS_SCAN_STATUS_HEADER = "__THREADS_SCAN_STATUS"
+LEGACY_SCAN_STATUS_HEADERS = (TTBD_SCAN_STATUS_HEADER, THREADS_SCAN_STATUS_HEADER)
+SCAN_STATUS_ALIASES = (SCAN_STATUS_HEADER, *LEGACY_SCAN_STATUS_HEADERS)
 TTBD_RESOLVED_URL_HEADER = "__TTBD_RESOLVED_URL"
 TTBD_SOURCE_URL_HEADER = "__TTBD_SOURCE_URL"
-THREADS_SCAN_STATUS_HEADER = "__THREADS_SCAN_STATUS"
+# Hidden machine columns that previews never show (the scan status is no longer one of them).
 TTBD_INTERNAL_HEADERS = {
-    TTBD_SCAN_STATUS_HEADER,
     TTBD_RESOLVED_URL_HEADER,
     TTBD_SOURCE_URL_HEADER,
-    THREADS_SCAN_STATUS_HEADER,
 }
 PARTNER_HEADING_MARKERS = ("DANH SÁCH", "DANH SACH", "BỘ ẢNH", "BO ANH")
 CHANNEL_OVERRIDE_FILENAME = "channel_name_overrides.json"
@@ -42,6 +47,7 @@ COLUMN_ALIASES = {
     "TÊN KÊNH": ("TÊN KÊNH",),
     "Tên Kênh": ("TÊN KÊNH",),
     LAST_UPDATE_COLUMN: (LAST_UPDATE_COLUMN, "Ngày cập nhật"),
+    SCAN_STATUS_HEADER: SCAN_STATUS_ALIASES,
 }
 DISPLAY_DATETIME_FORMAT = "%d/%m/%Y-%H:%M"
 FILENAME_DATETIME_FORMAT = "%d-%m-%Y-%H-%M"

@@ -23,7 +23,8 @@ from playwright.async_api import async_playwright
 from riviu.platforms.tiktok import close_browser_bounded, finish_pending_task, playwright_session
 from riviu.workbook_utils import (
     LAST_UPDATE_COLUMN,
-    THREADS_SCAN_STATUS_HEADER,
+    SCAN_STATUS_HEADER,
+    THREADS_SCAN_STATUS_HEADER,  # noqa: F401  (legacy hidden status header, still read via SCAN_STATUS_ALIASES)
     clean_text,
     format_display_datetime,
     is_threads_link,
@@ -33,6 +34,7 @@ from riviu.workbook_utils import (
     summary_sheet_title_for_data_sheet,
     workbook_data_sheet_names,
     worksheet_ensure_column,
+    worksheet_ensure_scan_status_column,
     worksheet_find_link_column_index,
     worksheet_partner_column_indexes,
     worksheet_row_partners,
@@ -659,21 +661,24 @@ async def fetch_threads_browser(browser, url, proxy_config=None, session_cookies
             await page.close()
 
 
-def _ensure_column(sheet, header, columns, *, hidden=False):
+def _ensure_column(sheet, header, columns):
     """worksheet_ensure_column, remembered per worksheet object when columns (one run's dict) is given.
 
     Each lookup reads max_column, which scans every cell (~8 ms at 5,000 rows).
     A run only appends headers to its data sheets, and the first matching header
     wins, so an index resolved once stays right for the rest of that run.
+    The visible scan-status column goes through worksheet_ensure_scan_status_column,
+    which renames and unhides a legacy hidden "__THREADS_SCAN_STATUS" column in place.
     """
+    ensure = worksheet_ensure_scan_status_column if header == SCAN_STATUS_HEADER else (
+        lambda worksheet: worksheet_ensure_column(worksheet, header)
+    )
     if columns is None:
-        return worksheet_ensure_column(sheet, header, hidden=hidden)
+        return ensure(sheet)
     known = columns.setdefault(sheet, {})
     index = known.get(header)
     if index is None:
-        index = known[header] = worksheet_ensure_column(sheet, header, hidden=hidden)
-    elif hidden:
-        sheet.column_dimensions[get_column_letter(index)].hidden = True
+        index = known[header] = ensure(sheet)
     return index
 
 
@@ -692,7 +697,7 @@ def write_threads_result(sheet, row_index, result, columns=None):
             sheet.cell(row=row_index, column=_ensure_column(sheet, header, columns)).value = None
     _ensure_column(sheet, "REPOST", columns)
     status = result_status(result)
-    sheet.cell(row=row_index, column=_ensure_column(sheet, THREADS_SCAN_STATUS_HEADER, columns, hidden=True)).value = status
+    sheet.cell(row=row_index, column=_ensure_column(sheet, SCAN_STATUS_HEADER, columns)).value = status
     if channel or any(value is not None for value in result["metrics"].values()):
         sheet.cell(row=row_index, column=_ensure_column(sheet, LAST_UPDATE_COLUMN, columns)).value = format_display_datetime()
     return status
