@@ -1444,3 +1444,22 @@ body.viewer-page {
     .vw-link-detail { display: none; }
     .vw-table td.vw-link-cell { max-width: 170px; }
 }
+
+/* Admin header. Brand, source and actions share one row and the scan toolbar takes the next
+   at every width: side by side, the toolbar crushed the source name to a few pixels and wrapped
+   both blocks. The source name truncates first; action labels show only where they fit. */
+body.compact-page .compact-header { grid-template-columns: minmax(0, 1fr); }
+body.compact-page .compact-topbar { min-height: 52px; padding-top: 6px; padding-bottom: 6px; }
+.compact-page .compact-topbar .header-brand { min-width: 0; }
+.compact-page .compact-topbar .header-brand h1 { display: flex; align-items: center; white-space: nowrap; }
+.compact-page .compact-source-summary { flex: 1 1 0; }
+.compact-page .compact-top-actions { flex: 0 0 auto; flex-wrap: nowrap; }
+.compact-page .compact-top-action { white-space: nowrap; }
+.compact-page .scan-toolbar .toolbar-actions { margin-left: auto; }
+@media (min-width: 1280px) {
+    .compact-page .compact-top-action { width: auto; padding: 0 12px; gap: 6px; }
+    .compact-page .compact-action-label { display: inline; font-size: 13px; }
+}
+@media (min-width: 761px) {
+    .compact-page .scan-advanced-controls { flex: 0 1 auto; }
+}
