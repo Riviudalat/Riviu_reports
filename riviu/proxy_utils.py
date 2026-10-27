@@ -339,6 +339,12 @@ def proxy_label(config):
     return f"{config['type'].upper()} {auth}{config['host']}:{port}"
 
 
+def masked_proxy_label(config):
+    """Type, host and port only: no username or password (safe for logs)."""
+    port = config["socks_port"] if config.get("type") == "socks5" else config["port"]
+    return f"{config['type'].upper()} {config['host']}:{port}"
+
+
 def build_http_proxy_url(config):
     if config.get("username"):
         user = quote(config["username"], safe="")
