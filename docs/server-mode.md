@@ -17,13 +17,14 @@ từ `RIVIU_FORWARDED_ALLOW_IPS` (mặc định `127.0.0.1`; trong Docker là ga
 - Host/Origin phải khớp `RIVIU_PUBLIC_ORIGIN`; Host loopback chỉ để kiểm tra sức khoẻ trên chính máy chủ.
   Fetch cross-site bị chặn như bản local.
 - **Trang xem công khai `/`** (không cần đăng nhập, `data-role="viewer"`): trang báo cáo riêng
-  (`templates/viewer_body.html`, CSS `.vw-*`, các hàm `renderViewer*` trong app.js): chọn nền tảng/file/sheet,
-  thẻ tổng (số link, lượt xem, tim, bình luận, lưu/repost, chia sẻ; chưa có số liệu thì để trống "—", không ghi 0),
-  danh sách đối tác (số link, lượt xem từ tab Tổng kết) với nút **Xuất** từng đối tác và **Xuất tất cả**, bảng link có
-  ô lọc, lịch sử quét. Không có tab trạng thái quét, thanh tiến độ hay nhật ký. Chủ dự án đã chấp nhận dữ liệu này là
-  công khai. Trang không render nút quản trị (quét/hủy, cấu hình quét, proxy, cookie, nạp file, Google, Nạp sheet, Tạo sheet,
-  Cập nhật đối tác, Tải sheet, Đăng xuất), chỉ có nút **Quản trị** tới `/admin`. Lựa chọn file của người xem chỉ nằm
-  trong `sessionStorage` của tab đó, không gửi lên server.
+  (`templates/viewer_body.html`, CSS `.vw-*`, các hàm `renderViewer*` trong app.js). Mỗi nền tảng hiện đúng file
+  nguồn của nó trong `/source-preferences` (file quản trị đã chọn hoặc lịch tự động vừa nạp), người xem không đổi
+  file; chưa có nguồn thì hiện "Chưa có file báo cáo cho nền tảng này". Người xem chọn sheet trong file (các tháng
+  và tab Tổng kết), lọc bảng link, xem lịch sử quét, và bấm **Xuất báo cáo** để mở hộp thoại Đối tác & báo cáo như
+  trang quản trị. Không có tab trạng thái quét, thanh tiến độ hay nhật ký. Chủ dự án đã chấp nhận dữ liệu này là
+  công khai. Trang không render nút quản trị (quét/hủy, cấu hình quét, proxy, cookie, nạp file, Google, Nạp sheet,
+  Tạo sheet, Cập nhật đối tác, Tải sheet, Đăng xuất), chỉ có nút **Quản trị** tới `/admin`. Lựa chọn sheet của người
+  xem không gửi lên server.
 - **Danh sách cho phép không cần đăng nhập** (`security.viewer_request_allowed`, server mới là chốt chặn):
   `GET /`, `/static/*`, logo/favicon, `/api/version`, `/list-files`, `/preview-excel`, `/summary-dashboard`,
   `GET /source-preferences`, `/report-partners`, `/scrape-history`, `POST /export-report`, cùng `GET/POST /login`,
