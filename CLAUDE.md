@@ -14,8 +14,8 @@ uv run python -m riviu                                             # web app on 
 uv run pytest -q tests                                             # full suite; always pass `tests` so scratch copies under output/ are not collected
 uv run pytest -q tests/test_threads.py::test_name                  # single test
 uv run pytest -q tests -k "proxy and threads"                      # by keyword
-node --check riviu/web/static/app.js                               # JS syntax check (also run in CI)
-uv lock --check                                                    # uv.lock matches pyproject.toml (also run in CI)
+node --check riviu/web/static/app.js                               # JS syntax check
+uv lock --check                                                    # uv.lock matches pyproject.toml
 uv run python -m riviu.server_mode hash-password                   # scrypt hash for server mode's shared password (reads stdin / prompts)
 docker compose -f deploy/server/compose.yaml build                 # server-mode image (see deploy/server/README.md)
 uv run python tools/make_guide_screenshots.py                     # regenerate usage-guide screenshots (riviu/web/static/guide/) after UI changes
@@ -26,7 +26,7 @@ git diff --check
 
 Opt-in tests are skipped unless you set env vars: `THREADS_LIVE_URL`, `THREADS_SHARE_URL` (live Threads scans), and `RIVIU_TEST_URL` (UI against a running server). Frontend regression tests in `tests/test_ui_review_fixes.py` and related files run `riviu/web/static/app.js` inside a Node `vm` harness with stubbed DOM, `fetch`, and `WebSocket`. The harness turns the source-row markup that app.js renders into the stub elements, and it fails if any `PLATFORMS[*].dom` id was not rendered. They skip if `node` is not on PATH. The DPAPI tests run only on Windows.
 
-CI (`.github/workflows/pr-check.yml`, on pull requests into `main` and pushes to `main`) runs `uv lock --check`, pytest (`pyproject.toml` sets `testpaths = ["tests"]` and puts the repo root on `sys.path`) and `node --check` on a Windows runner (the `.bat` and DPAPI tests need it). It builds and publishes nothing: the server is updated by hand (`deploy/server/README.md`), and source-mode machines update with `capnhat.bat`. Merge only when it is green.
+There is no CI: run `uv lock --check`, `uv run pytest -q tests` (`pyproject.toml` sets `testpaths = ["tests"]` and puts the repo root on `sys.path`) and `node --check` locally before merging. Nothing is built or published on push: the server is updated by hand (`deploy/server/README.md`), and source-mode machines update with `capnhat.bat`.
 
 ## Architecture
 

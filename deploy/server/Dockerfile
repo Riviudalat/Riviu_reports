@@ -3,7 +3,7 @@
 # The build context is an allowlist (Dockerfile.dockerignore): only pyproject.toml,
 # uv.lock and riviu/ are sent, so data/, tokens and OAuth files never enter the image.
 
-# CI tests run on 3.12 (pyproject: >=3.11,<3.15).
+# The tests run on 3.12 (pyproject: >=3.11,<3.15).
 FROM python:3.12-slim-bookworm
 
 COPY --from=ghcr.io/astral-sh/uv:0.12.10 /uv /usr/local/bin/uv
