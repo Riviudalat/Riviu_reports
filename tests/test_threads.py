@@ -161,7 +161,7 @@ def test_hybrid_saves_explicit_zero_counts_and_partial_status(tmp_path, monkeypa
     saved = openpyxl.load_workbook(path)
     try:
         assert [saved.active.cell(2, col).value for col in range(2, 7)] == [135, 0, 0, 0, None]
-        col = worksheet_find_column_index(saved.active, [threads_scraper.THREADS_SCAN_STATUS_HEADER])
+        col = worksheet_find_column_index(saved.active, [threads_scraper.SCAN_STATUS_HEADER])
         assert saved.active.cell(2, col).value == "Success"
     finally:
         saved.close()
@@ -253,10 +253,29 @@ def test_threads_result_column_cache_writes_the_same_cells(monkeypatch):
                 for sheet in workbook.worksheets}
 
     assert cells(cached) == cells(plain)
+    assert not any(cells(cached)[name][1].values() for name in ("Sparse", "Full"))
     # Headers really were appended mid-run, after the cache had entries for this sheet.
     assert [cell.value for cell in cached["Sparse"][1]] == [
-        "Link", "TIM", "Tên Kênh", "REPOST", threads_scraper.THREADS_SCAN_STATUS_HEADER,
+        "Link", "TIM", "Tên Kênh", "REPOST", threads_scraper.SCAN_STATUS_HEADER,
         threads_scraper.LAST_UPDATE_COLUMN, "LƯỢT XEM", "BÌNH LUẬN", "CHIA SẺ"]
+
+
+def test_threads_write_reuses_legacy_hidden_status_column_visibly():
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    sheet.append(["Link", "TIM", threads_scraper.THREADS_SCAN_STATUS_HEADER, "Ghi chú"])
+    sheet.append([URL, 5, "Error: old", "note"])
+    sheet.column_dimensions["C"].hidden = True
+
+    result = {"channel": "", "metrics": {**threads_scraper.empty_metrics(), "likes": 7}, "error": ""}
+    assert write_threads_result(sheet, 2, result, {}) == "Success"
+
+    headers = [cell.value for cell in sheet[1]]
+    assert headers[:4] == ["Link", "TIM", threads_scraper.SCAN_STATUS_HEADER, "Ghi chú"]
+    assert headers.count(threads_scraper.SCAN_STATUS_HEADER) == 1
+    assert threads_scraper.THREADS_SCAN_STATUS_HEADER not in headers
+    assert sheet.cell(2, 3).value == "Success" and sheet.cell(2, 4).value == "note"
+    assert sheet.column_dimensions["C"].hidden is False
 
 
 def test_threads_save_temp_file_is_hidden_from_workbook_lists(tmp_path):

@@ -443,6 +443,44 @@ def test_shared_column_lookup_matches_unaccented_headers_instead_of_appending():
     assert worksheet_ensure_column(sheet, "TIM") == 4 and sheet.cell(row=1, column=4).value == "TIM"
 
 
+@pytest.mark.parametrize("legacy_header", ["__TTBD_SCAN_STATUS", "__THREADS_SCAN_STATUS"])
+def test_scan_status_column_migrates_legacy_hidden_column_in_place(tmp_path, legacy_header):
+    import openpyxl
+    from openpyxl.worksheet.dimensions import ColumnDimension
+    from riviu.workbook_utils import (
+        SCAN_STATUS_ALIASES,
+        worksheet_ensure_scan_status_column,
+        worksheet_find_column_index,
+        worksheet_headers,
+    )
+
+    path = tmp_path / "legacy.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.append(["Link", "TIM", legacy_header, "__TTBD_RESOLVED_URL", "__TTBD_SOURCE_URL"])
+    sheet.append(["https://www.tiktok.com/@a/video/1", 5, "Success", "", ""])
+    # Excel stores adjacent hidden columns as one <col min="3" max="5" hidden="1"> range.
+    sheet.column_dimensions["C"] = ColumnDimension(sheet, index="C", min=3, max=5, hidden=True, width=9)
+    book.save(path)
+    sheet = openpyxl.load_workbook(path).active
+
+    headers = worksheet_headers(sheet)
+    assert worksheet_find_column_index(sheet, SCAN_STATUS_ALIASES, headers=headers) == 3
+    assert worksheet_ensure_scan_status_column(sheet, headers=headers) == 3
+    assert worksheet_ensure_scan_status_column(sheet) == 3
+    assert headers == worksheet_headers(sheet) == [
+        "Link", "TIM", "TRẠNG THÁI QUÉT", "__TTBD_RESOLVED_URL", "__TTBD_SOURCE_URL",
+    ]
+    assert sheet.cell(row=2, column=3).value == "Success"
+    sheet.parent.save(path)
+    saved = openpyxl.load_workbook(path).active
+    hidden = {}
+    for dimension in saved.column_dimensions.values():
+        for index in range(dimension.min, dimension.max + 1):
+            hidden[index] = (dimension.hidden, dimension.width)
+    assert hidden == {3: (False, 9), 4: (True, 9), 5: (True, 9)}
+
+
 def test_atomic_save_temp_files_are_never_listed_as_workbooks(tmp_path):
     import openpyxl
     from riviu.workbook_utils import save_workbook_atomic, workbook_file_entries
@@ -700,7 +738,7 @@ def test_read_sheet_preview_flags_video_link_rows(tmp_path):
     assert not rows[2].get("_videoLink")
 
 
-def test_persisted_scan_metadata_drives_workbook_preview_and_is_hidden(tmp_path):
+def test_persisted_scan_metadata_drives_workbook_preview_and_url_columns_are_hidden(tmp_path):
     import openpyxl
 
     file_path = tmp_path / "preview-scan-metadata.xlsx"
@@ -762,7 +800,12 @@ def test_persisted_scan_metadata_drives_workbook_preview_and_is_hidden(tmp_path)
     assert preview["data"][0].get("_videoLink") is True
     assert not preview["data"][1].get("_videoLink")
     assert not preview["data"][2].get("_videoLink")
+    # A legacy hidden status column is shown under its visible name; the URL columns stay hidden.
     assert "__TTBD_SCAN_STATUS" not in preview["columns"]
+    assert preview["columns"][-1] == "TRẠNG THÁI QUÉT"
+    assert [row["TRẠNG THÁI QUÉT"] for row in preview["data"]] == [
+        "Success", "Error: Không đọc được số liệu", "Success",
+    ]
     assert "__TTBD_RESOLVED_URL" not in preview["columns"]
     assert "__TTBD_SOURCE_URL" not in preview["columns"]
 

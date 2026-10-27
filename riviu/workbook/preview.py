@@ -10,9 +10,10 @@ from riviu.workbook.columns import dataframe_partner_columns, find_column_name, 
 from riviu.workbook.constants import (
     COLUMN_ALIASES,
     LAST_UPDATE_COLUMN,
+    SCAN_STATUS_ALIASES,
+    SCAN_STATUS_HEADER,
     TTBD_INTERNAL_HEADERS,
     TTBD_RESOLVED_URL_HEADER,
-    TTBD_SCAN_STATUS_HEADER,
     TTBD_SOURCE_URL_HEADER,
 )
 from riviu.workbook.dates import preview_datetime_text
@@ -202,7 +203,10 @@ def build_sheet_preview(snapshot, current_sheet, limit=None, *, platform=None):
     saves_column = find_column_name(frame, ["LƯỢT LƯU"])
     reposts_column = find_column_name(frame, ["REPOST"])
     shares_column = find_column_name(frame, ["CHIA SẺ"])
-    scan_status_column = find_column_name(frame, [TTBD_SCAN_STATUS_HEADER])
+    scan_status_column = find_column_name(frame, SCAN_STATUS_ALIASES)
+    if scan_status_column is not None and SCAN_STATUS_HEADER not in column_labels.values():
+        # A sheet not rescanned since the status became visible still names it "__TTBD_SCAN_STATUS"/"__THREADS_SCAN_STATUS".
+        column_labels[scan_status_column] = SCAN_STATUS_HEADER
     resolved_url_column = find_column_name(frame, [TTBD_RESOLVED_URL_HEADER])
     source_url_column = find_column_name(frame, [TTBD_SOURCE_URL_HEADER])
     public_columns = [

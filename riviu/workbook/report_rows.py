@@ -8,8 +8,8 @@ from riviu.workbook.constants import (
     ALL_METRIC_COLUMNS,
     COLUMN_ALIASES,
     LAST_UPDATE_COLUMN,
+    SCAN_STATUS_ALIASES,
     TTBD_RESOLVED_URL_HEADER,
-    TTBD_SCAN_STATUS_HEADER,
     TTBD_SOURCE_URL_HEADER,
 )
 from riviu.workbook.links import is_threads_link, is_tiktok_link
@@ -66,7 +66,7 @@ def _build_sheet_report_rows(frame, sheet_name, spec):
     last_update_column = find_column_name(frame, COLUMN_ALIASES[LAST_UPDATE_COLUMN])
     metric_columns = {metric: find_column_name(frame, [metric]) for metric in ALL_METRIC_COLUMNS}
     internal_columns = {
-        "_scanStatus": find_column_name(frame, [TTBD_SCAN_STATUS_HEADER]),
+        "_scanStatus": find_column_name(frame, SCAN_STATUS_ALIASES),
         "_resolvedUrl": find_column_name(frame, [TTBD_RESOLVED_URL_HEADER]),
         "_resolvedSourceUrl": find_column_name(frame, [TTBD_SOURCE_URL_HEADER]),
     }

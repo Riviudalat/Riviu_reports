@@ -7,8 +7,9 @@ import openpyxl
 
 from riviu.workbook_utils import (
     COLUMN_ALIASES,
+    SCAN_STATUS_ALIASES,
+    SCAN_STATUS_HEADER,
     TTBD_RESOLVED_URL_HEADER,
-    TTBD_SCAN_STATUS_HEADER,
     TTBD_SOURCE_URL_HEADER,
     clean_text,
     format_display_datetime,
@@ -20,6 +21,7 @@ from riviu.workbook_utils import (
     set_cell_literal,
     workbook_data_sheet_names,
     worksheet_ensure_column,
+    worksheet_ensure_scan_status_column,
     worksheet_find_column_index,
     worksheet_find_link_column_index,
     worksheet_headers,
@@ -45,7 +47,7 @@ RESULT_SHEET_HEADERS = [
     "CHIA SẺ",
     "Đối tác",
     LAST_UPDATE_HEADER,
-    TTBD_SCAN_STATUS_HEADER,
+    SCAN_STATUS_HEADER,
     TTBD_RESOLVED_URL_HEADER,
     TTBD_SOURCE_URL_HEADER,
 ]
@@ -91,8 +93,8 @@ def build_sheet_contexts(workbook, sheet_name=None):
     return contexts
 
 
+# Hidden machine columns; the scan status is visible and handled on its own (see ensure_columns).
 INTERNAL_COLUMN_HEADERS = {
-    "scan_status": TTBD_SCAN_STATUS_HEADER,
     "resolved_url": TTBD_RESOLVED_URL_HEADER,
     "source_url": TTBD_SOURCE_URL_HEADER,
 }
@@ -146,6 +148,7 @@ def detect_columns(sheet, headers=None):
         key: worksheet_find_column_index(sheet, (header,), headers=headers)
         for key, header in INTERNAL_COLUMN_HEADERS.items()
     }
+    column_map["scan_status"] = worksheet_find_column_index(sheet, SCAN_STATUS_ALIASES, headers=headers)
     column_map["url"] = worksheet_find_link_column_index(sheet, headers=headers) or _find_link_column_by_content(
         sheet, {index for index in column_map.values() if index}
     )
@@ -163,6 +166,9 @@ def ensure_columns(sheet):
     column_map["channel"] = worksheet_ensure_column(sheet, CHANNEL_HEADER, headers=headers)
     for key, header in METRIC_HEADERS.items():
         column_map[key] = worksheet_ensure_column(sheet, header, (header,), headers=headers)
+    # Visible right after the metrics (before "Cập nhật lần cuối" when both are new); a legacy
+    # hidden "__TTBD_SCAN_STATUS" column is renamed and unhidden where it stands.
+    column_map["scan_status"] = worksheet_ensure_scan_status_column(sheet, headers=headers)
     column_map["last_update"] = worksheet_ensure_column(sheet, LAST_UPDATE_HEADER, headers=headers)
     for key, header in INTERNAL_COLUMN_HEADERS.items():
         column_map[key] = worksheet_ensure_column(sheet, header, (header,), hidden=True, headers=headers)
@@ -368,13 +374,14 @@ def _fill_result_sheet(workbook, worksheet, rows_to_process, summary_update_time
                 *(metric_or_none(source_value(key, source_row_index)) for key in METRIC_HEADERS),
                 "\n".join(partner_names),
                 last_update,
+                clean_text(source_value("scan_status", source_row_index)),
                 *(clean_text(source_value(key, source_row_index)) for key in INTERNAL_COLUMN_HEADERS),
             ]
             for column_index, value in enumerate(values, start=1):
                 set_cell_literal(worksheet.cell(row=output_row, column=column_index), value)
             output_row += 1
 
-    widths = [10, 16, 72, 24, 14, 12, 14, 14, 12, 28, 20]
+    widths = [10, 16, 72, 24, 14, 12, 14, 14, 12, 28, 20, 28]
     for index, width in enumerate(widths, start=1):
         worksheet.column_dimensions[openpyxl.utils.get_column_letter(index)].width = width
 
@@ -386,7 +393,7 @@ def _fill_result_sheet(workbook, worksheet, rows_to_process, summary_update_time
             worksheet.cell(row=total_row, column=column_index).value = f"=SUM({letter}2:{letter}{total_row - 1})"
 
     worksheet.freeze_panes = "A2"
-    for column_index in (12, 13, 14):
+    for column_index in (13, 14):
         worksheet.column_dimensions[openpyxl.utils.get_column_letter(column_index)].hidden = True
 
 

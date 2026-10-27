@@ -10,9 +10,9 @@ from riviu.workbook.columns import (
 )
 from riviu.workbook.constants import (
     LEGACY_PHOTO_LINK_FILL_COLOR,
+    SCAN_STATUS_ALIASES,
     SINGLE_LINK_FILL_COLOR,
     TTBD_RESOLVED_URL_HEADER,
-    TTBD_SCAN_STATUS_HEADER,
     TTBD_SOURCE_URL_HEADER,
     VIDEO_LINK_FILL_COLOR,
 )
@@ -40,7 +40,7 @@ def _video_highlight_columns(worksheet, headers):
     return {
         "likes": (find("TIM"), 0),
         "shares": (find("CHIA SẺ"), 0),
-        "scan_status": (find(TTBD_SCAN_STATUS_HEADER), ""),
+        "scan_status": (worksheet_find_column_index(worksheet, SCAN_STATUS_ALIASES, headers=headers), ""),
         "resolved_url": (find(TTBD_RESOLVED_URL_HEADER), ""),
         "resolved_source_url": (find(TTBD_SOURCE_URL_HEADER), ""),
     }
