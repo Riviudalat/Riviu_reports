@@ -2,15 +2,15 @@
 
 ## Project Structure & Module Organization
 
-The Python code is the `riviu` package; run it with `python -m riviu` (the root `app.py` is a shim that does the same).
+The Python code is the `riviu` package. It runs two ways: source mode, `python -m riviu` on a local machine (the root `app.py` is a shim that does the same), and server mode, the same app in Docker with `RIVIU_SERVER_MODE=1` (see below). There is no desktop app any more.
 
-- `riviu/app.py` builds the FastAPI app from the routers in `riviu/api/`; `riviu/scan_state.py` and `riviu/scan_service.py` own the single-scan state and dispatch; `riviu/desktop_server.py` integrates the desktop backend.
+- `riviu/app.py` builds the FastAPI app from the routers in `riviu/api/`; `riviu/scan_state.py` and `riviu/scan_service.py` own the single-scan state and dispatch.
 - the `riviu/platforms/tiktok/` package handles TikTok; `riviu/platforms/threads.py` and `riviu/platforms/threads_session.py` handle Threads metrics and authenticated sessions.
 - the `riviu/workbook/` package (re-exported by the `riviu/workbook_utils.py` facade), `riviu/google_sheets_sync.py`, and `riviu/proxy_utils.py` own workbook operations, Google integration, and proxy transport.
 - `riviu/reports.py` builds partner Excel reports, export payloads, and Google push rows; it must not import `riviu.app`.
-- `riviu/paths.py` resolves web resources and the user-data directory for source and frozen runs.
+- `riviu/paths.py` resolves web resources and the user-data directory.
 - `riviu/web/templates/index.html`, `riviu/web/static/` and `riviu/web/logo.png` contain the HTML, JavaScript, CSS, icons and logo.
-- `src-tauri/` contains the Rust desktop shell; `desktop/` contains sidecar packaging scripts and `desktop-dist/` the Tauri loading page. Tests live in `tests/`. The current architecture and release notes live in `docs/`, and dated reviews, plans and specs in `docs/archive/`.
+- Tests live in `tests/`. The current architecture and specs live in `docs/`, and dated reviews, plans and specs in `docs/archive/`.
 - `Khoidong.bat`, `setup.bat` and `capnhat.bat` are the Windows source-mode launchers (start, install, update).
 - `riviu/server_mode.py` and `riviu/api/auth.py` add the opt-in shared-password server mode (`RIVIU_SERVER_MODE=1`); `deploy/server/` holds its Docker, compose and nginx files. Never commit a real password hash, secret key or env file.
 
@@ -20,7 +20,6 @@ Run from the repository root in PowerShell:
 
 ```powershell
 uv sync
-npm install
 uv run playwright install chromium
 uv run python -m riviu
 ```
@@ -29,8 +28,6 @@ Dependencies live in `pyproject.toml` and `uv.lock`. `requirements.txt` is gener
 
 The web app listens on `http://127.0.0.1:1231`.
 
-- `npm run desktop:dev`: build the Python sidecar and start Tauri development.
-- `npm run desktop:build`: build the sidecar and desktop application; requires Rust and platform build tools.
 - `uv run pytest -q tests`: run repository tests, excluding archived copies under `output/` (`pyproject.toml` also limits plain `pytest` to `tests/`).
 - `node --check riviu/web/static/app.js`: check JavaScript syntax.
 - `uv lock --check`: check that `uv.lock` matches `pyproject.toml`.
@@ -46,7 +43,7 @@ Use pytest with `test_*.py` files and `test_*` functions; browser regressions us
 
 ## Commit & Pull Request Guidelines
 
-Recent commits use concise imperative summaries, commonly `fix:` or `feat:`. Keep changes focused. Describe the problem, resulting behavior, validation commands, and remaining limitations. Link relevant issues and include screenshots for visual changes. Distinguish source tests from installer verification. Check release automation before pushing to `main`.
+Recent commits use concise imperative summaries, commonly `fix:` or `feat:`. Keep changes focused. Describe the problem, resulting behavior, validation commands, and remaining limitations. Link relevant issues and include screenshots for visual changes. Distinguish source tests from verification on the deployed server.
 
 ## Security & Data Handling
 

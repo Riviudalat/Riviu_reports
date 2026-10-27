@@ -1,9 +1,14 @@
-// Server mode (shared-password login): an expired or revoked login answers 401; go back to the login page.
-if (typeof document !== 'undefined' && document.body?.dataset?.serverMode === '1' && typeof window !== 'undefined' && window.fetch) {
+// Server mode serves this page twice: `/` is the public read-only viewer (data-role="viewer",
+// no admin controls rendered) and `/admin` is the full page behind the shared-password login.
+// The viewer never calls an admin endpoint; the server refuses them anyway.
+const IS_VIEWER = typeof document !== 'undefined' && document.body?.dataset?.role === 'viewer';
+
+// Admin page: an expired or revoked login answers 401; go back to the login page.
+if (!IS_VIEWER && typeof document !== 'undefined' && document.body?.dataset?.serverMode === '1' && typeof window !== 'undefined' && window.fetch) {
     const serverFetch = window.fetch.bind(window);
     window.fetch = async (...args) => {
         const response = await serverFetch(...args);
-        if (response.status === 401) window.location.assign('/login');
+        if (response.status === 401) window.location.assign('/login?next=/admin');
         return response;
     };
 }
@@ -126,9 +131,7 @@ let sourcePreferencesSaveFailed = false;
 let sourcePreferencesScheduled = false;
 let activeWorkspaceTab = 'sheet';
 let pendingLiveResults = 0;
-let desktopUpdateCheckInFlight = false;
-let desktopUpdateInstalling = false;
-let desktopStartupUpdatePending = false;
+// True once this socket delivered its session snapshot (browser tests wait on it).
 let websocketSessionReady = false;
 
 let scanPhase = 'idle';
@@ -279,7 +282,9 @@ function renderPlatformBar() {
     bar.innerHTML = PLATFORM_KEYS.map(key => {
         const config = PLATFORMS[key];
         const selected = key === activePlatform;
-        return `<button class="platform-option${selected ? ' active' : ''}" id="${escapeHtml(config.dom.button)}" type="button" aria-pressed="${selected}" onclick="setPlatform('${escapeHtml(key)}')"><img class="platform-brand-icon" src="${escapeHtml(config.icon)}" alt="" aria-hidden="true">${escapeHtml(config.label)}</button>`;
+        // The mark is the icon used as a mask, painted in the button's text colour, so it
+        // matches the label in every state (inactive grey, hover, active).
+        return `<button class="platform-option${selected ? ' active' : ''}" id="${escapeHtml(config.dom.button)}" type="button" aria-pressed="${selected}" onclick="setPlatform('${escapeHtml(key)}')"><span class="platform-glyph" style="--platform-glyph: url('${escapeHtml(config.icon)}')" aria-hidden="true"></span><span class="platform-option-label">${escapeHtml(config.label)}</span></button>`;
     }).join('');
 }
 
@@ -293,8 +298,16 @@ function renderPlatformSourceRows() {
         const config = PLATFORMS[key];
         const id = Object.fromEntries(Object.entries(config.dom).map(([name, value]) => [name, escapeHtml(value)]));
         const platform = escapeHtml(key), label = escapeHtml(config.label);
-        return `<div class="field-stack platform-source-row" data-source-platform="${platform}"> `
-            + `<div class="platform-source-label"><span class="platform-source-name"><img class="platform-brand-icon" src="${escapeHtml(config.icon)}" alt="" aria-hidden="true">${label}</span> <span id="${id.sourceLabel}" class="platform-source-file">Chưa chọn file</span></div> `
+        const head = `<div class="field-stack platform-source-row" data-source-platform="${platform}"> `
+            + `<div class="platform-source-label"><span class="platform-source-name"><img class="platform-brand-icon" src="${escapeHtml(config.icon)}" alt="" aria-hidden="true">${label}</span> <span id="${id.sourceLabel}" class="platform-source-file">Chưa chọn file</span></div> `;
+        if (IS_VIEWER) {
+            // The viewer's picker: only the active platform's sheet select shows (applyPlatformUI).
+            return `<div class="platform-source-row vw-sheet-row" data-source-platform="${platform}"${key === activePlatform ? '' : ' hidden'}> `
+                + `<label class="vw-field-label" for="${id.sheet}">Sheet</label> `
+                + `<select id="${id.sheet}" class="vw-select sheet-select" data-viewer-sheets="${platform}" aria-label="Sheet ${label}"></select> `
+                + `<span id="${id.sourceLabel}" class="platform-source-file" hidden>Chưa chọn file</span> </div>`;
+        }
+        return head
             + `<div class="source-inline"> `
             + `<input class="text-input" id="${id.url}" type="url" placeholder="Link Google Sheet ${label}" aria-label="Link Google Sheet ${label}"> `
             + `<button class="btn btn-primary btn-compact" id="${id.sync}" onclick="syncGoogleSheet('${platform}')"><span class="material-icons-outlined">sync</span> Nạp sheet</button> `
@@ -308,7 +321,7 @@ function renderPlatformSourceRows() {
 
 function applyPlatformUI(platform) {
     if (!isPlatform(platform)) return;
-    platformScrapeModes[activePlatform] = scrapeModeSelect.value;
+    if (scrapeModeSelect) platformScrapeModes[activePlatform] = scrapeModeSelect.value;
     activePlatform = platform;
     const config = platformConfig(platform);
     document.body.dataset.platform = platform;
@@ -316,7 +329,7 @@ function applyPlatformUI(platform) {
     if (sessionControls) sessionControls.hidden = !config.cookieSession;
     const tiktokControls = document.getElementById('tiktokSessionControls');
     if (tiktokControls) tiktokControls.hidden = !config.accountCookie;
-    scrapeModeSelect.value = platformScrapeModes[platform];
+    if (scrapeModeSelect) scrapeModeSelect.value = platformScrapeModes[platform];
     document.querySelectorAll('.platform-option').forEach(button => {
         const selected = button.id === config.dom.button;
         button.classList.toggle('active', selected);
@@ -328,6 +341,9 @@ function applyPlatformUI(platform) {
     const reportLabel = document.getElementById('reportPlatformLabel');
     if (reportIcon) reportIcon.src = config.icon;
     if (reportLabel) reportLabel.textContent = `Đối tác & báo cáo ${config.label}`;
+    if (IS_VIEWER) {
+        document.querySelectorAll('#platformSourceRows .platform-source-row').forEach(row => { row.hidden = row.dataset.sourcePlatform !== platform; });
+    }
 }
 
 const PROGRESS_COUNTER_IDS = ['processedLinks', 'successLinks', 'hiddenCountBadge', 'failedCountBadge'];
@@ -478,6 +494,7 @@ function syncCompactSourceSummary(fileLabel = '', sheetName = '') {
         sheetEl.textContent = resolvedSheet || 'Chưa chọn sheet';
         sheetEl.title = resolvedSheet || 'Chưa chọn sheet';
     }
+    if (IS_VIEWER) renderViewerHeader();
 }
 
 function showNewestLiveResults() {
@@ -779,7 +796,8 @@ function appendSheetOptions(selectEl, sheets, selectedSheet, hiddenSheets) {
 }
 
 function renderSheetSelect(selectEl, sheets, preferredSheet, onUpdate, hiddenSheets = activeSource().hiddenSheets) {
-    const validSheets = dataSheetsVisibleFirst(sheets, hiddenSheets);
+    const viewerPlatform = IS_VIEWER && selectEl.dataset?.viewerSheets;
+    const validSheets = viewerPlatform ? viewerSheetChoices(sheets, viewerPlatform, hiddenSheets) : dataSheetsVisibleFirst(sheets, hiddenSheets);
     selectEl.innerHTML = '';
     if (validSheets.length === 0) {
         selectEl.innerHTML = '<option value="">Không có sheet</option>';
@@ -827,6 +845,7 @@ function syncProxyCardActiveState() {
 }
 
 async function loadProxyList() {
+    if (IS_VIEWER) return { text: '', count: 0, samples: [] };
     try {
         const res = await fetch('/proxy-list');
         const data = await res.json();
@@ -1037,6 +1056,7 @@ async function checkServerVersion() {
 }
 
 async function refreshGoogleOauthStatus() {
+    if (IS_VIEWER) return;
     try {
         const res = await fetch('/google-oauth-status');
         const data = await res.json();
@@ -1299,7 +1319,9 @@ function loadSourcePreferences() {
             sources = validatedSourcePreferences(data.sources);
         } catch {
             sourcePreferencesSaveFailed = true;
-            try { sources = validatedSourcePreferences(JSON.parse(localStorage.getItem(SOURCE_PREFERENCES_FALLBACK_KEY) || 'null')); } catch {}
+            if (!IS_VIEWER) {
+                try { sources = validatedSourcePreferences(JSON.parse(localStorage.getItem(SOURCE_PREFERENCES_FALLBACK_KEY) || 'null')); } catch {}
+            }
         }
         if (sources && generation === sourcePreferencesGeneration) {
             for (const platform of PLATFORM_KEYS) Object.assign(platformSources[platform], sources[platform]);
@@ -1311,8 +1333,9 @@ function loadSourcePreferences() {
 }
 
 function scheduleSourcePreferencesSave() {
+    if (IS_VIEWER) return;
     if (!sourcePreferencesReady || !sourcePreferencesPending || sourcePreferencesScheduled || sourcePreferencesWriting
-        || sourceBusy || scanIsBusy() || desktopUpdateInstalling) return;
+        || sourceBusy || scanIsBusy()) return;
     sourcePreferencesScheduled = true;
     Promise.resolve().then(() => {
         sourcePreferencesScheduled = false;
@@ -1322,10 +1345,10 @@ function scheduleSourcePreferencesSave() {
 
 async function flushSourcePreferences() {
     if (!sourcePreferencesReady || sourcePreferencesWriting || !sourcePreferencesPending
-        || sourceBusy || scanIsBusy() || desktopUpdateInstalling) return;
+        || sourceBusy || scanIsBusy()) return;
     sourcePreferencesWriting = true;
     try {
-        while (sourcePreferencesPending && !sourceBusy && !scanIsBusy() && !desktopUpdateInstalling) {
+        while (sourcePreferencesPending && !sourceBusy && !scanIsBusy()) {
             const pending = sourcePreferencesPending;
             sourcePreferencesPending = null;
             try {
@@ -1350,6 +1373,8 @@ async function flushSourcePreferences() {
 
 function persistSources() {
     ++sourcePreferencesGeneration;
+    // The viewer saves nothing on the server.
+    if (IS_VIEWER) return;
     try {
         sourcePreferencesPending = { sources: sourcePreferencesSnapshot() };
         if (sourcePreferencesSaveFailed) storeSourcePreferencesFallback(sourcePreferencesPending.sources);
@@ -1403,6 +1428,13 @@ async function activateSource(platform) {
     }
     const known = source.sheets || [];
     const keep = sheet => (sheet && (!known.length || known.includes(sheet)) ? sheet : '');
+    if (IS_VIEWER) {
+        // No /select-file: the viewer's choice stays in this browser.
+        source.displaySheet = keep(source.displaySheet) || keep(source.scanSheet) || known[0] || '';
+        source.scanSheet = keep(source.scanSheet) || source.displaySheet;
+        source.pushSheet = source.scanSheet;
+        return;
+    }
     const select = (sheetName, scanSheet) => postJson('/select-file', { filename: source.fileId, platform, sheet_name: sheetName, scan_sheet: scanSheet });
     const sheetName = keep(source.displaySheet), scanSheet = keep(source.scanSheet);
     let response = await select(sheetName, scanSheet);
@@ -1544,8 +1576,9 @@ async function updateFileList({ applyGoogleSheetUrl = false } = {}) {
     }
 }
 
+// The viewer has no file choice: each platform shows its source preference's file.
 async function selectFile(fileId) {
-    if (!fileId || uiIsBusy()) return;
+    if (IS_VIEWER || !fileId || uiIsBusy()) return;
     const platform = activePlatform;
     sourceBusy = true; ++sourceRevision; syncScanControls();
     const source = platformSources[platform];
@@ -1567,7 +1600,7 @@ async function selectFile(fileId) {
 }
 
 async function syncGoogleSheet(platform = activePlatform) {
-    if (!isPlatform(platform) || uiIsBusy()) return;
+    if (IS_VIEWER || !isPlatform(platform) || uiIsBusy()) return;
     const controls = sourceControls(platform);
     const url = controls.url.value.trim();
     if (!url) {
@@ -1608,7 +1641,7 @@ async function syncGoogleSheet(platform = activePlatform) {
 }
 
 async function uploadFile(input) {
-    if (uiIsBusy()) return;
+    if (IS_VIEWER || uiIsBusy()) return;
     const platform = activePlatform;
     const file = input.files[0];
     if (!file) return;
@@ -1639,7 +1672,7 @@ async function uploadFile(input) {
 }
 
 async function pushCurrentSheetToGoogle(event, platform = activePlatform) {
-    if (uiIsBusy()) return;
+    if (IS_VIEWER || uiIsBusy()) return;
     if (platform === activePlatform) saveActiveSource();
     const source = platformSources[platform], controls = sourceControls(platform);
     const fileId = source.fileId, sourceSheet = controls.sheet.value || source.pushSheet;
@@ -1680,7 +1713,7 @@ async function pushCurrentSheetToGoogle(event, platform = activePlatform) {
 }
 
 async function downloadCurrentWorkbook() {
-    if (!currentFileId || sourceBusy) return;
+    if (IS_VIEWER || !currentFileId || sourceBusy) return;
     const link = document.createElement('a');
     link.href = `/download-excel?${sourceQuery()}`;
     link.click();
@@ -1734,6 +1767,7 @@ function setPreviewTableVisible(visible) {
     const wrapper = document.querySelector('#previewTable')?.closest('.table-wrap');
     if (wrapper) wrapper.style.display = visible ? '' : 'none';
     document.getElementById('summaryDashboard').classList.toggle('active', !visible);
+    if (IS_VIEWER) setViewerView(visible ? 'links' : 'summary');
 }
 
 function matchesPlatformLink(value, platform = activePlatform) {
@@ -1779,6 +1813,7 @@ function renderPreviewMessage(message, color = '') {
     document.getElementById('previewHeader').innerHTML = '';
     const style = `text-align:center; padding:40px${color ? `; color:${color}` : ''}`;
     document.getElementById('previewBody').innerHTML = `<tr><td colspan="10" style="${style}">${escapeHtml(message)}</td></tr>`;
+    if (IS_VIEWER) resetViewerOverview();
 }
 
 function renderEmptySourcePreview() {
@@ -1791,6 +1826,7 @@ function renderEmptySourcePreview() {
     window.lastWorkbookSheets = [];
     resetProgressCounters(['totalLinks', ...PROGRESS_COUNTER_IDS]);
     renderSheetTabs([], '');
+    if (IS_VIEWER) resetViewerOverview();
     syncScanControls();
 }
 
@@ -1804,6 +1840,7 @@ function applyPreviewSource(data) {
     renderScanSheetOptions(sheets, source.scanSheet);
     source.sheets = sheets;
     source.label = data.fileLabel || source.fileId;
+    if (IS_VIEWER) source.pushSheet = source.displaySheet; // the viewer's sheet picker shows the open tab
     saveActiveSource(); renderSourceRows();
     window.lastWorkbookSheets = sheets;
 }
@@ -1829,6 +1866,7 @@ function previewRowHtml(row, columns) {
 }
 
 function renderPreviewTable(preview) {
+    if (IS_VIEWER) return renderViewerTable(preview);
     const header = document.getElementById('previewHeader');
     const body = document.getElementById('previewBody');
     header.innerHTML = `<tr>${preview.columns.map(column => `<th>${escapeHtml(column)}</th>`).join('')}</tr>`;
@@ -1877,7 +1915,8 @@ async function loadPreview(sheetName = '') {
         if (!scanIsBusy()) {
             document.getElementById('totalLinks').textContent = visibleRows.filter(row => linkColumn && matchingLink(row[linkColumn])).length;
         }
-        renderPreviewTable({ rows: visibleRows, columns });
+        renderPreviewTable({ rows: visibleRows, columns, linkColumn });
+        if (IS_VIEWER) void loadViewerUpdated();
     } catch (error) {
         if (!isCurrent()) return;
         console.error(error);
@@ -1939,7 +1978,7 @@ async function renderSummaryDashboard(dataSheetName = '') {
             </div>
             <div class="summary-table-wrap">
                 <table class="summary-table">
-                    <thead><tr>${columns.map(column => `<th>${escapeHtml(column)}</th>`).join('')}</tr></thead>
+                    <thead><tr>${columns.map(column => `<th>${escapeHtml(IS_VIEWER ? viewerHeaderLabel(column) : column)}</th>`).join('')}</tr></thead>
                     <tbody>${tableRows}</tbody>
                 </table>
             </div>
@@ -1956,10 +1995,10 @@ function scanIsBusy() {
     return ['starting', 'running', 'saving', 'cancelling'].includes(scanPhase);
 }
 
-// A scan, an update install, a Threads cookie action or a source operation is in flight;
+// A scan, a Threads or TikTok cookie action or a source operation is in flight;
 // controls that start another of these stay disabled meanwhile.
 function uiIsBusy() {
-    return scanIsBusy() || desktopUpdateInstalling || threadsCookieBusy || tiktokCookieBusy || sourceBusy;
+    return scanIsBusy() || threadsCookieBusy || tiktokCookieBusy || sourceBusy;
 }
 
 // Why an idle Start button cannot start a scan right now ('' when it can); shown as its tooltip.
@@ -1984,11 +2023,15 @@ function syncScanControls() {
     }
     document.querySelectorAll('.tiktok-cookie-close').forEach(button => { button.disabled = tiktokCookieBusy; });
     const startBlocked = busy ? '' : startBlockedReason();
-    startBtn.disabled = busy || Boolean(startBlocked);
-    startBtn.title = startBlocked;
-    startBtn.innerHTML = busy ? BTN_START_BUSY : BTN_START_IDLE;
-    cancelBtn.disabled = !scanIsBusy() || ['saving', 'cancelling'].includes(scanPhase) || wsReconnectFailures > 0;
-    cancelBtn.innerHTML = scanPhase === 'cancelling' ? BTN_CANCEL_BUSY : BTN_CANCEL_IDLE;
+    if (startBtn) {
+        startBtn.disabled = busy || Boolean(startBlocked);
+        startBtn.title = startBlocked;
+        startBtn.innerHTML = busy ? BTN_START_BUSY : BTN_START_IDLE;
+    }
+    if (cancelBtn) {
+        cancelBtn.disabled = !scanIsBusy() || ['saving', 'cancelling'].includes(scanPhase) || wsReconnectFailures > 0;
+        cancelBtn.innerHTML = scanPhase === 'cancelling' ? BTN_CANCEL_BUSY : BTN_CANCEL_IDLE;
+    }
     for (const input of [workerCountSelect, scrapeModeSelect, scanSheetSelect, proxyUseCheckbox, proxyConfigBtn]) {
         if (input) input.disabled = busy;
     }
@@ -2002,7 +2045,10 @@ function syncScanControls() {
         for (const input of [url, sync, sheet]) if (input) input.disabled = busy;
     }
     document.querySelectorAll('.platform-option').forEach(button => { button.disabled = busy; });
-    document.getElementById('refreshPartnerBtn').disabled = busy || selectedPartners.size === 0;
+    const refreshPartnerBtn = document.getElementById('refreshPartnerBtn');
+    if (refreshPartnerBtn) refreshPartnerBtn.disabled = busy || selectedPartners.size === 0;
+    const viewerScanState = IS_VIEWER && document.getElementById('vwScanState');
+    if (viewerScanState) viewerScanState.hidden = !scanIsBusy();
     setGooglePushState();
 }
 
@@ -2040,7 +2086,7 @@ function showRunSource({ platform, fileId, sheetName }) {
         restoreActiveSource();
         persistSources();
         void reloadActiveSource();
-    } else if (sheetName) {
+    } else if (sheetName && scanSheetSelect) {
         scanSheetSelect.value = sheetName;
     }
 }
@@ -2072,10 +2118,6 @@ function handleSessionSnapshot(session) {
         setWorkspaceTab('live');
     }
     syncScanControls();
-    if (desktopStartupUpdatePending) {
-        desktopStartupUpdatePending = false;
-        void checkDesktopUpdate();
-    }
 }
 
 // ---- WebSocket connection ---------------------------------------------------
@@ -2154,7 +2196,8 @@ function scheduleReconnect() {
 async function probeLocalSession() {
     let reachable = false;
     try {
-        const response = await fetch('/', { cache: 'no-store', credentials: 'same-origin' });
+        const pagePath = window.location?.pathname === '/admin' ? '/admin' : '/';
+        const response = await fetch(pagePath, { cache: 'no-store', credentials: 'same-origin' });
         reachable = Boolean(response.ok);
     } catch {}
     wsRetryPending = false;
@@ -2212,6 +2255,7 @@ function renderThreadsCookieStatus(status) {
 }
 
 async function refreshThreadsCookieStatus() {
+    if (IS_VIEWER) return;
     const revision = ++threadsCookieRevision;
     try {
         const response = await fetch('/threads-session/status', { cache: 'no-store' });
@@ -2356,6 +2400,7 @@ function renderTikTokCookieStatus(status) {
 }
 
 async function refreshTikTokCookieStatus() {
+    if (IS_VIEWER) return;
     const revision = ++tiktokCookieRevision;
     try {
         const response = await fetch('/tiktok-session/status', { cache: 'no-store' });
@@ -2529,7 +2574,7 @@ function buildScanRequest(partners, sheetName) {
 }
 
 function startScraping(partners = [], sheetName = '') {
-    if (uiIsBusy()) return;
+    if (IS_VIEWER || uiIsBusy()) return;
     if (sourcesInitialized && !currentFileId) { notify('Chưa chọn nguồn cho nền tảng này.', 'warn'); return; }
     if (!ws || ws.readyState !== WebSocket.OPEN) {
         notify('Lỗi: Chưa kết nối được server. Vui lòng kiểm tra CMD.', 'error');
@@ -2549,6 +2594,7 @@ function startScraping(partners = [], sheetName = '') {
 }
 
 function cancelScraping() {
+    if (IS_VIEWER) return;
     if (!ws || ws.readyState !== WebSocket.OPEN) {
         notify('Lỗi: Chưa kết nối được server. Vui lòng kiểm tra CMD.', 'error');
         return;
@@ -2948,40 +2994,6 @@ function clearFailedLinks(showLog = true, kind = 'all') {
     }
 }
 
-// ---- Desktop updater --------------------------------------------------------
-function desktopUpdaterInvoke() {
-    return window.__TAURI__?.core?.invoke || null;
-}
-
-async function checkDesktopUpdate() {
-    const invoke = desktopUpdaterInvoke();
-    if (!invoke || desktopUpdateCheckInFlight || !websocketSessionReady || scanIsBusy()) return;
-    desktopUpdateCheckInFlight = true;
-    try {
-        const version = await invoke('check_for_update');
-        if (!version || !websocketSessionReady || scanIsBusy()) return;
-        desktopUpdateInstalling = true;
-        syncScanControls();
-        showToast(`Đang cài đặt Riviu Reports ${version}...`, 'info');
-        await invoke('install_update');
-    } catch (error) {
-        console.warn('Desktop updater check failed:', error);
-        addLog(`Chưa cập nhật được ứng dụng: ${String(error)}`);
-    } finally {
-        desktopUpdateInstalling = false;
-        desktopUpdateCheckInFlight = false;
-        syncScanControls();
-    }
-}
-
-// The socket is still connecting here, so checkDesktopUpdate() would return early;
-// the first check runs from the first session snapshot instead.
-function scheduleDesktopUpdates() {
-    if (!desktopUpdaterInvoke()) return;
-    desktopStartupUpdatePending = true;
-    window.setInterval(() => void checkDesktopUpdate(), 5 * 60 * 1000);
-}
-
 // ---- Partner reports and scan history ---------------------------------------
 const DEFAULT_MIN_VIEWS = 100;
 
@@ -3021,6 +3033,7 @@ function partnerNamesFromSelection() {
 }
 
 async function refreshPartnerLinks() {
+    if (IS_VIEWER) return;
     const partners = partnerNamesFromSelection();
     if (partners.length === 0) {
         addLog('Hãy chọn ít nhất 1 đối tác để cập nhật lại link.');
@@ -3288,9 +3301,11 @@ function updateReportSummary() {
 
     summary.textContent = count === 0
         ? 'Chưa chọn đối tác nào.'
-        : `Đã chọn ${count}/${total} đối tác. Cập nhật lại và xuất báo cáo đều hỗ trợ một hoặc nhiều đối tác.`;
+        : (IS_VIEWER
+            ? `Đã chọn ${count}/${total} đối tác. Xuất báo cáo hỗ trợ một hoặc nhiều đối tác.`
+            : `Đã chọn ${count}/${total} đối tác. Cập nhật lại và xuất báo cáo đều hỗ trợ một hoặc nhiều đối tác.`);
     exportBtn.disabled = count === 0;
-    refreshBtn.disabled = count === 0 || scanIsBusy() || desktopUpdateInstalling;
+    if (refreshBtn) refreshBtn.disabled = count === 0 || scanIsBusy();
     renderSelectedPartnerList();
 }
 
@@ -3304,6 +3319,22 @@ function buildExportFallbackFilename(partners, sheetName) {
         return `${parts.join(' ')}.xlsx`;
     }
     return sheet ? `bao_cao_doi_tac ${sheet} ${stamp}.zip` : `bao_cao_doi_tac ${stamp}.zip`;
+}
+
+// POST /export-report for these partners of the active source and save the file it returns
+// (one .xlsx, or a .zip for several partners). Shared by the report dialog and the viewer page.
+async function downloadPartnerReport(partners, sheetName) {
+    const { applyMinViews, minViews } = reportFilterParams();
+    const res = await postJson('/export-report', { partners, applyMinViews, minViews, sheetName, platform: activePlatform, file_id: currentFileId });
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Không xuất được báo cáo');
+    }
+    const blob = await res.blob();
+    const fallback = buildExportFallbackFilename(partners, sheetName);
+    const filename = filenameFromDisposition(res.headers.get('Content-Disposition') || '', fallback);
+    downloadBlob(blob, filename);
+    return filename;
 }
 
 async function exportPartnerReport() {
@@ -3320,18 +3351,7 @@ async function exportPartnerReport() {
     btn.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> Đang xuất...';
 
     try {
-        const { applyMinViews, minViews } = reportFilterParams();
-        const res = await postJson('/export-report', { partners, applyMinViews, minViews, sheetName: reportSheetName || document.getElementById('reportSheetSelect')?.value || '', platform: activePlatform, file_id: currentFileId });
-        if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            throw new Error(data.error || 'Không xuất được báo cáo');
-        }
-
-        const blob = await res.blob();
-        const sheetName = reportSheetName || document.getElementById('reportSheetSelect')?.value || '';
-        const fallback = buildExportFallbackFilename(partners, sheetName);
-        const filename = filenameFromDisposition(res.headers.get('Content-Disposition') || '', fallback);
-        downloadBlob(blob, filename);
+        const filename = await downloadPartnerReport(partners, reportSheetName || document.getElementById('reportSheetSelect')?.value || '');
         notify(`Đã xuất báo cáo: ${filename}`, 'success');
         closeReportModal();
     } catch (error) {
@@ -3343,11 +3363,429 @@ async function exportPartnerReport() {
     }
 }
 
+// ---- Scheduled automatic runs ("Lịch tự động", server mode admin only) ----------
+// The server (riviu/scheduler.py) owns the timing and the runs; this dialog only edits
+// /schedule and shows its next/last runs and the run log. Times are Asia/Ho_Chi_Minh.
+const SCHEDULE_WORKER_CHOICES = [1, 3, 5, 8, 10, 20, 25, 30, 50];
+// Same order and words as the toolbar's "Chế độ" select.
+const SCHEDULE_MODE_LABELS = Object.freeze({ request: 'Request', hybrid: 'Hybrid (Request + trình duyệt)', browser: 'Trình duyệt' });
+const SCHEDULE_STATUS_LABELS = Object.freeze({ completed: 'Hoàn tất', failed: 'Lỗi', skipped: 'Bỏ qua', stopped: 'Dừng sớm', cancelled: 'Đã hủy' });
+let scheduleDraft = null;
+let scheduleOverview = null;
+let scheduleSaving = false;
+
+function formatScheduleTime(iso) {
+    // The server sends local (+07:00) ISO times; show them as written, whatever the browser's zone.
+    const text = String(iso || '');
+    return text.length >= 16 ? `${text.slice(8, 10)}/${text.slice(5, 7)} ${text.slice(11, 16)}` : '—';
+}
+
+function setScheduleStatus(message, level = '') {
+    const status = document.getElementById('scheduleStatus');
+    if (!status) return;
+    status.className = `proxy-test-result${level ? ` ${level}` : ''}`;
+    status.textContent = message;
+}
+
+async function openScheduleModal() {
+    const modal = document.getElementById('scheduleModal');
+    if (!modal || IS_VIEWER) return;
+    closeCompactDrawers();
+    setModalOpen(modal, true);
+    document.body.style.overflow = 'hidden';
+    setScheduleStatus('');
+    await loadSchedule();
+}
+
+function closeScheduleModal() {
+    const modal = document.getElementById('scheduleModal');
+    if (!modal) return;
+    setModalOpen(modal, false);
+    document.body.style.overflow = '';
+}
+
+async function loadSchedule() {
+    try {
+        const response = await fetch('/schedule', { cache: 'no-store' });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || 'Không tải được lịch tự động.');
+        scheduleOverview = data;
+        scheduleDraft = JSON.parse(JSON.stringify(data.schedule));
+        renderSchedule();
+    } catch (error) {
+        setScheduleStatus(error.message || 'Không tải được lịch tự động.', 'error');
+    }
+}
+
+function scheduleRunCounts(run) {
+    return run?.counts && Number.isFinite(run.counts.total)
+        ? `${formatNumber(run.counts.success ?? 0)}/${formatNumber(run.counts.total)} link`
+        : '';
+}
+
+function scheduleRunSummary(run) {
+    if (!run) return 'Chưa chạy';
+    const counts = scheduleRunCounts(run);
+    return `${formatScheduleTime(run.startedAt)} · ${SCHEDULE_STATUS_LABELS[run.status] || run.status}${counts ? ` · ${counts}` : ''}`;
+}
+
+function scheduleSlotHtml(platform, label, slot, index) {
+    return `<div class="schedule-slot" data-slot-index="${index}">`
+        + `<input type="time" class="text-input schedule-slot-time" value="${escapeHtml(slot.time)}" aria-label="Giờ chạy ${label} ${index + 1}" required>`
+        + `<label class="schedule-check"><input type="checkbox" class="schedule-slot-enabled"${slot.enabled ? ' checked' : ''}> Bật</label>`
+        + `<button type="button" class="icon-btn" onclick="removeScheduleSlot('${platform}', ${index})" title="Xóa giờ này" aria-label="Xóa giờ ${escapeHtml(slot.time)}"><span class="material-icons-outlined">delete</span></button>`
+        + `</div>`;
+}
+
+// The saved cookie's state next to the schedule's cookie option; a scan with an unusable cookie is refused.
+function scheduleCookieNote(key) {
+    const state = (PLATFORMS[key].cookieSession ? threadsCookieState : tiktokCookieState)?.state || 'none';
+    const notes = { none: 'chưa nạp', expired: 'hết hạn', invalid: 'không hợp lệ', checkpoint: 'cần xác minh', valid: 'đã kiểm tra', unchecked: 'chưa kiểm tra' };
+    return notes[state] ? ` (${notes[state]})` : '';
+}
+
+function schedulePlatformHtml(key) {
+    const config = PLATFORMS[key];
+    const item = scheduleDraft.platforms[key] || { slots: [], options: {} };
+    const info = scheduleOverview?.platforms?.[key] || {};
+    const platform = escapeHtml(key), label = escapeHtml(config.label);
+    const options = item.options || {};
+    const slots = item.slots.length
+        ? item.slots.map((slot, index) => scheduleSlotHtml(platform, label, slot, index)).join('')
+        : '<div class="schedule-empty">Chưa có khung giờ nào.</div>';
+    const workerOptions = SCHEDULE_WORKER_CHOICES.map(value => `<option value="${value}"${Number(options.workers) === value ? ' selected' : ''}>${value}</option>`).join('');
+    const modeOptions = Object.entries(SCHEDULE_MODE_LABELS).map(([value, text]) => `<option value="${escapeHtml(value)}"${options.scrapeMode === value ? ' selected' : ''}>${escapeHtml(text)}</option>`).join('');
+    const cookieLabel = config.cookieSession ? 'Cookie Threads' : (config.accountCookie ? 'Cookie TikTok' : '');
+    return `<section class="schedule-platform" data-schedule-platform="${platform}">`
+        + `<div class="schedule-platform-head"><span class="platform-source-name"><img class="platform-brand-icon" src="${escapeHtml(config.icon)}" alt="" aria-hidden="true">${label}</span>`
+        + `<span class="schedule-meta">Lần tới: <b>${escapeHtml(info.nextRun ? formatScheduleTime(info.nextRun) : '—')}</b> · Lần trước: ${escapeHtml(scheduleRunSummary(info.lastRun))}</span></div>`
+        + `<div class="schedule-slots">${slots}</div>`
+        + `<button type="button" class="btn btn-outline btn-compact" onclick="addScheduleSlot('${platform}')"><span class="material-icons-outlined">add</span> Thêm giờ</button>`
+        + `<div class="schedule-options">`
+        + `<label class="scan-setting"><span>Luồng</span><select class="schedule-opt-workers">${workerOptions}</select></label>`
+        + `<label class="scan-setting"><span>Chế độ</span><select class="schedule-opt-mode">${modeOptions}</select></label>`
+        + `<label class="schedule-check"><input type="checkbox" class="schedule-opt-proxy"${options.useProxy ? ' checked' : ''}> Proxy (danh sách đã lưu)</label>`
+        + (cookieLabel ? `<label class="schedule-check"><input type="checkbox" class="schedule-opt-session"${options.useSession ? ' checked' : ''}> ${escapeHtml(cookieLabel)}${escapeHtml(scheduleCookieNote(key))}</label>` : '')
+        + `<label class="schedule-check" title="Sau lượt quét chính, chờ vài phút rồi quét lại một lần các link lỗi tạm thời"><input type="checkbox" class="schedule-opt-retry"${options.retryFailed !== false ? ' checked' : ''}> Quét lại link lỗi</label>`
+        + `</div></section>`;
+}
+
+function scheduleRunRowHtml(run) {
+    const counts = scheduleRunCounts(run);
+    return `<tr data-run-status="${escapeHtml(run.status)}"><td>${escapeHtml(formatScheduleTime(run.startedAt))}<div class="schedule-run-slot">khung ${escapeHtml(run.slot || '')}</div></td>`
+        + `<td>${escapeHtml(PLATFORMS[run.platform]?.label || run.platform || '')}</td>`
+        + `<td class="schedule-run-status">${escapeHtml(SCHEDULE_STATUS_LABELS[run.status] || run.status || '')}</td>`
+        + `<td>${escapeHtml(run.message || '')}${counts ? ` <span class="schedule-run-counts">(${escapeHtml(counts)})</span>` : ''}</td></tr>`;
+}
+
+function renderSchedule() {
+    const container = document.getElementById('schedulePlatforms');
+    if (!container || !scheduleDraft) return;
+    container.innerHTML = PLATFORM_KEYS.map(schedulePlatformHtml).join('');
+    const runsBody = document.getElementById('scheduleRunsBody');
+    const runs = scheduleOverview?.runs || [];
+    if (runsBody) {
+        runsBody.innerHTML = runs.length
+            ? runs.slice(0, 20).map(scheduleRunRowHtml).join('')
+            : '<tr><td colspan="4" class="workspace-empty">Chưa có lượt chạy nào</td></tr>';
+    }
+    const subtitle = document.getElementById('scheduleModalSubtitle');
+    if (subtitle && scheduleOverview?.timezone) {
+        subtitle.textContent = `Đến giờ (${scheduleOverview.timezone}), server nạp lại Google Sheet của nền tảng rồi quét file mới. Không tự tạo sheet trên Google.`;
+    }
+}
+
+// Read the inputs back into the draft before re-rendering or saving.
+function collectScheduleForm() {
+    if (!scheduleDraft) return null;
+    for (const section of document.querySelectorAll('.schedule-platform')) {
+        const key = section.dataset.schedulePlatform;
+        if (!isPlatform(key)) continue;
+        const slots = [...section.querySelectorAll('.schedule-slot')].map(row => ({
+            time: row.querySelector('.schedule-slot-time')?.value || '',
+            enabled: Boolean(row.querySelector('.schedule-slot-enabled')?.checked),
+        }));
+        const options = {
+            workers: Number(section.querySelector('.schedule-opt-workers')?.value || DEFAULT_WORKER_COUNT),
+            scrapeMode: section.querySelector('.schedule-opt-mode')?.value || PLATFORMS[key].defaultScrapeMode,
+            useProxy: Boolean(section.querySelector('.schedule-opt-proxy')?.checked),
+            useSession: Boolean(section.querySelector('.schedule-opt-session')?.checked),
+            retryFailed: section.querySelector('.schedule-opt-retry') ? Boolean(section.querySelector('.schedule-opt-retry').checked) : true,
+        };
+        scheduleDraft.platforms[key] = { slots, options };
+    }
+    return scheduleDraft;
+}
+
+function addScheduleSlot(platform) {
+    if (!isPlatform(platform) || !collectScheduleForm()) return;
+    const slots = scheduleDraft.platforms[platform].slots;
+    const used = new Set(slots.map(slot => slot.time));
+    const time = ['08:00', '12:00', '17:00', '21:00'].find(value => !used.has(value)) || '00:00';
+    slots.push({ time, enabled: true });
+    renderSchedule();
+}
+
+function removeScheduleSlot(platform, index) {
+    if (!isPlatform(platform) || !collectScheduleForm()) return;
+    scheduleDraft.platforms[platform].slots.splice(index, 1);
+    renderSchedule();
+}
+
+function scheduleDraftError(draft) {
+    for (const key of PLATFORM_KEYS) {
+        const times = draft.platforms[key].slots.map(slot => slot.time);
+        if (times.some(time => !/^([01]\d|2[0-3]):[0-5]\d$/.test(time))) return 'Giờ phải có dạng HH:MM.';
+        if (new Set(times).size !== times.length) return `Trùng khung giờ ở ${PLATFORMS[key].label}.`;
+    }
+    return '';
+}
+
+async function saveSchedule() {
+    if (IS_VIEWER || scheduleSaving || !collectScheduleForm()) return;
+    const invalid = scheduleDraftError(scheduleDraft);
+    if (invalid) { setScheduleStatus(invalid, 'error'); return; }
+    scheduleSaving = true;
+    const button = document.getElementById('scheduleSaveBtn');
+    if (button) button.disabled = true;
+    try {
+        const response = await postJson('/schedule', scheduleDraft);
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.error || 'Không lưu được lịch tự động.');
+        scheduleOverview = data;
+        scheduleDraft = JSON.parse(JSON.stringify(data.schedule));
+        renderSchedule();
+        setScheduleStatus('Đã lưu lịch tự động.', 'ok');
+        notify('Đã lưu lịch tự động.', 'success');
+    } catch (error) {
+        setScheduleStatus(error.message || 'Không lưu được lịch tự động.', 'error');
+    } finally {
+        scheduleSaving = false;
+        if (button) button.disabled = false;
+    }
+}
+
+// ---- Viewer report page (server mode `/`, data-role="viewer") ------------------
+// The viewer shows the platform's current report file (its source preference) one sheet at a
+// time: the link table, or the partner summary for a "Tổng kết" tab. "Xuất báo cáo" opens the
+// shared report dialog. It reuses the admin page's source state and reads, and calls nothing
+// outside the viewer allowlist. Unknown metrics stay blank.
+const VIEWER_METRIC_ALIASES = Object.freeze([
+    ['luot xem', 'view', 'views'],
+    ['tim', 'like', 'likes', 'luot thich'],
+    ['binh luan', 'comment', 'comments'],
+    ['chia se', 'share', 'shares'],
+]);
+const VIEWER_LINK_KINDS = Object.freeze({ video: 'video', photo: 'ảnh', post: 'bài' });
+const VIEWER_NO_SOURCE_TEXT = 'Chưa có file báo cáo cho nền tảng này';
+let viewerTable = { columns: [], rows: [], linkColumn: '', numeric: new Set() };
+let viewerUpdated = { key: '', text: '' };
+let viewerUpdatedSequence = 0;
+
+function viewerSourceKey() {
+    return `${activePlatform}|${currentFileId}|${currentSheetName}`;
+}
+
+// A known metric as a number, or null when the cell is blank or not a number (never 0 for unknown).
+function viewerMetricNumber(value) {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'number') return Number.isFinite(value) ? Math.trunc(value) : null;
+    const text = String(value).trim();
+    if (!text) return null;
+    if (/^\d{1,3}([.,]\d{3})+$/.test(text)) return Number(text.replace(/[.,]/g, ''));
+    const compact = text.replace(/[,\s]/g, '');
+    return /^\d+(\.\d+)?$/.test(compact) ? Math.trunc(Number(compact)) : null;
+}
+
+// The metric columns (views, likes, comments, the platform's saves/reposts, shares) in table order.
+function viewerMetricColumns(columns, platform = activePlatform) {
+    const saved = platformConfig(platform).savedMetric;
+    const aliases = [...VIEWER_METRIC_ALIASES, [normalizeVietnameseKey(saved.column), normalizeVietnameseKey(saved.label)]];
+    return columns.filter(column => aliases.some(list => list.includes(normalizeVietnameseKey(column))));
+}
+
+// Workbook headers are often in capitals ("LƯỢT XEM"); the viewer shows them in sentence case.
+function viewerHeaderLabel(column) {
+    const text = String(column || '');
+    if (/^https?:\/\//i.test(text)) return '#'; // a link pasted into the header cell of the index column
+    if (text !== text.toLocaleUpperCase('vi') || text === text.toLocaleLowerCase('vi')) return text;
+    const lower = text.toLocaleLowerCase('vi');
+    return lower.charAt(0).toLocaleUpperCase('vi') + lower.slice(1);
+}
+
+// "https://www.tiktok.com/@kenh/video/7391…" -> "@kenh · video …123456"; the full link stays in the title.
+function viewerShortLink(url) {
+    try {
+        const parsed = new URL(url);
+        const parts = parsed.pathname.split('/').filter(Boolean);
+        const handleIndex = parts.findIndex(part => part.startsWith('@'));
+        if (handleIndex >= 0) {
+            const kind = VIEWER_LINK_KINDS[parts[handleIndex + 1]] || '';
+            const id = parts[handleIndex + 2] || '';
+            const shortId = id.length > 10 ? `…${id.slice(-6)}` : id;
+            const handle = decodeURIComponent(parts[handleIndex]);
+            const shortHandle = handle.length > 20 ? `${handle.slice(0, 19)}…` : handle;
+            return [shortHandle, [kind, shortId].filter(Boolean).join(' ')].filter(Boolean).join(' · ');
+        }
+        const text = parsed.hostname.replace(/^www\./, '') + parsed.pathname.replace(/\/$/, '');
+        return text.length > 34 ? `${text.slice(0, 33)}…` : text;
+    } catch {
+        return url.length > 34 ? `${url.slice(0, 33)}…` : url;
+    }
+}
+
+// The post kind and id after the handle drop out on a phone (.vw-link-detail).
+function viewerShortLinkHtml(url) {
+    const [handle, ...detail] = viewerShortLink(url).split(' · ');
+    return escapeHtml(handle) + (detail.length ? `<span class="vw-link-detail"> · ${escapeHtml(detail.join(' · '))}</span>` : '');
+}
+
+function viewerCellHtml(column, value) {
+    const text = String(value ?? '').trim();
+    if (viewerTable.numeric.has(column)) {
+        const number = viewerMetricNumber(text);
+        return `<td class="vw-num">${number === null ? escapeHtml(text) : formatNumber(number)}</td>`;
+    }
+    if (/^https?:\/\//i.test(text)) {
+        return `<td class="vw-link-cell"><a href="${escapeHtml(text)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(text)}">${viewerShortLinkHtml(text)}</a></td>`;
+    }
+    return `<td title="${escapeHtml(text)}">${escapeHtml(text)}</td>`;
+}
+
+function setViewerText(id, text, title = '') {
+    const node = document.getElementById(id);
+    if (!node) return;
+    node.textContent = text;
+    if (title) node.title = title;
+    else node.removeAttribute?.('title');
+}
+
+// Called by renderPreviewTable() on the viewer page.
+function renderViewerTable(preview) {
+    const linkColumn = preview.linkColumn || '';
+    // The sheet's own "Tổng" row stays out of the link list.
+    const rows = preview.rows.filter(row => !linkColumn || normalizeVietnameseKey(row[linkColumn]) !== 'tong');
+    // Columns that are blank on every row (unused partner slots, spare columns) are left out,
+    // and the link, channel and metrics come right after the first (index) column.
+    const filled = rows.length
+        ? preview.columns.filter(column => rows.some(row => String(row[column] ?? '').trim() !== ''))
+        : preview.columns;
+    const metricColumns = viewerMetricColumns(filled);
+    const channelColumn = filled.find(column => normalizeVietnameseKey(column) === 'ten kenh') || '';
+    const leading = [filled[0], linkColumn, channelColumn, ...metricColumns]
+        .filter((column, index, list) => column && filled.includes(column) && list.indexOf(column) === index);
+    const columns = [...leading, ...filled.filter(column => !leading.includes(column))];
+    viewerTable = {
+        columns, linkColumn, numeric: new Set(metricColumns),
+        rows: rows.map(row => ({ row, text: normalizeVietnameseKey(columns.map(column => row[column] ?? '').join(' ')) })),
+    };
+    document.getElementById('previewHeader').innerHTML = `<tr>${columns.map(column => `<th scope="col"${viewerTable.numeric.has(column) ? ' class="vw-num"' : ''} title="${escapeHtml(column)}">${escapeHtml(viewerHeaderLabel(column))}</th>`).join('')}</tr>`;
+    renderViewerTableRows();
+}
+
+function renderViewerTableRows() {
+    const body = document.getElementById('previewBody');
+    const total = viewerTable.rows.length;
+    const query = normalizeVietnameseKey(document.getElementById('vwTableSearch')?.value || '');
+    const visible = query ? viewerTable.rows.filter(item => item.text.includes(query)) : viewerTable.rows;
+    const colspan = Math.max(viewerTable.columns.length, 1);
+    setViewerText('vwRowCount', query ? `${formatNumber(visible.length)} / ${formatNumber(total)}` : (total ? formatNumber(total) : ''));
+    if (!total) {
+        body.innerHTML = `<tr><td colspan="${colspan}" class="vw-table-empty">Sheet này chưa có link ${escapeHtml(platformConfig().label)}.</td></tr>`;
+    } else if (!visible.length) {
+        body.innerHTML = `<tr><td colspan="${colspan}" class="vw-table-empty">Không có link nào khớp với tìm kiếm.</td></tr>`;
+    } else {
+        body.innerHTML = visible.map(item => `<tr>${viewerTable.columns.map(column => viewerCellHtml(column, item.row[column])).join('')}</tr>`).join('');
+    }
+}
+
+// The link list, the partner summary for a "Tổng kết" tab (setPreviewTableVisible()), or empty.
+function setViewerView(view) {
+    const panel = document.getElementById('vwDataPanel');
+    if (panel) panel.dataset.view = view;
+    const title = document.getElementById('vwDataTitle');
+    if (title?.firstChild) title.firstChild.textContent = view === 'summary' ? 'Tổng kết đối tác ' : 'Danh sách link ';
+    if (view === 'summary') setViewerText('vwRowCount', '');
+}
+
+function renderViewerHeader() {
+    const source = activeSource();
+    const hasSource = Boolean(source.fileId);
+    const label = source.label || source.fileId || '';
+    setViewerText('vwReportTitle', hasSource ? label : VIEWER_NO_SOURCE_TEXT, label);
+    setViewerText('vwReportSheet', hasSource
+        ? (currentSheetName ? `Sheet ${currentSheetName}` : '')
+        : 'Quản trị viên chưa chọn hoặc chưa nạp file cho nền tảng này.');
+    setViewerText('vwReportUpdated', hasSource && viewerUpdated.key === viewerSourceKey() ? viewerUpdated.text : '');
+    const pickers = document.getElementById('vwPickers');
+    if (pickers) pickers.hidden = !hasSource;
+    const exportButton = document.getElementById('vwExportButton');
+    if (exportButton) exportButton.disabled = !hasSource;
+}
+
+function resetViewerOverview() {
+    ++viewerUpdatedSequence;
+    viewerTable = { columns: [], rows: [], linkColumn: '', numeric: new Set() };
+    setViewerText('vwRowCount', '');
+    if (!currentFileId) {
+        setViewerView('empty');
+        document.getElementById('previewBody').innerHTML = `<tr><td colspan="10" class="vw-table-empty">${VIEWER_NO_SOURCE_TEXT}.</td></tr>`;
+    }
+    renderViewerHeader();
+}
+
+function summaryRowValue(row, key) {
+    const column = Object.keys(row || {}).find(name => normalizeVietnameseKey(name) === key);
+    return column ? row[column] : '';
+}
+
+// "27/10/2026-15:14" (the summary's "Cập nhật lần cuối") -> a sortable number, or 0.
+function viewerUpdateStamp(text) {
+    const match = String(text || '').match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\D+(\d{1,2}):(\d{2})/);
+    if (!match) return 0;
+    const [, day, month, year, hour, minute] = match.map(Number);
+    return ((((year * 100 + month) * 100 + day) * 100 + hour) * 100) + minute;
+}
+
+function viewerUpdatedText(summaryRows) {
+    let best = null;
+    for (const row of summaryRows) {
+        const text = String(summaryRowValue(row, 'cap nhat lan cuoi') || '').trim();
+        const stamp = viewerUpdateStamp(text);
+        if (stamp && (!best || stamp > best.stamp)) best = { stamp, text };
+    }
+    if (!best) return 'Chưa có lần quét nào cho sheet này';
+    const match = best.text.match(/(\d{1,2}\/\d{1,2}\/\d{4})\D+(\d{1,2}:\d{2})/);
+    return `Số liệu cập nhật lúc ${match ? `${match[2]}, ${match[1]}` : best.text}`;
+}
+
+// When the open data sheet was last scanned, from its summary tab ("Cập nhật lần cuối").
+async function loadViewerUpdated() {
+    if (!IS_VIEWER || !currentFileId) return;
+    const sequence = ++viewerUpdatedSequence;
+    const fileId = currentFileId, platform = activePlatform, sheet = currentSheetName, key = viewerSourceKey();
+    try {
+        const response = await fetch(`/summary-dashboard?${sourceQuery({ sheet_name: sheet }, platform, fileId)}`);
+        const data = await response.json().catch(() => ({}));
+        if (sequence !== viewerUpdatedSequence || key !== viewerSourceKey()) return;
+        viewerUpdated = { key, text: viewerUpdatedText(response.ok && Array.isArray(data.rows) ? data.rows : []) };
+        renderViewerHeader();
+    } catch {}
+}
+
+// The viewer's sheet picker lists the tabs the admin page shows: data sheets and this
+// platform's own "Tổng kết" tabs, sheets hidden in Excel last.
+function viewerSheetChoices(sheets, platform, hiddenSheets) {
+    const hidden = hiddenSheetSet(hiddenSheets);
+    const tabs = visibleSheetTabs(sheets, platform);
+    return [...tabs.filter(sheet => !hidden.has(sheet)), ...tabs.filter(sheet => hidden.has(sheet))];
+}
+
 // ---- Event wiring and startup -----------------------------------------------
 const area = document.getElementById('uploadArea');
-area.addEventListener('dragover', (event) => { event.preventDefault(); area.classList.add('dragover'); });
-area.addEventListener('dragleave', () => area.classList.remove('dragover'));
-area.addEventListener('drop', (event) => {
+area?.addEventListener('dragover', (event) => { event.preventDefault(); area.classList.add('dragover'); });
+area?.addEventListener('dragleave', () => area.classList.remove('dragover'));
+area?.addEventListener('drop', (event) => {
     event.preventDefault();
     area.classList.remove('dragover');
     const file = event.dataTransfer.files[0];
@@ -3405,8 +3843,11 @@ document.getElementById('historyModal').addEventListener('click', (event) => {
     if (event.target.id === 'historyModal') closeHistoryModal();
 });
 
-document.getElementById('proxyModal').addEventListener('click', (event) => {
+document.getElementById('proxyModal')?.addEventListener('click', (event) => {
     if (event.target.id === 'proxyModal') closeProxyModal();
+});
+document.getElementById('scheduleModal')?.addEventListener('click', (event) => {
+    if (event.target.id === 'scheduleModal') closeScheduleModal();
 });
 
 document.getElementById('threadsCookieModal')?.addEventListener('click', (event) => {
@@ -3455,11 +3896,12 @@ document.addEventListener('keydown', (event) => {
     if (document.getElementById('threadsCookieModal')?.classList.contains('active')) { closeThreadsCookieModal(); return; }
     if (document.getElementById('tiktokCookieModal')?.classList.contains('active')) { closeTikTokCookieModal(); return; }
     if (document.getElementById('guideModal')?.classList.contains('active')) { closeGuideModal(); return; }
+    if (document.getElementById('scheduleModal')?.classList.contains('active')) { closeScheduleModal(); return; }
     if (document.getElementById('reportModal').classList.contains('active')) {
         closeReportModal();
     } else if (document.getElementById('historyModal').classList.contains('active')) {
         closeHistoryModal();
-    } else if (document.getElementById('proxyModal').classList.contains('active')) {
+    } else if (document.getElementById('proxyModal')?.classList.contains('active')) {
         closeProxyModal();
     } else {
         closeCompactDrawers();
@@ -3471,7 +3913,7 @@ document.addEventListener('keydown', (event) => {
 renderPlatformBar();
 renderPlatformSourceRows();
 
-scanSheetSelect.addEventListener('change', () => {
+scanSheetSelect?.addEventListener('change', () => {
     currentScanSheetName = scanSheetSelect.value;
     syncCompactSourceSummary('', currentScanSheetName);
     saveActiveSource();
@@ -3481,9 +3923,13 @@ for (const platform of PLATFORM_KEYS) {
     const controls = sourceControls(platform);
     controls.sheet?.addEventListener('change', () => {
         const sheet = controls.sheet.value;
-        Object.assign(platformSources[platform], { pushSheet: sheet, scanSheet: sheet, displaySheet: sheet });
+        // The viewer may open a "Tổng kết" tab; its report dialog then defaults to that tab's data sheet.
+        const scanSheet = IS_VIEWER && isSummarySheetName(sheet)
+            ? (dataSheetNameForSummaryTab(sheet, platformSources[platform].sheets) || platformSources[platform].scanSheet)
+            : sheet;
+        Object.assign(platformSources[platform], { pushSheet: sheet, scanSheet, displaySheet: sheet });
         if (platform === activePlatform) {
-            renderScanSheetOptions(platformSources[platform].sheets, sheet);
+            renderScanSheetOptions(platformSources[platform].sheets, scanSheet);
             void loadPreview(sheet);
         }
         persistSources(); setGooglePushState();
@@ -3523,5 +3969,4 @@ window.onload = async () => {
     await refreshThreadsCookieStatus();
     await refreshTikTokCookieStatus();
     connectWS();
-    scheduleDesktopUpdates();
 };

@@ -330,6 +330,8 @@ def test_threads_dispatch_forwards_proxy_settings(isolated_backend, monkeypatch,
         worker_count=3, platform="threads", sheet_name="Data", partners=["Partner"],
         scrape_mode=mode, use_proxy=use_proxy, proxy_text=text,
     )))
+    # The run journal's save callback rides along (riviu/scan_journal.py owns its contract).
+    assert len(calls) == 1 and callable(calls[0][1].pop("on_rows_saved"))
     assert calls == [(target, {
         "worker_count": 3, "selected_partners": ["Partner"], "sheet_name": "Data", "mode": mode,
         "base_dir": str(isolated_backend), "use_proxy": use_proxy, "proxy_text": text,

@@ -52,7 +52,7 @@ class WebSocket {static OPEN=1; constructor(url){this.url=url;this.readyState=1;
 const context = vm.createContext({console,document,WebSocket,Map,Set,Date,Number,JSON,Promise,URL,
   URLSearchParams,TextEncoder,
   window:{location:{protocol:'http:',hostname:'localhost',host:'localhost:1231',port:'1231'},
-    matchMedia(){return {matches:true};},addEventListener(){},setInterval(){},__TAURI__:null},
+    matchMedia(){return {matches:true};},addEventListener(){},setInterval(){}},
   setTimeout(){},clearTimeout(){},localStorage:{getItem(){return null;},setItem(){}},
   fetch:async()=>({ok:true,json:async()=>({})}),assert,el,sent,sockets,buttons});
 vm.runInContext(fs.readFileSync('riviu/web/static/app.js','utf8'),context);
@@ -560,74 +560,6 @@ def test_threads_rate_limit_stop_shows_as_stopped_not_failed():
       assert.equal(logs.filter(m=>String(m).includes('THREADS GIỚI HẠN TẦN SUẤT')).length,1);
       assert.equal(logs.filter(m=>String(m).includes('THẤT BẠI')).length,0);
     """)
-
-
-def test_desktop_update_does_not_install_during_scan_or_on_reconnect_before_snapshot():
-    run_js("""
-      (async()=>{
-        const calls=[];
-        window.__TAURI__={core:{invoke:async(name)=>{calls.push(name);return '0.2.0';}}};
-        await checkDesktopUpdate(); assert.equal(calls.length,0);
-        connectWS();
-        sockets[0].onmessage({data:JSON.stringify({type:'session',data:{runId:'run-1',platform:'threads',
-          fileId:'Book.xlsx',sheetName:'Sheet B',running:true,status:{phase:'running',total:1,processed:0,success:0}}})});
-        await checkDesktopUpdate(); assert.equal(calls.length,0);
-        updateProgress({phase:'completed',total:1,processed:1,success:1,done:true});
-        await checkDesktopUpdate(); assert.deepEqual(calls,['check_for_update','install_update']);
-      })()
-    """)
-
-
-def test_desktop_startup_update_check_runs_once_the_first_session_snapshot_arrives():
-    # Startup order in app.js: connectWS() then scheduleDesktopUpdates(), before the socket opens.
-    run_js("""
-      (async()=>{
-        const calls=[];
-        window.__TAURI__={core:{invoke:async(name)=>{calls.push(name);return null;}}};
-        connectWS(); scheduleDesktopUpdates();
-        await Promise.resolve(); assert.deepEqual(calls,[]);
-        const idle={type:'session',data:{running:false}};
-        sockets[0].onmessage({data:JSON.stringify(idle)});
-        assert.deepEqual(calls,['check_for_update']);
-        await Promise.resolve(); await Promise.resolve();
-        sockets[0].onmessage({data:JSON.stringify(idle)});
-        assert.deepEqual(calls,['check_for_update']);
-      })()
-    """)
-
-
-def test_desktop_update_gate_rejects_busy_and_unauthenticated_requests(monkeypatch):
-    from fastapi import FastAPI
-    from fastapi.testclient import TestClient
-    from types import SimpleNamespace
-    from riviu import app as app_state
-    from riviu import desktop_server
-
-    isolated_app = FastAPI()
-    monkeypatch.setattr(desktop_server, 'app', isolated_app)
-    monkeypatch.setattr(app_state, 'DESKTOP_UPDATE_PENDING', False, raising=False)
-    monkeypatch.setattr(app_state, 'SOURCE_BUSY', False, raising=False)
-    monkeypatch.setattr(app_state, 'scan_running', lambda: True)
-    server = SimpleNamespace(should_exit=False)
-    desktop_server.register_desktop_routes(server, 'fixture-token')
-    client = TestClient(isolated_app)
-    headers = {'X-Riviu-Shutdown': 'fixture-token'}
-    assert client.post('/_desktop/prepare-update').status_code == 403
-    assert client.post('/_desktop/prepare-update', headers=headers).status_code == 409
-    assert app_state.DESKTOP_UPDATE_PENDING is False
-    monkeypatch.setattr(app_state, 'scan_running', lambda: False)
-    monkeypatch.setattr(app_state, 'SOURCE_BUSY', True)
-    assert client.post('/_desktop/prepare-update', headers=headers).status_code == 409
-    monkeypatch.setattr(app_state, 'SOURCE_BUSY', False)
-    monkeypatch.setattr(desktop_server.scraper, 'browser_cleanup_pending', lambda: True)
-    assert client.post('/_desktop/prepare-update', headers=headers).status_code == 409
-    monkeypatch.setattr(desktop_server.scraper, 'browser_cleanup_pending', lambda: False)
-    assert client.post('/_desktop/prepare-update', headers=headers).status_code == 200
-    assert app_state.DESKTOP_UPDATE_PENDING is True
-    assert client.post('/_desktop/cancel-update', headers=headers).status_code == 200
-    assert app_state.DESKTOP_UPDATE_PENDING is False
-    assert client.post('/_desktop/shutdown', headers=headers).status_code == 200
-    assert server.should_exit is True
 
 
 def test_real_dom_threads_snapshot_keeps_blank_metrics_and_locked_controls():

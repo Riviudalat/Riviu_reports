@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, Response
 from riviu import scan_state
 from riviu import server_context as context
 from riviu import source_files
+from riviu.api import security
 from riviu.google_sheets_sync import oauth_status
 from riviu.source_files import (
     SourceRequestError,
@@ -47,7 +48,7 @@ router = APIRouter()
 
 
 @router.get("/list-files")
-async def list_files(file_id: str | None = None, platform: str = "tiktok"):
+async def list_files(request: Request = None, file_id: str | None = None, platform: str = "tiktok"):
     try:
         platform = validate_platform(platform)
         # One listing per request: validation, the label and the response all read it.
@@ -81,7 +82,11 @@ async def list_files(file_id: str | None = None, platform: str = "tiktok"):
         "googleSheetUrl": target_sheet_url,
         "platform": platform,
     }
-    oauth = await asyncio.to_thread(context.google_io, oauth_status, context.EXCEL_DIR)
+    if request is not None and security.request_role(request) == "viewer":
+        # The public viewer never pushes: skip the Google status (and its lock and network calls).
+        oauth = {"configured": False, "ready": False}
+    else:
+        oauth = await asyncio.to_thread(context.google_io, oauth_status, context.EXCEL_DIR)
     state.update({
         "googlePushReady": bool(target_spreadsheet_id) and oauth.get("ready", oauth.get("valid")),
         "googleOAuthConfigured": oauth.get("configured"),

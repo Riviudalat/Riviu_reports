@@ -45,7 +45,7 @@ def real_format_key():
 
 
 @pytest.fixture
-def desktop(tmp_path, monkeypatch):
+def local_app(tmp_path, monkeypatch):
     monkeypatch.setattr(server_mode, "ACTIVE", None)
     monkeypatch.setattr(backend, "EXCEL_DIR", str(tmp_path))
     with TestClient(backend.app, base_url="http://127.0.0.1:1231") as client:
@@ -79,39 +79,39 @@ def upload(client, payload, name="key.json"):
     (key_json(token_uri="https://attacker.example/token"), "googleapis.com"),
     ({"installed": {"client_id": "x"}}, "service_account"),
 ])
-def test_upload_rejects_files_that_are_not_service_account_keys(desktop, tmp_path, payload, message):
-    response = upload(desktop, payload)
+def test_upload_rejects_files_that_are_not_service_account_keys(local_app, tmp_path, payload, message):
+    response = upload(local_app, payload)
     assert response.status_code == 400 and message in response.json()["error"]
     assert "SYNTHETIC-NOT-A-KEY" not in response.text
     assert not (tmp_path / "data" / sync.SERVICE_ACCOUNT_FILENAME).exists()
 
 
-def test_upload_rejects_non_json_and_oversized_files(desktop):
-    assert upload(desktop, b"not json").status_code == 400
-    assert upload(desktop, key_json(), name="key.txt").status_code == 400
+def test_upload_rejects_non_json_and_oversized_files(local_app):
+    assert upload(local_app, b"not json").status_code == 400
+    assert upload(local_app, key_json(), name="key.txt").status_code == 400
     huge = json.dumps(key_json(padding="x" * (sync.SERVICE_ACCOUNT_MAX_BYTES + 1))).encode()
-    assert upload(desktop, huge).status_code == 400
+    assert upload(local_app, huge).status_code == 400
 
 
-def test_desktop_upload_stores_key_shows_email_and_status_then_removes_it(desktop, tmp_path, monkeypatch):
+def test_source_mode_upload_stores_key_shows_email_and_status_then_removes_it(local_app, tmp_path, monkeypatch):
     monkeypatch.setattr(sync, "try_load_credentials", lambda _base: None)
-    before = desktop.get("/google-oauth-status").json()
+    before = local_app.get("/google-oauth-status").json()
     assert before["activeCredential"] == "none" and before["serviceAccount"]["configured"] is False
 
-    response = upload(desktop, key_json())
+    response = upload(local_app, key_json())
     assert response.status_code == 200 and response.json() == {"success": True, "email": EMAIL}
     stored = json.loads((tmp_path / "data" / sync.SERVICE_ACCOUNT_FILENAME).read_text(encoding="utf-8"))
-    # Desktop keeps it like the OAuth client file; only the fields google-auth needs.
+    # Source mode keeps it like the OAuth client file; only the fields google-auth needs.
     assert stored["client_email"] == EMAIL and "auth_provider_x509_cert_url" not in stored
 
-    status = desktop.get("/google-oauth-status").json()
+    status = local_app.get("/google-oauth-status").json()
     assert status["activeCredential"] == "service_account" and status["ready"] is True
     assert status["serviceAccount"] == {"configured": True, "email": EMAIL, "error": ""}
     assert "SYNTHETIC-NOT-A-KEY" not in json.dumps(status)
 
-    assert desktop.delete("/google-service-account").json() == {"success": True}
+    assert local_app.delete("/google-service-account").json() == {"success": True}
     assert not (tmp_path / "data" / sync.SERVICE_ACCOUNT_FILENAME).exists()
-    assert desktop.get("/google-oauth-status").json()["activeCredential"] == "none"
+    assert local_app.get("/google-oauth-status").json()["activeCredential"] == "none"
 
 
 def test_server_mode_encrypts_the_key_at_rest_and_binds_it_to_the_data_root(tmp_path, monkeypatch):
@@ -223,7 +223,7 @@ def test_drawer_shows_the_service_account_email_and_the_share_instruction():
     })()""")
 
 
-def test_index_page_has_the_upload_button_share_instruction_and_remove_action(desktop):
-    html = desktop.get("/").text
+def test_index_page_has_the_upload_button_share_instruction_and_remove_action(local_app):
+    html = local_app.get("/").text
     assert "Nạp tài khoản dịch vụ" in html and "Gỡ tài khoản dịch vụ" in html
     assert "Chia sẻ Google Sheet cho email này với quyền <b>Người chỉnh sửa</b>" in html

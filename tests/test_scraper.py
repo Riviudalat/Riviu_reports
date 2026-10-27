@@ -2118,6 +2118,11 @@ def test_build_result_sheet_keeps_blank_metrics_blank_and_reads_text_numbers():
     result = wb[build_result_sheet(wb, [{"sheet_name": "Data", "row": 2}], "now")]
 
     assert [result.cell(row=2, column=column).value for column in range(5, 10)] == [1234, None, 0, None, 5]
+    # Status is a visible column after "Cập nhật lần cuối"; only the URL bookkeeping is hidden.
+    assert [result.cell(row=1, column=column).value for column in range(11, 15)] == [
+        "Cập nhật lần cuối", "TRẠNG THÁI QUÉT", "__TTBD_RESOLVED_URL", "__TTBD_SOURCE_URL",
+    ]
+    assert [result.column_dimensions[letter].hidden for letter in "LMN"] == [False, True, True]
     wb.close()
 
 

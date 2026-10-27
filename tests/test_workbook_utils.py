@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from riviu.workbook_utils import (
     dataframe_partner_columns,
@@ -442,6 +443,44 @@ def test_shared_column_lookup_matches_unaccented_headers_instead_of_appending():
     assert worksheet_ensure_column(sheet, "TIM") == 4 and sheet.cell(row=1, column=4).value == "TIM"
 
 
+@pytest.mark.parametrize("legacy_header", ["__TTBD_SCAN_STATUS", "__THREADS_SCAN_STATUS"])
+def test_scan_status_column_migrates_legacy_hidden_column_in_place(tmp_path, legacy_header):
+    import openpyxl
+    from openpyxl.worksheet.dimensions import ColumnDimension
+    from riviu.workbook_utils import (
+        SCAN_STATUS_ALIASES,
+        worksheet_ensure_scan_status_column,
+        worksheet_find_column_index,
+        worksheet_headers,
+    )
+
+    path = tmp_path / "legacy.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.append(["Link", "TIM", legacy_header, "__TTBD_RESOLVED_URL", "__TTBD_SOURCE_URL"])
+    sheet.append(["https://www.tiktok.com/@a/video/1", 5, "Success", "", ""])
+    # Excel stores adjacent hidden columns as one <col min="3" max="5" hidden="1"> range.
+    sheet.column_dimensions["C"] = ColumnDimension(sheet, index="C", min=3, max=5, hidden=True, width=9)
+    book.save(path)
+    sheet = openpyxl.load_workbook(path).active
+
+    headers = worksheet_headers(sheet)
+    assert worksheet_find_column_index(sheet, SCAN_STATUS_ALIASES, headers=headers) == 3
+    assert worksheet_ensure_scan_status_column(sheet, headers=headers) == 3
+    assert worksheet_ensure_scan_status_column(sheet) == 3
+    assert headers == worksheet_headers(sheet) == [
+        "Link", "TIM", "TRẠNG THÁI QUÉT", "__TTBD_RESOLVED_URL", "__TTBD_SOURCE_URL",
+    ]
+    assert sheet.cell(row=2, column=3).value == "Success"
+    sheet.parent.save(path)
+    saved = openpyxl.load_workbook(path).active
+    hidden = {}
+    for dimension in saved.column_dimensions.values():
+        for index in range(dimension.min, dimension.max + 1):
+            hidden[index] = (dimension.hidden, dimension.width)
+    assert hidden == {3: (False, 9), 4: (True, 9), 5: (True, 9)}
+
+
 def test_atomic_save_temp_files_are_never_listed_as_workbooks(tmp_path):
     import openpyxl
     from riviu.workbook_utils import save_workbook_atomic, workbook_file_entries
@@ -699,7 +738,7 @@ def test_read_sheet_preview_flags_video_link_rows(tmp_path):
     assert not rows[2].get("_videoLink")
 
 
-def test_persisted_scan_metadata_drives_workbook_preview_and_is_hidden(tmp_path):
+def test_persisted_scan_metadata_drives_workbook_preview_and_url_columns_are_hidden(tmp_path):
     import openpyxl
 
     file_path = tmp_path / "preview-scan-metadata.xlsx"
@@ -761,7 +800,12 @@ def test_persisted_scan_metadata_drives_workbook_preview_and_is_hidden(tmp_path)
     assert preview["data"][0].get("_videoLink") is True
     assert not preview["data"][1].get("_videoLink")
     assert not preview["data"][2].get("_videoLink")
+    # A legacy hidden status column is shown under its visible name; the URL columns stay hidden.
     assert "__TTBD_SCAN_STATUS" not in preview["columns"]
+    assert preview["columns"][-1] == "TRẠNG THÁI QUÉT"
+    assert [row["TRẠNG THÁI QUÉT"] for row in preview["data"]] == [
+        "Success", "Error: Không đọc được số liệu", "Success",
+    ]
     assert "__TTBD_RESOLVED_URL" not in preview["columns"]
     assert "__TTBD_SOURCE_URL" not in preview["columns"]
 
@@ -1019,3 +1063,80 @@ def test_preview_drops_midnight_time_from_date_only_cells(tmp_path):
 
     assert [row["Ngày"] for row in rows] == ["01/08/2026", "01/08/2026"]
     assert [row["Cập nhật"] for row in rows] == ["02/08/2026-14:30", "03/08/2026"]
+
+
+def _inline_string_workbook(path, cells):
+    """A one-sheet .xlsx whose text cells are inline strings, as a Google Sheets export writes them."""
+    import zipfile
+
+    main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    rows = "".join(f'<row r="{index}"><c r="A{index}" {cell}</c></row>' for index, cell in enumerate(cells, start=1))
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            '</Types>'))
+        archive.writestr("_rels/.rels", (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            f'<Relationship Id="rId1" Type="{rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>'))
+        archive.writestr("xl/workbook.xml", (
+            f'<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="{main}" xmlns:r="{rel}">'
+            '<sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>'))
+        archive.writestr("xl/_rels/workbook.xml.rels", (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            f'<Relationship Id="rId1" Type="{rel}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>'))
+        archive.writestr("xl/worksheets/sheet1.xml", (
+            f'<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="{main}"><sheetData>{rows}</sheetData></worksheet>'))
+
+
+INLINE_STRING_CELLS = [
+    't="inlineStr"><is><t>https://www.tiktok.com/@kênh/video/1</t></is>',
+    't="inlineStr"><is><t xml:space="preserve">  Tiệm  cà phê </t></is>',
+    't="inlineStr"><is><t/></is>',
+    't="inlineStr"><is><t>A &amp; B &lt;3</t></is>',
+    't="inlineStr"><is><r><rPr><b/></rPr><t>Đậm</t></r><r><t> thường</t></r></is>',
+    't="inlineStr"><is><t>漢字</t><rPh sb="0" eb="1"><t>かんじ</t></rPh></is>',
+    't="inlineStr"><is><t>bỏ qua</t></is><f>"công thức"</f>',
+    't="inlineStr">',
+]
+
+
+@pytest.mark.parametrize("read_only", [False, True], ids=["full", "read-only"])
+def test_inline_string_fast_path_reads_the_same_values_as_openpyxl(tmp_path, monkeypatch, read_only):
+    """Google-export text cells read through the fast path equal openpyxl's own parse."""
+    import openpyxl
+    from openpyxl.cell import text as openpyxl_text
+    from openpyxl.worksheet import _reader
+    from riviu.workbook import inline_strings
+
+    path = tmp_path / "google-export.xlsx"
+    _inline_string_workbook(path, INLINE_STRING_CELLS)
+
+    def read_cells():
+        book = openpyxl.load_workbook(path, read_only=read_only)
+        values = [(cell.value, cell.data_type) for row in book["Data"].iter_rows() for cell in row]
+        book.close()
+        return values
+
+    assert _reader.Text is inline_strings.InlineText
+    slow_parses = []
+    original_from_tree = openpyxl_text.Text.from_tree
+    monkeypatch.setattr(openpyxl_text.Text, "from_tree", lambda node: slow_parses.append(node) or original_from_tree(node))
+    fast = read_cells()
+    # Only the rich-text and phonetic cells need openpyxl's generic parser.
+    assert len(slow_parses) == 2
+
+    monkeypatch.setattr(_reader, "Text", openpyxl_text.Text)
+    assert fast == read_cells()
+    assert fast[:3] == [
+        ("https://www.tiktok.com/@kênh/video/1", "s"),
+        ("  Tiệm  cà phê ", "s"),
+        ("", "s"),
+    ]

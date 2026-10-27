@@ -1,6 +1,6 @@
 """Server mode (RIVIU_SERVER_MODE=1): shared-password login, origin checks, cookie store, Google paste-back.
 
-Synthetic password, key, cookies and OAuth client only; no network. Desktop/source mode
+Synthetic password, key, cookies and OAuth client only; no network. Source mode
 behaviour stays owned by the existing security tests (test_backend_review_fixes.py).
 """
 
@@ -100,21 +100,18 @@ def test_password_hash_verifies_only_the_password_and_hides_it():
 
 
 def test_unauthenticated_requests_redirect_or_get_401(server):
-    page = server.get("/", headers={"Accept": "text/html"})
-    assert page.status_code == 303 and page.headers["location"] == "/login"
-    assert server.get("/list-files").status_code == 401
+    # The public viewer and its allowlist are owned by test_server_viewer_admin.py; here the
+    # admin side: HTML goes to the login (back to /admin after it), APIs answer 401.
+    page = server.get("/admin", headers={"Accept": "text/html"})
+    assert page.status_code == 303 and page.headers["location"] == "/login?next=/admin"
+    assert server.get("/proxy-list").status_code == 401
     health = server.get("/healthz")
     assert health.status_code == 200 and health.text == "ok"
     login_page = server.get("/login")
     assert login_page.status_code == 200 and 'name="password"' in login_page.text
     assert "Nhập mật khẩu chung" not in login_page.text  # the subtitle was removed
-    # Only what the login page loads is public; the app script and guide screenshots are not.
     assert server.get("/static/styles.css").status_code == 200
     assert server.get("/logo.png").status_code == 200
-    assert server.get("/static/app.js").status_code == 401
-    assert server.get("/static/guide/01-dang-nhap.png").status_code == 401
-    login(server)
-    assert server.get("/static/guide/01-dang-nhap.png").status_code == 200
 
 
 def test_wrong_password_is_rejected_without_a_session(server):
@@ -122,21 +119,21 @@ def test_wrong_password_is_rejected_without_a_session(server):
     assert response.status_code == 401
     assert "Sai mật khẩu" in response.text
     assert security.AUTH_COOKIE not in cookie_header(response)
-    assert server.get("/list-files").status_code == 401
+    assert server.get("/proxy-list").status_code == 401
 
 
 def test_correct_password_sets_secure_cookie_and_grants_access(server):
     response = login(server)
-    assert response.status_code == 303 and response.headers["location"] == "/"
+    assert response.status_code == 303 and response.headers["location"] == "/admin"
     header = cookie_header(response).lower()
     assert security.AUTH_COOKIE.lower() in header
     for flag in ("httponly", "secure", "samesite=strict", "max-age=604800", "path=/"):
         assert flag in header
-    page = server.get("/")
+    page = server.get("/admin")
     assert page.status_code == 200
     assert "Đăng xuất" in page.text and 'action="/logout"' in page.text
     assert 'id="guideButton"' in page.text  # the usage guide is in every mode
-    assert server.get("/list-files").status_code == 200
+    assert server.get("/proxy-list").status_code == 200
     # Only a digest of the token is persisted.
     token = server.cookies.get(security.AUTH_COOKIE)
     stored = json.loads(open(server_mode.ACTIVE.sessions_path, encoding="utf-8").read())
@@ -147,18 +144,19 @@ def test_logout_revokes_the_session_token(server):
     login(server)
     token = server.cookies.get(security.AUTH_COOKIE)
     response = server.post("/logout", headers={"Origin": PUBLIC})
-    assert response.status_code == 303 and response.headers["location"] == "/login"
+    # Back to the public viewer, which needs no login.
+    assert response.status_code == 303 and response.headers["location"] == "/"
     server.cookies.clear()
-    replay = server.get("/list-files", headers={"Cookie": f"{security.AUTH_COOKIE}={token}"})
+    replay = server.get("/proxy-list", headers={"Cookie": f"{security.AUTH_COOKIE}={token}"})
     assert replay.status_code == 401
 
 
 def test_password_change_invalidates_existing_sessions(server, tmp_path, monkeypatch):
     login(server)
-    assert server.get("/list-files").status_code == 200
+    assert server.get("/proxy-list").status_code == 200
     new_hash = server_mode.hash_password("another-synthetic-password", n=2 ** 14)
     monkeypatch.setattr(server_mode, "ACTIVE", server_mode.load_config(server_env(tmp_path, RIVIU_PASSWORD_HASH=new_hash)))
-    assert server.get("/list-files").status_code == 401
+    assert server.get("/proxy-list").status_code == 401
 
 
 def test_failed_logins_are_rate_limited_per_client(server):
@@ -193,14 +191,10 @@ def test_foreign_host_and_origin_are_rejected_public_origin_accepted(server):
     assert server.get("/healthz", headers={"Host": "127.0.0.1:1231"}).status_code == 200
 
 
-def test_desktop_control_routes_are_not_exposed(server):
-    login(server)
-    assert server.post("/_desktop/shutdown", headers={"Origin": PUBLIC}).status_code == 404
-
-
-def test_websocket_requires_a_login_session(server):
+def test_websocket_requires_the_public_origin(server):
+    # Without a login the socket is the read-only viewer's (test_server_viewer_admin.py).
     with pytest.raises(WebSocketDisconnect):
-        with server.websocket_connect("wss://113-161-254-76.sslip.io/ws", headers={"Origin": PUBLIC}):
+        with server.websocket_connect("wss://113-161-254-76.sslip.io/ws", headers={"Origin": "https://evil.example"}):
             pass
     login(server)
     token = server.cookies.get(security.AUTH_COOKIE)

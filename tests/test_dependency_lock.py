@@ -2,7 +2,7 @@
 
 It must stay the exact export of uv.lock, or a machine on the pip path (old
 capnhat.bat, or setup.bat when uv cannot be installed) runs other versions than
-CI tested.
+the tests ran against.
 """
 
 from pathlib import Path

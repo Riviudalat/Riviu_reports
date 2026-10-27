@@ -1,7 +1,6 @@
 """Offline native-DOM regressions for source state, preview routing, preferences and scan panels.
 
-No server, accounts, production workbooks or external network are used. These
-browser checks do not claim Tauri/WebView restart or real updater acceptance.
+No server, accounts, production workbooks or external network are used.
 """
 
 from pathlib import Path
@@ -154,23 +153,6 @@ def test_stale_summary_error_cannot_repopulate_empty_platform(page):
     assert page.locator('#previewTable').is_visible()
 
 
-@pytest.mark.parametrize("failure", ["check_for_update", "install_update"])
-def test_updater_rejection_is_handled_and_controls_recover(page, failure):
-    result = page.evaluate("""async failure => {
-        websocketSessionReady=true; const calls=[];
-        window.__TAURI__={core:{invoke:async command=>{
-            calls.push(command); if(command===failure) throw Error('Fixture IPC failure'); return '0.2.0';
-        }}};
-        await checkDesktopUpdate();
-        return {calls,inFlight:desktopUpdateCheckInFlight,installing:desktopUpdateInstalling};
-    }""", failure)
-    assert result["calls"] == (["check_for_update"] if failure == "check_for_update" else ["check_for_update", "install_update"])
-    assert result["inFlight"] is False
-    assert result["installing"] is False
-    assert page.locator("#startBtn").is_enabled()
-    assert "Fixture IPC failure" in page.locator("#logs").inner_text()
-
-
 def test_preferences_load_once_and_server_beats_origin_storage(page):
     result = page.evaluate("""async () => {
         localStorage.setItem('riviuPlatformSourcesV1',JSON.stringify({
@@ -318,17 +300,16 @@ def test_preference_writes_serialize_coalesce_and_omit_runtime_secrets(page):
     assert set(result["calls"][0]["sources"]["tiktok"]) == {"fileId", "displaySheet", "scanSheet", "pushSheet", "url"}
 
 
-@pytest.mark.parametrize("busy", ["sourceBusy", "desktopUpdateInstalling", "scanPhase"])
-def test_preference_saves_wait_for_scan_source_or_update_to_finish(page, busy):
+@pytest.mark.parametrize("busy", ["sourceBusy", "scanPhase"])
+def test_preference_saves_wait_for_scan_or_source_to_finish(page, busy):
     result = page.evaluate("""async busy => {
         sourcePreferencesReady=true; const writes=[];
         fetch=async(url,options)=>{writes.push(JSON.parse(options.body));return {ok:true,json:async()=>({success:true})};};
         if(busy==='scanPhase') scanPhase='running';
-        else if(busy==='sourceBusy') sourceBusy=true;
-        else desktopUpdateInstalling=true;
+        else sourceBusy=true;
         platformSources.tiktok.fileId='data/A.xlsx'; persistSources(); await Promise.resolve();
         const countBusy=writes.length;
-        scanPhase='idle'; sourceBusy=false; desktopUpdateInstalling=false; syncScanControls();
+        scanPhase='idle'; sourceBusy=false; syncScanControls();
         for(let i=0;i<6;i++) await Promise.resolve();
         return {countBusy,writes};
     }""", busy)

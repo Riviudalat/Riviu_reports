@@ -1,7 +1,6 @@
 import ast
 import io
 import asyncio
-import json
 from datetime import datetime
 from html.parser import HTMLParser
 from pathlib import Path
@@ -83,18 +82,7 @@ def test_preview_counter_does_not_break_websocket_dispatch():
     assert "else if (message.type === 'data') appendData(message.row, message);" in websocket_source
 
 
-def test_desktop_updater_only_activates_inside_tauri():
-    source = (Path(__file__).parents[1] / "riviu" / "web" / "static" / "app.js").read_text(encoding="utf-8")
-
-    assert "function desktopUpdaterInvoke" in source
-    assert "window.__TAURI__?.core?.invoke" in source
-    assert "function scheduleDesktopUpdates" in source
-    assert "setInterval(() => void checkDesktopUpdate(), 5 * 60 * 1000)" in source
-    assert "window.confirm(`Riviu Reports ${version}" not in source
-
-
-def test_desktop_bundle_keeps_resources_separate_from_user_data_and_release_ci(monkeypatch, tmp_path):
-    import sys
+def test_resources_live_in_the_package_and_user_data_at_the_repo_root(monkeypatch, tmp_path):
     from riviu import paths
 
     root = Path(__file__).parents[1]
@@ -105,87 +93,15 @@ def test_desktop_bundle_keeps_resources_separate_from_user_data_and_release_ci(m
     assert Path(paths.STATIC_DIR, "app.js").is_file()
     assert Path(paths.LOGO_PATH).is_file()
     assert Path(paths.PLATFORM_ICONS_DIR, "tiktok.png").is_file()
+    # The server image points it at its /data volume.
     monkeypatch.setenv("RIVIU_DATA_DIR", str(tmp_path))
     assert paths.data_dir() == str(tmp_path)
-    # Frozen: resources (and the fallback data dir) come from the PyInstaller bundle root.
-    monkeypatch.delenv("RIVIU_DATA_DIR")
-    monkeypatch.setattr(sys, "_MEIPASS", str(tmp_path / "bundle"), raising=False)
-    assert paths.resource_root() == str(tmp_path / "bundle")
-
-    sidecar_source = (root / "desktop" / "build_sidecar.py").read_text(encoding="utf-8")
-    sidecar_entrypoint = (root / "riviu" / "desktop_server.py").read_text(encoding="utf-8")
-    config = (root / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8")
-    workflow = (root / ".github" / "workflows" / "desktop-release.yml").read_text(encoding="utf-8")
-
-    from desktop import build_sidecar
-
-    # The bundle keeps riviu/web at the path riviu/paths.py resolves under sys._MEIPASS.
-    assert Path(paths.WEB_DIR).relative_to(paths.RESOURCE_ROOT).as_posix() == build_sidecar.WEB_ASSETS_TARGET
-    assert "add_data(ROOT / WEB_ASSETS_TARGET, WEB_ASSETS_TARGET)" in sidecar_source
-    assert '"/_desktop/shutdown"' in sidecar_entrypoint
-    assert 'PLAYWRIGHT_BROWSERS_PATH' in sidecar_source
-    assert 'PLAYWRIGHT_BROWSERS_PATH' in sidecar_entrypoint
-    assert '"--additional-hooks-dir"' in sidecar_source
-    assert (root / "desktop" / "pyinstaller-hooks" / "hook-playwright.async_api.py").is_file()
-    # Windows bundles the one-folder server as resources that lib.rs spawns from
-    # the resource dir; macOS and Linux keep the one-file externalBin sidecar.
-    platform_bundles = {
-        name: json.loads((root / "src-tauri" / f"tauri.{name}.conf.json").read_text(encoding="utf-8"))["bundle"]
-        for name in ("windows", "macos", "linux")
-    }
-    lib_source = (root / "src-tauri" / "src" / "lib.rs").read_text(encoding="utf-8")
-    assert platform_bundles["windows"]["resources"] == {"binaries/riviu-server/": "riviu-server/"}
-    assert "externalBin" not in platform_bundles["windows"] and '"externalBin"' not in config
-    assert 'const SERVER_RESOURCE_DIR: &str = "riviu-server";' in lib_source
-    for name in ("macos", "linux"):
-        assert platform_bundles[name]["externalBin"] == ["binaries/riviu-server"]
-    assert '"createUpdaterArtifacts": true' in config
-    assert "windows-2022" in workflow
-    assert "macos-15-intel" in workflow
-    assert "macos-14" in workflow
-    assert "TAURI_SIGNING_PRIVATE_KEY" in workflow
-
-
-def test_sidecar_bundles_only_the_headless_shell_browser():
-    from desktop import bundle_contents as bundle
-
-    dry_run = (
-        "Chrome Headless Shell 147.0.7727.15 (playwright chromium-headless-shell v1217)\n"
-        r"  Install location:    C:\venv\Lib\site-packages\playwright\driver\package\.local-browsers\chromium_headless_shell-1217" "\n"
-        "  Download url:        https://cdn.playwright.dev/builds/cft/147.0.7727.15/win64/chrome-headless-shell-win64.zip\n"
-        "\n"
-        "FFmpeg (playwright ffmpeg v1011)\n"
-        "  Install location:    /venv/lib/python3.12/site-packages/playwright/driver/package/.local-browsers/ffmpeg-1011\n"
-        "\n"
-        "Winldd (playwright winldd v1007)\n"
-        r"  Install location:    C:\venv\Lib\site-packages\playwright\driver\package\.local-browsers\winldd-1007" "\n"
-    )
-    browsers = bundle.browser_dirs_from_install_dry_run(dry_run)
-    assert browsers == ["chromium_headless_shell-1217", "winldd-1007"]
-
-    package = r"C:\venv\Lib\site-packages\playwright\driver\package"
-    headless_shell = rf"{package}\.local-browsers\chromium_headless_shell-1217\chrome-headless-shell-win64\chrome-headless-shell.exe"
-    winldd = f"{package}/.local-browsers/winldd-1007/PrintDeps.exe"
-    driver_file = f"{package}/lib/server/registry/index.js"
-    sources = [
-        rf"{package}\.local-browsers\chromium-1217\chrome-win64\chrome.exe",  # stale full Chromium
-        headless_shell,
-        f"{package}/.local-browsers/ffmpeg-1011/ffmpeg-win64.exe",
-        f"{package}/.local-browsers/.links/0123abcd",
-        winldd,
-        driver_file,
-    ]
-    assert [source for source in sources if bundle.keep_playwright_data(source, browsers)] == [
-        headless_shell, winldd, driver_file,
-    ]
-    with pytest.raises(RuntimeError):
-        bundle.browser_dirs_from_install_dry_run(dry_run.replace("chromium_headless_shell-1217", "chromium-1217"))
 
 
 def test_production_browser_launches_are_headless_chromium_only():
-    """The desktop bundle ships only chromium-headless-shell, which Playwright uses
-    for headless Chromium launches without a channel. Anything else would fail in
-    the installed app with a missing-executable error."""
+    """The server image installs only chromium-headless-shell (`playwright install
+    --only-shell`), which Playwright uses for headless Chromium launches without a
+    channel. Anything else would fail there with a missing-executable error."""
     root = Path(__file__).parents[1]
     launches = 0
     for path in sorted((root / "riviu").rglob("*.py")):
@@ -219,29 +135,6 @@ def test_production_browser_launches_are_headless_chromium_only():
                     if keyword.arg == "headless":
                         assert isinstance(keyword.value, ast.Constant) and keyword.value.value is True, path.name
     assert launches == 3
-
-
-def test_bundled_google_discovery_documents_cover_every_api_the_app_builds():
-    import googleapiclient
-    from desktop.bundle_contents import GOOGLE_DISCOVERY_DOCS
-
-    root = Path(__file__).parents[1]
-    built = set()
-    for path in sorted((root / "riviu").rglob("*.py")):
-        tree = ast.parse(path.read_text(encoding="utf-8"))
-        builders = {
-            alias.asname or alias.name for node in ast.walk(tree)
-            if isinstance(node, ast.ImportFrom) and node.module == "googleapiclient.discovery"
-            for alias in node.names if alias.name == "build"
-        }
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name) and node.func.id in builders:
-                api, version = (argument.value for argument in node.args[:2])
-                assert not any(keyword.arg in {"discoveryServiceUrl", "static_discovery"} for keyword in node.keywords)
-                built.add(f"{api}.{version}")
-    assert built and built <= set(GOOGLE_DISCOVERY_DOCS)
-    documents = Path(googleapiclient.__file__).parent / "discovery_cache" / "documents"
-    assert all((documents / f"{name}.json").is_file() for name in GOOGLE_DISCOVERY_DOCS)
 
 
 def test_template_has_no_duplicate_ids():

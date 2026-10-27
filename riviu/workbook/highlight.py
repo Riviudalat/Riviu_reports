@@ -5,13 +5,14 @@ from openpyxl.styles import PatternFill
 from riviu.workbook.columns import (
     worksheet_find_column_index,
     worksheet_find_link_column_index,
+    worksheet_headers,
     worksheet_partner_column_indexes,
 )
 from riviu.workbook.constants import (
     LEGACY_PHOTO_LINK_FILL_COLOR,
+    SCAN_STATUS_ALIASES,
     SINGLE_LINK_FILL_COLOR,
     TTBD_RESOLVED_URL_HEADER,
-    TTBD_SCAN_STATUS_HEADER,
     TTBD_SOURCE_URL_HEADER,
     VIDEO_LINK_FILL_COLOR,
 )
@@ -20,21 +21,28 @@ from riviu.workbook.partners import worksheet_row_partners
 from riviu.workbook.text import clean_text
 
 
-def _cell_has_fill(cell, color):
+def _cell_has_fill(cell, colors):
+    """True when the cell has a solid fill of `colors` (one color or several; the fill is read once)."""
+    if isinstance(colors, str):
+        colors = (colors,)
     fill = cell.fill
     if fill is None or fill.fill_type != "solid":
         return False
-    return str(fill.fgColor.rgb or "").upper().endswith(color)
+    rgb = str(fill.fgColor.rgb or "").upper()
+    return any(rgb.endswith(color) for color in colors)
 
 
-def _video_highlight_columns(worksheet):
+def _video_highlight_columns(worksheet, headers):
     """Column indexes read by should_highlight_video_link, keyed by its keyword names."""
+    def find(header):
+        return worksheet_find_column_index(worksheet, [header], headers=headers)
+
     return {
-        "likes": (worksheet_find_column_index(worksheet, ["TIM"]), 0),
-        "shares": (worksheet_find_column_index(worksheet, ["CHIA SẺ"]), 0),
-        "scan_status": (worksheet_find_column_index(worksheet, [TTBD_SCAN_STATUS_HEADER]), ""),
-        "resolved_url": (worksheet_find_column_index(worksheet, [TTBD_RESOLVED_URL_HEADER]), ""),
-        "resolved_source_url": (worksheet_find_column_index(worksheet, [TTBD_SOURCE_URL_HEADER]), ""),
+        "likes": (find("TIM"), 0),
+        "shares": (find("CHIA SẺ"), 0),
+        "scan_status": (worksheet_find_column_index(worksheet, SCAN_STATUS_ALIASES, headers=headers), ""),
+        "resolved_url": (find(TTBD_RESOLVED_URL_HEADER), ""),
+        "resolved_source_url": (find(TTBD_SOURCE_URL_HEADER), ""),
     }
 
 
@@ -54,20 +62,24 @@ def _repaint_row(worksheet, row_index, max_column, highlighted, fill, stale_colo
         cell = worksheet.cell(row=row_index, column=column_index)
         if highlighted:
             cell.fill = fill
-        elif any(_cell_has_fill(cell, color) for color in stale_colors):
+        elif _cell_has_fill(cell, stale_colors):
             cell.fill = _CLEAR_FILL
 
 
 def _link_sheet(workbook, data_sheet_name):
-    """(worksheet, link column index) of the named sheet, or None without the sheet or a link column."""
+    """(worksheet, link column index, header row) of the named sheet, or None without the sheet or a link column.
+
+    The header row is read once: each read walks every cell for max_column.
+    """
     source_sheet = clean_text(data_sheet_name)
     if not source_sheet or source_sheet not in workbook.sheetnames:
         return None
     worksheet = workbook[source_sheet]
-    link_column = worksheet_find_link_column_index(worksheet)
+    headers = worksheet_headers(worksheet)
+    link_column = worksheet_find_link_column_index(worksheet, headers=headers)
     if not link_column:
         return None
-    return worksheet, link_column
+    return worksheet, link_column, headers
 
 
 def highlight_single_partner_link_rows(workbook, data_sheet_name):
@@ -75,15 +87,15 @@ def highlight_single_partner_link_rows(workbook, data_sheet_name):
     sheet = _link_sheet(workbook, data_sheet_name)
     if sheet is None:
         return 0
-    worksheet, link_column = sheet
+    worksheet, link_column, headers = sheet
 
-    partner_columns = worksheet_partner_column_indexes(worksheet)
+    partner_columns = worksheet_partner_column_indexes(worksheet, headers=headers)
     if not partner_columns:
         return 0
-    video_columns = _video_highlight_columns(worksheet)
+    video_columns = _video_highlight_columns(worksheet, headers)
 
     max_row = worksheet.max_row or 0
-    max_column = worksheet.max_column or 0
+    max_column = len(headers)
     if max_row < 2 or max_column < 1:
         return 0
 
@@ -108,11 +120,11 @@ def highlight_video_link_rows(workbook, data_sheet_name):
     sheet = _link_sheet(workbook, data_sheet_name)
     if sheet is None:
         return 0
-    worksheet, link_column = sheet
-    video_columns = _video_highlight_columns(worksheet)
+    worksheet, link_column, headers = sheet
+    video_columns = _video_highlight_columns(worksheet, headers)
 
     max_row = worksheet.max_row or 0
-    max_column = worksheet.max_column or 0
+    max_column = len(headers)
     if max_row < 2 or max_column < 1:
         return 0
 

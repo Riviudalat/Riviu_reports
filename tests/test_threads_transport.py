@@ -764,7 +764,7 @@ def test_rate_limit_stops_the_run_and_leaves_unrequested_rows_untouched(tmp_path
     try:
         sheet = saved["Data"]
         likes = worksheet_find_column_index(sheet, ["TIM"])
-        status = worksheet_find_column_index(sheet, [threads.THREADS_SCAN_STATUS_HEADER])
+        status = worksheet_find_column_index(sheet, [threads.SCAN_STATUS_HEADER])
         assert [sheet.cell(row, likes).value for row in range(2, 8)] == [5, 5, 99, 99, 99, 99]
         assert [sheet.cell(row, status).value for row in range(2, 8)] == [
             "Success", "Success", "Error: HTTP 429", None, None, None]
@@ -777,3 +777,61 @@ def test_rate_limit_stops_the_run_and_leaves_unrequested_rows_untouched(tmp_path
     assert any("HTTP 429" in log and "3/6" in log and "Cookie Threads" in log for log in events.logs)
     history = json.loads((tmp_path / "data" / "threads_scan_history.json").read_text(encoding="utf-8"))["history"]
     assert history[0]["phase"] == "rate_limited"
+
+
+def quarantine_run(tmp_path, monkeypatch, proxies, limited):
+    """Six posts over anonymous proxy routes, one worker (sheet order); `limited(url, host)` says
+    which requests Threads answers with HTTP 429."""
+    path = workbook(tmp_path, count=6)
+    calls = []
+
+    def request(url, timeout=20, proxy_config=None, session_cookies=None):
+        calls.append((url[-1], proxy_config["host"]))
+        if limited(url, proxy_config["host"]):
+            return threads.failure("HTTP 429", "rate_limit")
+        return metrics(views=150, likes=5, comments=0, reposts=0)
+
+    monkeypatch.setattr(threads, "THREADS_HTTP_MIN_INTERVAL", 0)
+    monkeypatch.setattr(threads, "THREADS_HTTP_JITTER", 0)
+    monkeypatch.setattr(threads, "async_playwright", NoBrowser)
+    monkeypatch.setattr(threads, "fetch_threads_http", request)
+    events = StatusEvents()
+    configs = [{"type": "http", "host": host, "port": 8080, "username": "fixture-user", "password": "fixture-password", "enabled": True}
+               for host in proxies]
+    asyncio.run(threads.run_threads_scraper(path, events, worker_count=1, mode="request", sheet_name="Data",
+                                            use_proxy=True, proxy_configs=configs))
+    saved = openpyxl.load_workbook(path)
+    try:
+        sheet = saved["Data"]
+        status = worksheet_find_column_index(sheet, [threads.SCAN_STATUS_HEADER])
+        statuses = [sheet.cell(row, status).value for row in range(2, 8)]
+    finally:
+        saved.close()
+    return calls, statuses, events
+
+
+def test_a_429_retires_only_its_proxy_route_and_the_others_keep_scanning(tmp_path, monkeypatch):
+    calls, statuses, events = quarantine_run(
+        tmp_path, monkeypatch, ["a.example", "b.example", "c.example"], lambda url, host: host == "b.example")
+    # Round-robin a, b, c, ...; b answers 429 for post 1 and is never used again. Post 4, queued
+    # for b, goes to the next route still in use; post 1 itself is not re-sent on another proxy.
+    assert sorted(calls) == [("0", "a.example"), ("1", "b.example"), ("2", "c.example"),
+                             ("3", "a.example"), ("4", "c.example"), ("5", "c.example")]
+    assert calls.index(("1", "b.example")) < calls.index(("4", "c.example"))
+    assert statuses == ["Success", "Error: HTTP 429", "Success", "Success", "Success", "Success"]
+    final = events.statuses[-1]
+    assert final["done"] and "stopReason" not in final and final["processed"] == 6
+    retired = [log for log in events.logs if "ngừng dùng proxy này" in log]
+    assert len(retired) == 1 and "proxy 2 (HTTP b.example:8080)" in retired[0] and "Còn 2/3 proxy" in retired[0]
+    assert "fixture-user" not in json.dumps(events.logs) and "fixture-password" not in json.dumps(events.logs)
+
+
+def test_the_run_stops_once_every_proxy_route_got_a_429(tmp_path, monkeypatch):
+    calls, statuses, events = quarantine_run(tmp_path, monkeypatch, ["a.example", "b.example"], lambda url, host: True)
+    assert calls == [("0", "a.example"), ("1", "b.example")]  # no direct fallback, nothing after
+    assert statuses == ["Error: HTTP 429", "Error: HTTP 429", None, None, None, None]
+    final = events.statuses[-1]
+    assert final["done"] and final["stopReason"] == "rate_limit"
+    assert any("trên cả 2 proxy" in log and "2/6" in log for log in events.logs)
+    history = json.loads((tmp_path / "data" / "threads_scan_history.json").read_text(encoding="utf-8"))["history"]
+    assert history[0]["phase"] == "rate_limited" and history[0]["retiredRoutes"] == 2

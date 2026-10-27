@@ -102,50 +102,59 @@ async def sync_google_sheet(data: dict):
 
     with scan_state.source_operation():
         try:
-            spreadsheet_id = parse_google_spreadsheet_id(source_url)
-            base_dir = context.EXCEL_DIR
-            def download_and_publish():
-                spreadsheet_title = fetch_google_spreadsheet_title(source_url)
-                timestamp_filename = format_filename_datetime()
-                file_label = google_sheet_sync_label(spreadsheet_title)
-                desired_id = google_sheet_file_id_from_title(spreadsheet_title, timestamp_filename)
-                desired_path = safe_join(base_dir, desired_id)
-                os.makedirs(os.path.dirname(desired_path), exist_ok=True)
-                with tempfile.NamedTemporaryFile(prefix="_import-", suffix=".xlsx", dir=os.path.dirname(desired_path), delete=False) as staged:
-                    staged_path = staged.name
-                try:
-                    context.google_io(sync_download_google_sheet, base_dir, source_url, spreadsheet_id, staged_path)
-                    preview = validate_workbook(staged_path)
-                    data_sheets = find_data_sheet_names(staged_path)
-                    preview["currentSheet"] = data_sheets[0] if data_sheets else ""
-                    target_path = publish_new_workbook(staged_path, desired_path)
-                finally:
-                    os.unlink(staged_path)
-                file_id = os.path.relpath(target_path, base_dir).replace("\\", "/")
-                register_google_sheet_source(base_dir, file_id, source_url, title=file_label)
-                return file_id, file_label, preview
-            file_id, file_label, preview = await context.complete_blocking(download_and_publish)
-            selected_sheet = preview.get("currentSheet", "")
-            if activate:
-                source_files.select_source(file_id, selected_sheet, selected_sheet)
-            await scan_state.manager.broadcast_log(
-                f"Đã nạp Google Sheet thành file mới: {file_label} → {os.path.basename(file_id)} • sheet={selected_sheet} • url={source_url}",
-                level="OK",
-            )
-            return {
-                "success": True,
-                "file": file_id,
-                "file_id": file_id,
-                "label": file_label,
-                "sheets": preview.get("sheets", []),
-                "currentSheet": selected_sheet,
-                "scanSheet": selected_sheet,
-                "spreadsheetId": spreadsheet_id,
-                "platform": platform,
-                "activate": activate,
-            }
+            return await sync_google_sheet_source(source_url, platform, activate=activate)
         except Exception as error:
             return JSONResponse(content={"error": f"Lỗi đồng bộ Google Sheet: {str(error)}"}, status_code=500)
+
+
+async def sync_google_sheet_source(source_url, platform, *, activate):
+    """Download a Google Sheet into a new workbook, register its source and (optionally) make it
+    the legacy current selection. Shared by "Nạp sheet" and the scheduler; the caller validates
+    the platform and holds the source gate. Raises on any failure."""
+    spreadsheet_id = parse_google_spreadsheet_id(source_url)
+    base_dir = context.EXCEL_DIR
+    def download_and_publish():
+        spreadsheet_title = fetch_google_spreadsheet_title(source_url)
+        timestamp_filename = format_filename_datetime()
+        file_label = google_sheet_sync_label(spreadsheet_title)
+        desired_id = google_sheet_file_id_from_title(spreadsheet_title, timestamp_filename)
+        desired_path = safe_join(base_dir, desired_id)
+        os.makedirs(os.path.dirname(desired_path), exist_ok=True)
+        with tempfile.NamedTemporaryFile(prefix="_import-", suffix=".xlsx", dir=os.path.dirname(desired_path), delete=False) as staged:
+            staged_path = staged.name
+        try:
+            context.google_io(sync_download_google_sheet, base_dir, source_url, spreadsheet_id, staged_path)
+            preview = validate_workbook(staged_path)
+            data_sheets = find_data_sheet_names(staged_path)
+            preview["currentSheet"] = data_sheets[0] if data_sheets else ""
+            preview["dataSheets"] = data_sheets
+            target_path = publish_new_workbook(staged_path, desired_path)
+        finally:
+            os.unlink(staged_path)
+        file_id = os.path.relpath(target_path, base_dir).replace("\\", "/")
+        register_google_sheet_source(base_dir, file_id, source_url, title=file_label)
+        return file_id, file_label, preview
+    file_id, file_label, preview = await context.complete_blocking(download_and_publish)
+    selected_sheet = preview.get("currentSheet", "")
+    if activate:
+        source_files.select_source(file_id, selected_sheet, selected_sheet)
+    await scan_state.manager.broadcast_log(
+        f"Đã nạp Google Sheet thành file mới: {file_label} → {os.path.basename(file_id)} • sheet={selected_sheet} • url={source_url}",
+        level="OK",
+    )
+    return {
+        "success": True,
+        "file": file_id,
+        "file_id": file_id,
+        "label": file_label,
+        "sheets": preview.get("sheets", []),
+        "dataSheets": preview.get("dataSheets", []),
+        "currentSheet": selected_sheet,
+        "scanSheet": selected_sheet,
+        "spreadsheetId": spreadsheet_id,
+        "platform": platform,
+        "activate": activate,
+    }
 
 
 @router.get("/google-oauth-status")

@@ -76,7 +76,7 @@ def test_encrypted_server_store_never_writes_plaintext_and_is_separate_from_thre
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="DPAPI is Windows-only")
-def test_desktop_dpapi_store_never_writes_plaintext(tmp_path):
+def test_windows_dpapi_store_never_writes_plaintext(tmp_path):
     store = session.default_store(tmp_path)
     normalized = session.normalize_tiktok_cookies(export(cookie()))
     store.save(normalized)
@@ -272,7 +272,7 @@ def test_scan_start_passes_cookies_only_with_the_toggle(monkeypatch, tmp_path):
     monkeypatch.setattr(scan_service, "resolve_source_file", lambda *_args: ("book.xlsx", str(path), None, "tiktok"))
     store = MemoryStore()
     store.saved = session.normalize_tiktok_cookies(export(cookie()))
-    monkeypatch.setattr(server_context, "tiktok_session_manager", lambda: session.TikTokSession("unused", store=store))
+    monkeypatch.setattr(server_context, "tiktok_session_manager", lambda: session.TikTokSession("unused", store=store, verifier=lambda _cookies: "valid"))
     _, default = asyncio.run(scan_service.prepare_scan_start({"platform": "tiktok", "file_id": "book.xlsx"}))
     _, toggled = asyncio.run(scan_service.prepare_scan_start({"platform": "tiktok", "file_id": "book.xlsx", "use_tiktok_session": True}))
     assert "tiktok_cookies" not in default

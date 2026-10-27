@@ -11,15 +11,16 @@ to their owning module on both read and write (e.g. `riviu.app.EXCEL_DIR = path`
 import os
 import sys
 import types
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from riviu import scan_state, server_context, server_mode
-from riviu.api import auth, export, google, pages, proxy, scan, security, sources, threads_session, tiktok_session
+from riviu import scan_service, scan_state, scheduler, server_context, server_mode
+from riviu.api import auth, export, google, pages, proxy, scan, schedule, security, sources, threads_session, tiktok_session
 from riviu.workbook_utils import ensure_data_dir
 
-# Public names kept importable from `riviu.app` (tests, desktop_server, older callers).
+# Public names kept importable from `riviu.app` (tests, older callers).
 from riviu.api.export import export_report, report_partners  # noqa: F401
 from riviu.api.google import (  # noqa: F401
     delete_google_service_account,
@@ -112,7 +113,7 @@ _STATE_OWNERS = {
         "GOOGLE_IO_LOCK", "GOOGLE_LOGIN_LOCK",
     )},
     **{name: scan_state for name in (
-        "manager", "SCRAPE_TASK", "SCAN_STARTING", "SOURCE_BUSY", "DESKTOP_UPDATE_PENDING",
+        "manager", "SCRAPE_TASK", "SCAN_STARTING", "SOURCE_BUSY",
     )},
 }
 
@@ -146,7 +147,22 @@ server_mode.activate_from_environment()
 
 os.makedirs(server_context.EXCEL_DIR, exist_ok=True)
 
-app = FastAPI()
+@asynccontextmanager
+async def lifespan(_app):
+    # Scheduled automatic runs and resuming a scan the previous process left unfinished
+    # (riviu/scan_journal.py) exist only on a server. The resume starts first, so a slot
+    # due at the same minute is skipped as busy.
+    if server_mode.ACTIVE is not None:
+        scan_service.schedule_resume()
+        scheduler.start()
+    try:
+        yield
+    finally:
+        await scan_service.stop_resume()
+        await scheduler.stop()
+
+
+app = FastAPI(lifespan=lifespan)
 
 _STATIC_DIR = os.path.join(server_context.APP_RESOURCE_DIR, "static")
 if os.path.isdir(_STATIC_DIR):
@@ -164,6 +180,7 @@ for _router in (
     threads_session.router,
     tiktok_session.router,
     scan.router,
+    schedule.router,
 ):
     app.include_router(_router)
 

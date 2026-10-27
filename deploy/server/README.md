@@ -1,7 +1,7 @@
 # Riviu Reports trên server (chế độ server)
 
 Chạy cùng ứng dụng trên một máy Linux cho cả nhóm, sau nginx với HTTPS, bảo vệ bằng **một mật khẩu chung**.
-Mọi người dùng chung dữ liệu; mỗi lúc chỉ chạy được một phiên quét (như bản desktop).
+Mọi người dùng chung dữ liệu; mỗi lúc chỉ chạy được một phiên quét (như chế độ source).
 
 - Ứng dụng chạy trong Docker, chỉ nghe `127.0.0.1:18110`. Cổng công khai duy nhất là nginx (80 → 443).
 - Dữ liệu: `/srv/riviu/data` (workbook, OAuth Google, proxy, lịch sử, cookie Threads đã mã hoá, phiên đăng nhập).
@@ -69,8 +69,8 @@ các bind kiểu `:443`; đừng đổi thành `listen 443`.
 2. **Nguồn dữ liệu → Nạp OAuth**: tải lên file OAuth client Google (loại *Desktop app*).
 3. **Đăng nhập Google**: bấm link trong hộp thoại, cho phép quyền. Trình duyệt sẽ chuyển tới
    `http://localhost:…/?state=…&code=…` và báo không tải được trang: sao chép **toàn bộ địa chỉ** đó dán vào
-   hộp thoại rồi bấm *Xác nhận*. Server kiểm tra `state` và đổi mã bằng PKCE, lưu token như bản desktop.
-4. Cookie Threads (nếu dùng): nhập như bản desktop; trên server được mã hoá AES-GCM bằng `secret.key`.
+   hộp thoại rồi bấm *Xác nhận*. Server kiểm tra `state` và đổi mã bằng PKCE, lưu token như chế độ source.
+4. Cookie Threads (nếu dùng): nhập như chế độ source; trên server được mã hoá AES-GCM bằng `secret.key`.
 
 ## Đổi mật khẩu
 
@@ -102,7 +102,7 @@ Giữ file sao lưu ở nơi riêng tư vì có token Google và khoá. Khôi ph
 
 | Biến | Ý nghĩa |
 | --- | --- |
-| `RIVIU_SERVER_MODE=1` | Bật chế độ server (mặc định tắt; desktop/source không đổi) |
+| `RIVIU_SERVER_MODE=1` | Bật chế độ server (mặc định tắt; chế độ source không đổi) |
 | `RIVIU_PUBLIC_ORIGIN` | Địa chỉ công khai, Host/Origin phải khớp |
 | `RIVIU_PASSWORD_HASH` / `RIVIU_PASSWORD_HASH_FILE` | Bản băm scrypt của mật khẩu chung |
 | `RIVIU_SECRET_KEY_FILE` | Khoá 32 byte base64, quyền 0600, ngoài thư mục dữ liệu |

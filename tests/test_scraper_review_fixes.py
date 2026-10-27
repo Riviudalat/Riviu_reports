@@ -758,6 +758,43 @@ def test_total_row_placement_does_constant_whole_sheet_scans(monkeypatch):
     assert large < 100  # the old per-row walk made 400+ here
 
 
+def test_scan_setup_and_finish_read_each_header_row_once_per_step(tmp_path, monkeypatch):
+    # max_column walks every cell (about 0.1 s on a 1,900-row month sheet). Setup
+    # read it 86 times and the summary/highlight step 23 times, one walk per
+    # header lookup; a step now reads the header row once.
+    from openpyxl.worksheet.worksheet import Worksheet
+
+    path = tmp_path / "partners.xlsx"
+    book = openpyxl.Workbook()
+    sheet = book.active
+    sheet.title = "Data"
+    sheet.append(["Link", "Tên Kênh", "LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "CHIA SẺ", "Đối tác", None])
+    for index in range(20):
+        sheet.append([f"https://www.tiktok.com/@demo/video/{index + 1}", "Demo", 10, 1, 0, 0, 0, "A", "B" if index % 2 else None])
+    book.save(path)
+    book.close()
+
+    scans = []
+    getter = Worksheet.max_column.fget
+    monkeypatch.setattr(Worksheet, "max_column", property(lambda ws: scans.append(1) or getter(ws)))
+
+    scan = scraper.runner._TikTokScan(str(path), None, sheet_name="Data", selected_names=[], partner_label="", save_every=25)
+    setup_scans = len(scans)
+    scans.clear()
+    scraper.runner._prepare_final_workbook(scan, create_result_sheet=False, summary_update_time="01/01/2026")
+    try:
+        assert scan.total == 20
+        assert setup_scans <= 8
+        assert len(scans) <= 12
+        # The missing columns are still appended right after the 9 headers.
+        data = scan.workbook["Data"]
+        assert [data.cell(row=1, column=index).value for index in range(10, 14)] == [
+            "TRẠNG THÁI QUÉT", "Cập nhật lần cuối", "__TTBD_RESOLVED_URL", "__TTBD_SOURCE_URL",
+        ]
+    finally:
+        scan.workbook.close()
+
+
 def test_scan_setup_and_finish_keep_the_event_loop_responsive(tmp_path, monkeypatch):
     path = _rows_fixture(tmp_path, 3)
     monkeypatch.setattr(scraper.runner, "async_playwright", _NoBrowser)
@@ -816,6 +853,41 @@ def test_completed_scan_writes_the_workbook_once_at_the_end(tmp_path, monkeypatc
     try:
         assert [saved["Data"].cell(row, 3).value for row in range(2, links + 2)] == [999] * links
         assert saved["Data"].cell(links + 2, 1).value == "TỔNG"
+    finally:
+        saved.close()
+
+
+def test_slow_autosaves_are_spaced_by_their_own_duration(tmp_path, monkeypatch):
+    # A whole-workbook save of a multi-month report takes 10-25 s; 31 autosaves of
+    # a 1,900-link month spent 820 s saving. After a save of S seconds the next
+    # autosave waits 4*S, while every result still reaches the file.
+    path = _rows_fixture(tmp_path, 21)
+    monkeypatch.setattr(scraper.runner, "async_playwright", _NoBrowser)
+    monkeypatch.setattr(scraper.workers, "_run_request_scrape", _success_for_url)
+    now = [0.0]
+    monkeypatch.setattr(scraper.runner, "_autosave_clock", lambda: now[0])
+    saves = []
+    save = scraper.workbook_io.save_workbook_atomic
+
+    def slow_save(workbook, destination):
+        saves.append(now[0])
+        now[0] += 10.0  # each save "takes" 10 s
+        return save(workbook, destination)
+
+    def result_after_a_second(index, url, **kwargs):
+        now[0] += 1.0
+        return _success_for_url(index, url, **kwargs)
+
+    monkeypatch.setattr(scraper.workbook_io, "save_workbook_atomic", slow_save)
+    monkeypatch.setattr(scraper.workers, "_run_request_scrape", result_after_a_second)
+    asyncio.run(scraper.run_scraper(path, worker_count=1, retries=0, save_every=5, sheet_name="Data", base_dir=tmp_path))
+
+    # Due at 5, 10, 15 and 20 results: the first runs, the next waits 40 s past its
+    # end (about 40 results away), so only the final save follows.
+    assert len(saves) == 2
+    saved = openpyxl.load_workbook(path)
+    try:
+        assert [saved["Data"].cell(row, 3).value for row in range(2, 23)] == [999] * 21
     finally:
         saved.close()
 

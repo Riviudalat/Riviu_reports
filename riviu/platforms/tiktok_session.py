@@ -5,7 +5,7 @@ open for a logged-in viewer. With the toggle on, a scan sends these cookies with
 TikTok page fetches (riviu/platforms/tiktok/cookies.py); without it nothing changes.
 
 Same rules as the Threads vault (riviu/platforms/threads_session.py): Cookie-Editor JSON
-only, exact cookie validation, OS secure store on desktop (DPAPI/Keychain/SecretService)
+only, exact cookie validation, OS secure store in source mode (DPAPI/Keychain/SecretService)
 or the AES-GCM file in server mode, no plaintext fallback. Cookie values never appear in
 exceptions, logs, API status, WebSocket messages, history files or workbooks.
 """

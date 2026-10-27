@@ -44,7 +44,7 @@ tab **Keys** trên Google Cloud.
 - File được kiểm tra trước khi lưu: phải có `"type": "service_account"`, `client_email` và
   `private_key`; `token_uri` (nếu có) phải là địa chỉ `googleapis.com`. Chỉ giữ các trường cần thiết.
 - Lưu ở `data/google_service_account.json` trong thư mục dữ liệu (ghi atomic).
-  Bản desktop lưu giống file OAuth client. **Chế độ server** mã hoá AES-256-GCM bằng khoá
+  Chế độ source lưu giống file OAuth client. **Chế độ server** mã hoá AES-256-GCM bằng khoá
   `RIVIU_SECRET_KEY_FILE` (cùng khoá với kho cookie), gắn với thư mục dữ liệu, nên file không
   chứa khoá hay email ở dạng rõ. Khoá không bao giờ được ghi vào log hay trả về API;
   `/google-oauth-status` chỉ trả email và trường `activeCredential`
