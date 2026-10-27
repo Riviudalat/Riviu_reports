@@ -676,3 +676,104 @@ def test_slow_hybrid_fallbacks_leave_http_slots_draining(tmp_path, monkeypatch):
     assert peak["total"] <= 5  # one route never carries more than the worker count
     assert time.monotonic() - started < 5
     assert sorted(item["worker"] for item in events.data) == ["Hybrid"] * 4 + ["Request"] * 8
+
+
+def test_route_pacer_spaces_requests_per_route_on_a_deterministic_clock():
+    now = [0.0]
+    starts = []
+
+    async def sleep(seconds):
+        now[0] += seconds
+
+    pacer = threads._RoutePacer(0.8, 0.4, clock=lambda: now[0], sleep=sleep, rand=lambda: 0.5)
+
+    async def request(route):
+        await pacer.wait(route)
+        starts.append((route, round(now[0], 6)))
+
+    async def scenario():
+        await asyncio.gather(request("a"), request("b"))
+        await asyncio.gather(request("a"), request("a"))
+
+    asyncio.run(scenario())
+    # Route "a": 0, then 0 + 0.8 + 0.4 * 0.5, then 1.0 later again; route "b" has its own budget.
+    assert starts == [("a", 0.0), ("b", 0.0), ("a", 1.0), ("a", 2.0)]
+
+
+def test_request_run_paces_http_and_retries_across_workers(tmp_path, monkeypatch):
+    path = workbook(tmp_path, count=3)
+    waits = []
+
+    async def record_sleep(seconds):
+        waits.append(round(seconds, 6))
+
+    monkeypatch.setattr(threads, "THREADS_HTTP_MIN_INTERVAL", 0.8)
+    monkeypatch.setattr(threads, "THREADS_HTTP_JITTER", 0)
+    monkeypatch.setattr(threads, "_pacer_clock", lambda: 0.0)  # frozen: every wait is its full reservation
+    monkeypatch.setattr(threads, "_pacer_sleep", record_sleep)
+    monkeypatch.setattr(threads, "async_playwright", NoBrowser)
+    calls = []
+
+    def request(url):
+        calls.append(url)
+        # URL0 lacks a core metric once, so its retry is paced like any other request.
+        if url == URL + "0" and calls.count(url) == 1:
+            return metrics(views=15)
+        return metrics(views=15, likes=1, comments=0, reposts=0)
+
+    monkeypatch.setattr(threads, "fetch_threads_http", request)
+    asyncio.run(threads.run_threads_scraper(path, worker_count=3, mode="request"))
+    assert len(calls) == 4
+    # Four requests on the one direct route, shared by 3 workers: 0, 0.8, 1.6, 2.4 s.
+    assert sorted(waits) == [0.8, 1.6, 2.4]
+
+
+class StatusEvents(Events):
+    def __init__(self):
+        super().__init__()
+        self.statuses = []
+
+    async def broadcast_status(self, data):
+        self.statuses.append(data)
+
+
+def test_rate_limit_stops_the_run_and_leaves_unrequested_rows_untouched(tmp_path, monkeypatch):
+    path = tmp_path / "threads.xlsx"
+    book = openpyxl.Workbook()
+    book.active.title = "Data"
+    book.active.append(["Link", "TIM", "Đối tác"])
+    for index in range(6):
+        book.active.append([URL + str(index), 99, "Partner"])
+    book.save(path)
+    book.close()
+    calls = []
+
+    def request(url):
+        calls.append(url)
+        if url == URL + "2":
+            return threads.failure("HTTP 429", "rate_limit")
+        return metrics(views=150, likes=5, comments=0, reposts=0)
+
+    monkeypatch.setattr(threads, "async_playwright", NoBrowser)
+    monkeypatch.setattr(threads, "fetch_threads_http", request)
+    events = StatusEvents()
+    asyncio.run(threads.run_threads_scraper(path, events, worker_count=1, mode="hybrid", sheet_name="Data"))
+
+    assert calls == [URL + "0", URL + "1", URL + "2"]  # no request after the 429
+    saved = openpyxl.load_workbook(path)
+    try:
+        sheet = saved["Data"]
+        likes = worksheet_find_column_index(sheet, ["TIM"])
+        status = worksheet_find_column_index(sheet, [threads.THREADS_SCAN_STATUS_HEADER])
+        assert [sheet.cell(row, likes).value for row in range(2, 8)] == [5, 5, 99, 99, 99, 99]
+        assert [sheet.cell(row, status).value for row in range(2, 8)] == [
+            "Success", "Success", "Error: HTTP 429", None, None, None]
+        # Incomplete like a cancelled run: the summary tab is not rebuilt.
+        assert not any(name.startswith("Tổng kết") for name in saved.sheetnames)
+    finally:
+        saved.close()
+    final = events.statuses[-1]
+    assert final["done"] and final["stopReason"] == "rate_limit" and final["processed"] == 3
+    assert any("HTTP 429" in log and "3/6" in log and "Cookie Threads" in log for log in events.logs)
+    history = json.loads((tmp_path / "data" / "threads_scan_history.json").read_text(encoding="utf-8"))["history"]
+    assert history[0]["phase"] == "rate_limited"

@@ -473,3 +473,16 @@ def test_websocket_rejects_invalid_threads_proxy_before_dispatch(isolated_backen
     output = json.dumps(messages)
     assert "fixture-user" not in output
     assert "fixture-password" not in output
+
+
+def test_threads_run_stopped_by_rate_limit_completes_without_a_google_push(isolated_backend, monkeypatch):
+    pushed = []
+    async def stopped_scan(path, manager, **kwargs):
+        await manager.broadcast_status({"total": 5, "processed": 2, "success": 1, "error": 1, "done": True, "stopReason": "rate_limit"})
+    monkeypatch.setattr(scan_service, "run_threads_scraper", stopped_scan)
+    monkeypatch.setattr(scan_service, "push_rows_to_new_sheet", lambda *args, **kwargs: pushed.append(args) or "Result")
+    asyncio.run(backend.run_scraper_safely(str(isolated_backend / "A.xlsx"), backend.scan_options(
+        platform="threads", sheet_name="Data", push_to_google=True, file_id="A.xlsx")))
+    assert pushed == []  # an incomplete run is never pushed as a result tab
+    assert backend.manager.last_status["phase"] == "completed"
+    assert backend.manager.last_status["stopReason"] == "rate_limit"
