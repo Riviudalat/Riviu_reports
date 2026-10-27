@@ -2629,9 +2629,10 @@ function progressSummaryText(data, pct) {
     return parts.join(' • ');
 }
 
-function progressStatusView(phase, counts, platform) {
+function progressStatusView(phase, counts, platform, stopReason = '') {
     if (phase === 'failed') return ['Quét hoặc lưu thất bại', 'warn'];
     if (phase === 'cancelled') return ['Đã huỷ', 'cancelled'];
+    if (phase === 'completed' && stopReason === 'rate_limit') return ['Đã dừng: Threads giới hạn tần suất (HTTP 429)', 'warn'];
     if (phase === 'completed') {
         if (counts.hidden > 0 || counts.error > 0) return [platformConfig(platform).completedWithIssues(counts.error), 'warn'];
         return ['Thành công', 'success'];
@@ -2640,21 +2641,24 @@ function progressStatusView(phase, counts, platform) {
     return ['', ''];
 }
 
-function renderProgressStatus(phase, counts, platform) {
-    const [text, tone] = progressStatusView(phase, counts, platform);
+function renderProgressStatus(phase, counts, platform, stopReason = '') {
+    const [text, tone] = progressStatusView(phase, counts, platform, stopReason);
     const statusEl = document.getElementById('progressStatus');
     statusEl.textContent = text;
     statusEl.className = tone ? `progress-status ${tone}` : 'progress-status';
 }
 
 // Runs once per run and terminal phase. A replayed snapshot only marks the phase as seen.
-function finishScanRun(phase, { replay = false } = {}) {
+function finishScanRun(phase, { replay = false, stopReason = '' } = {}) {
     syncProxyCardActiveState();
     const terminalKey = `${currentRunContext?.runId || ''}:${phase}`;
     if (lastTerminalStatus === terminalKey) return;
     lastTerminalStatus = terminalKey;
     if (replay) return;
-    addLog(phase === 'cancelled' ? '--- ĐÃ HỦY QUÉT ---' : phase === 'failed' ? '--- QUÉT/LƯU THẤT BẠI ---' : '--- QUÉT VÀ LƯU HOÀN TẤT ---');
+    addLog(phase === 'cancelled' ? '--- ĐÃ HỦY QUÉT ---'
+        : phase === 'failed' ? '--- QUÉT/LƯU THẤT BẠI ---'
+        : stopReason === 'rate_limit' ? '--- ĐÃ DỪNG: THREADS GIỚI HẠN TẦN SUẤT (HTTP 429), ĐÃ LƯU KẾT QUẢ ĐÃ QUÉT ---'
+        : '--- QUÉT VÀ LƯU HOÀN TẤT ---');
     updateFileList();
     loadPreview();
 }
@@ -2670,8 +2674,8 @@ function updateProgress(data, { replay = false } = {}) {
     const phase = data.phase || (data.cancelled ? 'cancelled' : data.done ? 'failed' : 'running');
     scanPhase = phase;
     syncScanControls();
-    renderProgressStatus(phase, counts, progressPlatform(data));
-    if (TERMINAL_SCAN_PHASES.includes(phase)) finishScanRun(phase, { replay });
+    renderProgressStatus(phase, counts, progressPlatform(data), data.stopReason);
+    if (TERMINAL_SCAN_PHASES.includes(phase)) finishScanRun(phase, { replay, stopReason: data.stopReason });
 }
 
 // Scrolled further down than this, the reader keeps their place as new rows arrive on top.
