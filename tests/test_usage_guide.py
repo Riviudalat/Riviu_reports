@@ -18,7 +18,8 @@ STATIC_DIR = ROOT / "riviu" / "web" / "static"
 def guide_page(tmp_path, monkeypatch):
     monkeypatch.setattr(backend, "EXCEL_DIR", str(tmp_path))
     with TestClient(backend.app, base_url="http://127.0.0.1:1231") as client:
-        page = client.get("/")
+        assert client.get("/").status_code == 200  # sets the local session cookie
+        page = client.get("/classic")
         assert page.status_code == 200
         return page.text
 

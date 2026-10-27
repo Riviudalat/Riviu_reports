@@ -132,7 +132,7 @@ def test_correct_password_sets_secure_cookie_and_grants_access(server):
     assert security.AUTH_COOKIE.lower() in header
     for flag in ("httponly", "secure", "samesite=strict", "max-age=604800", "path=/"):
         assert flag in header
-    page = server.get("/")
+    page = server.get("/classic")
     assert page.status_code == 200
     assert "Đăng xuất" in page.text and 'action="/logout"' in page.text
     assert 'id="guideButton"' in page.text  # the usage guide is in every mode
