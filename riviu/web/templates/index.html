@@ -216,7 +216,12 @@
             <div class="progress-bar"><div class="progress-fill" id="progressBar"></div></div>
             <div class="progress-meta">
                 <span id="progressText" aria-live="polite">Sẵn sàng chờ lệnh...</span>
-                <span id="progressStatus" class="progress-status"></span>
+                <span class="progress-actions">
+                    <button class="btn btn-outline btn-compact" id="skipRetryBtn" type="button" onclick="skipRetryWait()" title="Kết thúc phiên quét ngay với kết quả lượt chính, không quét lại link lỗi" hidden>
+                        <span class="material-icons-outlined">skip_next</span><span>Bỏ qua quét lại</span>
+                    </button>
+                    <span id="progressStatus" class="progress-status"></span>
+                </span>
             </div>
         </div>
 

@@ -86,6 +86,7 @@ class RunEvents:
         self.manager = connection_manager
         self.terminal = None
         self.retry_pass = False
+        self.retry_count = 0
         self.last_progress = _clock()
 
     def touch(self):
@@ -93,7 +94,7 @@ class RunEvents:
 
     async def broadcast_status(self, status):
         self.touch()
-        extra = {"retryPass": True} if self.retry_pass else {}
+        extra = {"retryPass": True, "retryCount": self.retry_count} if self.retry_pass else {}
         if status.get("done"):
             self.terminal = dict(status)
             await self.manager.broadcast_status({**status, **extra, "done": False, "phase": "saving"})
@@ -283,8 +284,55 @@ def _wait_text(seconds):
     return f"{seconds // 60} phút" if seconds >= 60 and seconds % 60 == 0 else f"{seconds} giây"
 
 
+async def usable_threads_session():
+    """Generation of the stored Threads cookie session, or None when it cannot log a scan in."""
+    try:
+        status = await context.complete_blocking(context.threads_session_manager().status)
+    except Exception:
+        return None
+    if not status.get("configured") or not status.get("generation") or status.get("state") in UNUSABLE_COOKIE_STATES:
+        return None
+    return status["generation"]
+
+
+async def threads_session_overrides(options, generation):
+    """The stored cookies and their fixed route, as a scan started with Cookie Threads uses them."""
+    cookies = await context.complete_blocking(context.threads_session_manager().snapshot, generation)
+    proxies = resolve_threads_proxies(context.EXCEL_DIR, options["proxy_text"], options["scrape_mode"]) if options["use_proxy"] else []
+    if proxies and chromium_proxy_unsupported(proxies[0]):
+        raise SessionError("proxy_unsupported")
+    return {"threads_cookies": cookies, "threads_proxies": proxies, "threads_generation": generation}
+
+
+def login_hint():
+    return "nạp Cookie Threads ở /admin" if server_mode.ACTIVE is not None else "nạp Cookie Threads (Cấu hình)"
+
+
+async def run_retry_pass(runner, target_path, events, options, journal, rows_of):
+    """Rescan the rows `rows_of()` names (re-read after a stall) under the watchdog."""
+    while True:
+        only = rows_of()
+        if not only:
+            return
+        stalled = await run_watched_pass(runner, target_path, events, {
+            # A result tab is a snapshot of the main pass; the retry pass never adds another.
+            **options, "create_result_sheet": False, "only_rows": only,
+            "on_rows_saved": journal.recorder(retry_pass=True),
+        })
+        if not stalled:
+            return
+        await handle_stall(journal)
+
+
 async def run_scan_passes(target_path, events, options, journal):
-    """Main pass (resumed past saved rows), then the retry pass. Returns the terminal status."""
+    """Main pass (resumed past saved rows), then the retry pass. Returns the terminal status.
+
+    The retry pass covers two kinds of rows. Transient errors are rescanned the same way after
+    the platform cooldown. Threads `invalid_post` rows of an anonymous run (posts Threads shows
+    only to logged-in viewers) are rescanned only through the stored Cookie Threads session and
+    its fixed route; without a usable session they are not retried and the run reports them
+    (`loginRequired`, `notice`), and a run that already used the session never retries them.
+    """
     manager = scan_state.manager
     platform = options["platform"]
     runner = SCAN_RUNNERS[platform]
@@ -311,35 +359,64 @@ async def run_scan_passes(target_path, events, options, journal):
         combined = True
         await manager.broadcast_log("Lượt quét chính đã xong trước khi gián đoạn; chuyển sang quét lại link lỗi.")
 
-    candidates = journal.retry_candidates()
-    if options.get("retry_failed", True) and candidates and not journal.data.get("stopReason"):
+    allowed = bool(options.get("retry_failed", True) and not journal.data.get("stopReason")
+                   and not journal.data.get("retrySkipped"))
+    transient = journal.retry_candidates() if allowed else set()
+    login_rows = journal.login_candidates()
+    run_on_cookie = options.get("threads_cookies") is not None
+    session_generation = None
+    if allowed and login_rows and not run_on_cookie:
+        session_generation = await usable_threads_session()
+    login_retry = login_rows if session_generation else set()
+    retry = bool(transient or login_retry)
+    transient_count, login_count = _url_count(transient), _url_count(login_retry)
+    count = transient_count + login_count
+    if retry:
         combined = True
-        count = _url_count(candidates)
-        cooldown = int(scan_journal.RETRY_COOLDOWN_SECONDS.get(platform, 120))
-        if journal.has_rate_limited(candidates):
-            # Links that got HTTP 429 on a retired route wait out the rate limit first.
-            cooldown = max(cooldown, THREADS_RATE_LIMIT_WAIT_MINUTES * 60)
-        await manager.broadcast_log(f"Còn {count} link lỗi tạm thời. Chờ {_wait_text(cooldown)} rồi quét lại một lần.")
+        if transient:
+            cooldown = int(scan_journal.RETRY_COOLDOWN_SECONDS.get(platform, 120))
+            if journal.has_rate_limited(transient):
+                # Links that got HTTP 429 on a retired route wait out the rate limit first.
+                cooldown = max(cooldown, THREADS_RATE_LIMIT_WAIT_MINUTES * 60)
+        else:
+            # Only login-only posts: switching to the cookie session is the fix, not waiting.
+            cooldown = scan_journal.LOGIN_RETRY_COOLDOWN_SECONDS
+        parts = [f"{transient_count} link lỗi tạm thời"] if transient_count else []
+        if login_count:
+            parts.append(f"{login_count} bài Threads chỉ xem được khi đăng nhập (quét lại bằng Cookie Threads)")
+        await manager.broadcast_log(f"Còn {' và '.join(parts)}. Chờ {_wait_text(cooldown)} rồi quét lại một lần.")
         await manager.broadcast_status({
             **(main_terminal or manager.last_status), "done": False, "phase": "running",
-            "retryPass": True, "retryWaitSeconds": cooldown,
+            # retryAt (epoch seconds) lets a page that reconnects mid-wait show the real countdown.
+            "retryPass": True, "retryWaitSeconds": cooldown, "retryAt": round(time.time() + cooldown, 3),
+            "retryCount": count,
         })
-        await _cooldown_sleep(cooldown)
+        if not await wait_retry_cooldown(cooldown):
+            # The admin chose "Bỏ qua quét lại": the run ends now, as completed with the main-pass results.
+            journal.mark(retrySkipped=True)
+            await journal.save()
+            await manager.broadcast_log(
+                f"Đã bỏ qua quét lại {count} link lỗi theo yêu cầu; giữ kết quả lượt chính.", level="WARN")
+            retry = False
+    if retry:
         await manager.broadcast_log(f"Quét lại {count} link lỗi...")
         events.retry_pass = True
-        while True:
-            only = journal.retry_candidates()
-            if not only:
-                break
-            stalled = await run_watched_pass(runner, target_path, events, {
-                # A result tab is a snapshot of the main pass; the retry pass never adds another.
-                **options, "create_result_sheet": False, "only_rows": only,
-                "on_rows_saved": journal.recorder(retry_pass=True),
-            })
-            if not stalled:
-                break
-            await handle_stall(journal)
-        retry_counts = journal.counts(candidates)
+        events.retry_count = count
+        if transient:
+            await run_retry_pass(runner, target_path, events, options, journal, journal.retry_candidates)
+        if login_retry and not (events.terminal or {}).get("stopReason"):
+            try:
+                session = await threads_session_overrides(options, session_generation)
+                await run_retry_pass(runner, target_path, events, {**options, **session}, journal, journal.login_candidates)
+            except SessionError as error:
+                # Only a session failure says anything about the cookies; the main-pass results stay.
+                try:
+                    await context.complete_blocking(context.threads_session_manager().invalidate, session_generation, error.state)
+                except Exception:
+                    pass
+                await manager.broadcast_log(
+                    f"Không quét lại được bằng Cookie Threads ({error}); giữ kết quả lượt chính.", level="WARN")
+        retry_counts = journal.counts(transient | login_retry)
         fixed = retry_counts["success"] + retry_counts["hidden"]
         await manager.broadcast_log(
             f"Quét lại xong: {fixed}/{count} link đọc được, {count - fixed} link vẫn lỗi (giữ số cũ).",
@@ -348,7 +425,7 @@ async def run_scan_passes(target_path, events, options, journal):
             await manager.broadcast_log("Lượt quét lại dừng sớm; các link chưa quét lại giữ kết quả lượt chính.", level="WARN")
 
     terminal = dict(main_terminal or events.terminal or manager.last_status)
-    for key in ("retryPass", "retryWaitSeconds", "stopReason"):
+    for key in ("retryPass", "retryWaitSeconds", "retryAt", "retryCount", "stopReason", "loginRequired", "notice"):
         terminal.pop(key, None)
     # Only the main pass decides whether the run is complete (a 429 there stops it).
     if main_terminal and main_terminal.get("stopReason"):
@@ -357,7 +434,42 @@ async def run_scan_passes(target_path, events, options, journal):
         counts = journal.counts()
         total = (prior or {}).get("processed", 0) + main_terminal.get("total", 0) if main_terminal else counts["processed"]
         terminal.update(counts, total=max(total, counts["processed"]))
+    login_left = _url_count(journal.login_rows())
+    if login_left and not run_on_cookie and not login_retry:
+        notice = f"{login_left} bài Threads chỉ xem được khi đăng nhập (hoặc đã bị xoá) — {login_hint()} rồi quét lại."
+        terminal.update(loginRequired=login_left, notice=notice)
+        await manager.broadcast_log(notice, level="WARN")
+    elif login_left:
+        await manager.broadcast_log(
+            f"{login_left} link Threads không xem được kể cả khi đăng nhập (có thể đã bị xoá); giữ số cũ.", level="WARN")
     return terminal
+
+
+async def wait_retry_cooldown(seconds):
+    """Sleep the cooldown before the retry pass. Returns False when the admin skipped the retry
+    pass meanwhile (`skip_retry_wait`), True when the cooldown ran out."""
+    skip = asyncio.Event()
+    scan_state.RETRY_SKIP = skip
+    sleeper = asyncio.ensure_future(_cooldown_sleep(seconds))
+    skipped = asyncio.ensure_future(skip.wait())
+    try:
+        await asyncio.wait({sleeper, skipped}, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for waiter in (sleeper, skipped):
+            waiter.cancel()
+        if scan_state.RETRY_SKIP is skip:
+            scan_state.RETRY_SKIP = None
+    return not skip.is_set()
+
+
+def skip_retry_wait():
+    """End the cooldown of the running scan without a retry pass. The run then finishes as
+    completed with the main-pass results (unlike a cancel, which is final and keeps nothing pending)."""
+    skip = scan_state.RETRY_SKIP
+    if skip is None or skip.is_set():
+        return False
+    skip.set()
+    return True
 
 
 def user_cancel_scan():

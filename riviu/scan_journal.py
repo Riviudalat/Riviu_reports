@@ -13,7 +13,9 @@
 A row enters `rows` only after the workbook save that wrote it succeeded (the scanners'
 `on_rows_saved` hook), so a resumed run skips exactly the rows whose result is on disk.
 `code` is "s" success, "h" hidden/no metrics, "r" retryable error, "l" Threads HTTP 429 on a
-proxy route the run retired (retried only after the 429 wait), "e" other error.
+proxy route the run retired (retried only after the 429 wait), "p" a Threads post the anonymous
+page did not show (`invalid_post`: often visible only when logged in; retried only through the
+Cookie Threads session), "e" other error.
 
 The journal is removed when the run ends normally, fails, or is cancelled by the user. It stays
 behind only when the process dies or is stopped mid-run (crash, container restart, reboot); the
@@ -51,18 +53,23 @@ STALL_SECONDS = 10 * 60
 STALL_CHECK_SECONDS = 30
 # Wait after the main pass before rescanning the rows that failed with a transient error.
 RETRY_COOLDOWN_SECONDS = {"tiktok": 2 * 60, "threads": 5 * 60}
+# Wait when the only rows to retry are Threads login-only posts: the cookie session is the fix.
+LOGIN_RETRY_COOLDOWN_SECONDS = 30
 # Start-payload keys kept for a resume. No proxy text (it may hold credentials), no cookies.
 PAYLOAD_KEYS = (
     "platform", "file_id", "sheet_name", "workers", "scrape_mode", "use_proxy", "partners", "partner",
     "create_result_sheet", "push_to_google", "retry_failed", "use_threads_session", "use_tiktok_session",
 )
 
-# Threads error kinds worth one more try after a cooldown. A rate_limit row (its route was
+# Threads error kinds worth one more try after a cooldown. invalid_post is not one of them: the
+# same anonymous request fails again, so it is retried only through the cookie session (code "p").
+# A rate_limit row (its route was
 # retired, others went on) is retried too, but only after the 429 wait and only when the run
 # was not stopped by 429 on every route. Never retried: access_denied / proxy_auth /
 # geo_restricted / audience (a block is never worked around), redirect / profile_redirect,
 # and auth_* (the session is the problem).
-THREADS_RETRYABLE_KINDS = frozenset({"invalid_post", "transport", "http", "payload", "browser_start"})
+THREADS_RETRYABLE_KINDS = frozenset({"transport", "http", "payload", "browser_start"})
+THREADS_LOGIN_KINDS = frozenset({"invalid_post"})
 _TIKTOK_HTTP_CODE = re.compile(r"\bhttp\s+(\d{3})\b", re.IGNORECASE)
 
 logger = logging.getLogger("riviu.scan_journal")
@@ -123,6 +130,8 @@ def result_code(platform, status, kind=""):
             return "h"
         if kind == "rate_limit":
             return "l"
+        if kind in THREADS_LOGIN_KINDS:
+            return "p"
         return "r" if threads_retryable(status, kind) else "e"
     if is_hidden_stats_status(status):
         return "h"
@@ -182,6 +191,14 @@ class RunJournal:
         """Rows whose saved result in this run is a retryable error and that no retry pass rescanned."""
         return {key for key, (code, retried) in self.rows.items() if code in ("r", "l") and not retried}
 
+    def login_rows(self):
+        """Rows whose saved result is a Threads post the page did not show (code "p")."""
+        return {key for key, (code, _retried) in self.rows.items() if code == "p"}
+
+    def login_candidates(self):
+        """Login-only rows that no cookie-session retry pass rescanned yet."""
+        return {key for key, (code, retried) in self.rows.items() if code == "p" and not retried}
+
     def has_rate_limited(self, keys):
         return any(self.rows.get(key, ["", False])[0] == "l" for key in keys)
 
@@ -193,7 +210,7 @@ class RunJournal:
                 by_url[key[2].casefold()] = code
         codes = list(by_url.values())
         return {"processed": len(codes), "success": codes.count("s"), "hidden": codes.count("h"),
-                "error": codes.count("r") + codes.count("l") + codes.count("e")}
+                "error": codes.count("r") + codes.count("l") + codes.count("p") + codes.count("e")}
 
     # ---- hooks / persistence ----
     def recorder(self, *, retry_pass=False):

@@ -139,6 +139,11 @@ let currentRunContext = null;
 let lastTerminalStatus = '';
 const liveResultClasses = new Map();
 let lastProgressData = null;
+// Set while the run waits out the cooldown before its retry pass (scan_service.run_scan_passes):
+// { runId, at (ms), count, success, total }. The page then counts down instead of looking stuck.
+let retryWait = null;
+let retryWaitTimer = null;
+let retrySkipRequested = false;
 const readRequestSequence = { files: 0, preview: 0, summary: 0, partners: 0 };
 
 let proxyListText = '';
@@ -2047,8 +2052,16 @@ function syncScanControls() {
     document.querySelectorAll('.platform-option').forEach(button => { button.disabled = busy; });
     const refreshPartnerBtn = document.getElementById('refreshPartnerBtn');
     if (refreshPartnerBtn) refreshPartnerBtn.disabled = busy || selectedPartners.size === 0;
+    const skipRetryBtn = document.getElementById('skipRetryBtn');
+    if (skipRetryBtn) {
+        skipRetryBtn.hidden = IS_VIEWER || !retryWait || !scanIsBusy();
+        skipRetryBtn.disabled = retrySkipRequested || scanPhase === 'cancelling' || wsReconnectFailures > 0;
+    }
     const viewerScanState = IS_VIEWER && document.getElementById('vwScanState');
-    if (viewerScanState) viewerScanState.hidden = !scanIsBusy();
+    if (viewerScanState) {
+        viewerScanState.hidden = !scanIsBusy();
+        viewerScanState.textContent = retryWait ? 'Đã cập nhật số liệu, đang chờ quét lại một số link lỗi…' : 'Đang cập nhật số liệu…';
+    }
     setGooglePushState();
 }
 
@@ -2110,7 +2123,7 @@ function handleSessionSnapshot(session) {
         clearFailedLinks(false);
         for (const row of session.results || []) appendData(row, session);
         if (session.status?.phase || session.status?.done) {
-            updateProgress(session.status, { replay: !session.running && !trackedActiveRun });
+            updateProgress(session.status, { replay: !session.running && !trackedActiveRun, snapshot: true });
         }
     }
     if (session.running) {
@@ -2151,7 +2164,10 @@ function handleSocketMessage(event) {
         handleSessionSnapshot(message.data || {});
         return;
     }
-    if (message.data?.done && message.platform && (message.platform !== activePlatform || message.fileId !== currentFileId)) return;
+    // A finished run of another source is stale; the run this page tracks must always end here,
+    // or the UI would stay "running" after the scan finished.
+    const trackedRun = Boolean(message.runId) && message.runId === currentRunContext?.runId;
+    if (message.data?.done && message.platform && !trackedRun && (message.platform !== activePlatform || message.fileId !== currentFileId)) return;
     if (message.runId && message.type !== 'log') applyRunContext(message);
     if (message.type === 'log') {
         addLog(message.message, { level: message.level || '', details: message.details || null });
@@ -2689,9 +2705,7 @@ function progressStatusView(phase, counts, platform, stopReason = '') {
 
 function renderProgressStatus(phase, counts, platform, stopReason = '') {
     const [text, tone] = progressStatusView(phase, counts, platform, stopReason);
-    const statusEl = document.getElementById('progressStatus');
-    statusEl.textContent = text;
-    statusEl.className = tone ? `progress-status ${tone}` : 'progress-status';
+    setProgressStatus(text, tone);
 }
 
 // Runs once per run and terminal phase. A replayed snapshot only marks the phase as seen.
@@ -2709,19 +2723,96 @@ function finishScanRun(phase, { replay = false, stopReason = '' } = {}) {
     loadPreview();
 }
 
-function updateProgress(data, { replay = false } = {}) {
+function updateProgress(data, { replay = false, snapshot = false } = {}) {
     lastProgressData = data;
     const counts = progressResultCounts(data);
     renderProgressCounts(data, counts);
     const pct = data.total > 0 ? (data.processed / data.total) * 100 : 0;
     document.getElementById('progressBar').style.width = `${pct}%`;
-    document.getElementById('progressText').textContent = progressSummaryText(data, pct);
-
     const phase = data.phase || (data.cancelled ? 'cancelled' : data.done ? 'failed' : 'running');
     scanPhase = phase;
+    setRetryWait(TERMINAL_SCAN_PHASES.includes(phase) ? null : retryWaitFrom(data, { snapshot }));
+    if (retryWait) {
+        renderRetryWait();
+    } else {
+        const retrying = Boolean(data.retryPass) && !TERMINAL_SCAN_PHASES.includes(phase);
+        const summary = progressSummaryText(data, pct);
+        const progressText = document.getElementById('progressText');
+        // A finished run may carry a notice (e.g. Threads posts that need Cookie Threads); it leads.
+        progressText.textContent = retrying ? `Đang quét lại ${Number(data.retryCount) || data.total} link lỗi… • ${summary}`
+            : data.notice && phase === 'completed' ? `${data.notice} • ${summary}` : summary;
+        progressText.title = data.notice && phase === 'completed' ? data.notice : '';
+        renderProgressStatus(phase, counts, progressPlatform(data), data.stopReason);
+        if (retrying && phase !== 'saving') setProgressStatus('Đang quét lại link lỗi', '');
+    }
     syncScanControls();
-    renderProgressStatus(phase, counts, progressPlatform(data), data.stopReason);
     if (TERMINAL_SCAN_PHASES.includes(phase)) finishScanRun(phase, { replay, stopReason: data.stopReason });
+}
+
+// ---- Retry-pass cooldown ------------------------------------------------------
+// A live status is fresh, so the wait counts from now (immune to clock skew); a snapshot replayed
+// on (re)connect may be minutes old, so it counts to the server's retryAt (clamped to the wait).
+function retryWaitFrom(data, { snapshot = false } = {}) {
+    const seconds = Number(data?.retryWaitSeconds);
+    if (!data || data.done || !data.retryPass || !(seconds > 0)) return null;
+    const runId = data.runId || currentRunContext?.runId || '';
+    if (retryWait && retryWait.runId === runId) return retryWait;
+    const now = Date.now();
+    const serverAt = Number(data.retryAt) * 1000;
+    const at = snapshot && serverAt > 0 ? Math.min(Math.max(serverAt, now), now + seconds * 1000) : now + seconds * 1000;
+    return { runId, at, count: Number(data.retryCount) || Number(data.error) || 0, success: Number(data.success) || 0, total: Number(data.total) || 0 };
+}
+
+function setRetryWait(next) {
+    if (!next || next.runId !== retryWait?.runId) retrySkipRequested = false;
+    retryWait = next;
+    if (next && !retryWaitTimer) retryWaitTimer = setInterval(renderRetryWait, 1000);
+    if (!next && retryWaitTimer) { clearInterval(retryWaitTimer); retryWaitTimer = null; }
+}
+
+function formatClockTime(ms) {
+    const date = new Date(ms);
+    return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+function formatCountdown(seconds) {
+    const sec = Math.max(Math.ceil(seconds), 0);
+    return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+}
+
+function retryWaitText(wait, now = Date.now()) {
+    const main = `Đã quét xong lượt chính (${wait.success}/${wait.total} thành công).`;
+    if (retrySkipRequested) return `${main} Đã bỏ qua quét lại, đang kết thúc phiên quét…`;
+    const remaining = (wait.at - now) / 1000;
+    if (remaining <= 0) return `${main} Sắp quét lại ${wait.count} link lỗi…`;
+    return `${main} Chờ quét lại ${wait.count} link lỗi lúc ${formatClockTime(wait.at)} (còn ${formatCountdown(remaining)})`;
+}
+
+function renderRetryWait() {
+    if (!retryWait) return;
+    const progressText = document.getElementById('progressText');
+    progressText.textContent = progressText.title = retryWaitText(retryWait);  // title: full text where it truncates
+    setProgressStatus('Chờ quét lại', 'warn');
+}
+
+function setProgressStatus(text, tone) {
+    const statusEl = document.getElementById('progressStatus');
+    statusEl.textContent = text;
+    statusEl.className = tone ? `progress-status ${tone}` : 'progress-status';
+}
+
+// Ends the cooldown now: the run completes with the main-pass results and no retry pass.
+function skipRetryWait() {
+    if (IS_VIEWER || !retryWait || retrySkipRequested) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+        notify('Lỗi: Chưa kết nối được server. Vui lòng kiểm tra CMD.', 'error');
+        return;
+    }
+    ws.send(JSON.stringify({ action: 'skip_retry' }));
+    retrySkipRequested = true;
+    renderRetryWait();
+    syncScanControls();
+    addLog('Đã gửi lệnh bỏ qua quét lại.');
 }
 
 // Scrolled further down than this, the reader keeps their place as new rows arrive on top.

@@ -78,6 +78,8 @@ SCAN_STARTING = False
 SOURCE_BUSY = False
 # Run ids the user cancelled: their journal is dropped, so they are never auto-resumed.
 USER_CANCELLED_RUNS = set()
+# Set while a scan waits out the cooldown before its retry pass; setting it skips that pass.
+RETRY_SKIP = None
 
 
 def scan_running():

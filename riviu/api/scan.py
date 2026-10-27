@@ -1,7 +1,7 @@
-"""The `/ws` scan channel (start/cancel and progress events) and the scrape history.
+"""The `/ws` scan channel (start/cancel/skip_retry and progress events) and the scrape history.
 
 Server mode: the socket also serves the public viewer, read-only. Starlette's HTTP
-middleware never sees websockets, so the admin check for start/cancel lives here.
+middleware never sees websockets, so the admin check for the scan commands lives here.
 """
 
 import json
@@ -17,6 +17,8 @@ from riviu.source_files import SourceRequestError
 
 router = APIRouter()
 VIEWER_REFUSED = "Chỉ quản trị viên mới bắt đầu hoặc hủy phiên quét. Đăng nhập tại /admin."
+# Commands that change a scan; only an admin may send them.
+SCAN_COMMANDS = {"start", "cancel", "skip_retry"}
 
 
 def websocket_admitted(websocket) -> bool:
@@ -56,7 +58,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
             action = payload.get("action")
             # Checked per command (not once at connect), so a logout or password change applies at once.
-            if action in {"start", "cancel"} and security.request_role(websocket) != "admin":
+            if action in SCAN_COMMANDS and security.request_role(websocket) != "admin":
                 # Only to this socket: a viewer must not stop or start anything, nor spam others.
                 await websocket.send_json({"type": "log", "message": VIEWER_REFUSED, "level": "WARN"})
                 continue
@@ -78,6 +80,12 @@ async def websocket_endpoint(websocket: WebSocket):
                     await manager.broadcast_log("Đang hủy phiên quét hiện tại...")
                 else:
                     await manager.broadcast_log("Không có phiên quét nào đang chạy.")
+            elif action == "skip_retry":
+                # Ends the cooldown without a retry pass; the run completes with the main-pass results.
+                if scan_service.skip_retry_wait():
+                    await manager.broadcast_log("Bỏ qua quét lại: kết thúc phiên quét với kết quả lượt chính...")
+                else:
+                    await websocket.send_json({"type": "log", "message": "Phiên quét không còn chờ quét lại.", "level": "WARN"})
     except WebSocketDisconnect:
         pass
     finally:
