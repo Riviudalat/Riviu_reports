@@ -76,7 +76,7 @@ def test_encrypted_server_store_never_writes_plaintext_and_is_separate_from_thre
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="DPAPI is Windows-only")
-def test_desktop_dpapi_store_never_writes_plaintext(tmp_path):
+def test_windows_dpapi_store_never_writes_plaintext(tmp_path):
     store = session.default_store(tmp_path)
     normalized = session.normalize_tiktok_cookies(export(cookie()))
     store.save(normalized)

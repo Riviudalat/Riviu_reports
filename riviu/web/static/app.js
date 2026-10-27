@@ -131,9 +131,7 @@ let sourcePreferencesSaveFailed = false;
 let sourcePreferencesScheduled = false;
 let activeWorkspaceTab = 'sheet';
 let pendingLiveResults = 0;
-let desktopUpdateCheckInFlight = false;
-let desktopUpdateInstalling = false;
-let desktopStartupUpdatePending = false;
+// True once this socket delivered its session snapshot (browser tests wait on it).
 let websocketSessionReady = false;
 
 let scanPhase = 'idle';
@@ -1351,7 +1349,7 @@ function loadSourcePreferences() {
 function scheduleSourcePreferencesSave() {
     if (IS_VIEWER) return;
     if (!sourcePreferencesReady || !sourcePreferencesPending || sourcePreferencesScheduled || sourcePreferencesWriting
-        || sourceBusy || scanIsBusy() || desktopUpdateInstalling) return;
+        || sourceBusy || scanIsBusy()) return;
     sourcePreferencesScheduled = true;
     Promise.resolve().then(() => {
         sourcePreferencesScheduled = false;
@@ -1361,10 +1359,10 @@ function scheduleSourcePreferencesSave() {
 
 async function flushSourcePreferences() {
     if (!sourcePreferencesReady || sourcePreferencesWriting || !sourcePreferencesPending
-        || sourceBusy || scanIsBusy() || desktopUpdateInstalling) return;
+        || sourceBusy || scanIsBusy()) return;
     sourcePreferencesWriting = true;
     try {
-        while (sourcePreferencesPending && !sourceBusy && !scanIsBusy() && !desktopUpdateInstalling) {
+        while (sourcePreferencesPending && !sourceBusy && !scanIsBusy()) {
             const pending = sourcePreferencesPending;
             sourcePreferencesPending = null;
             try {
@@ -2011,10 +2009,10 @@ function scanIsBusy() {
     return ['starting', 'running', 'saving', 'cancelling'].includes(scanPhase);
 }
 
-// A scan, an update install, a Threads cookie action or a source operation is in flight;
+// A scan, a Threads or TikTok cookie action or a source operation is in flight;
 // controls that start another of these stay disabled meanwhile.
 function uiIsBusy() {
-    return scanIsBusy() || desktopUpdateInstalling || threadsCookieBusy || tiktokCookieBusy || sourceBusy;
+    return scanIsBusy() || threadsCookieBusy || tiktokCookieBusy || sourceBusy;
 }
 
 // Why an idle Start button cannot start a scan right now ('' when it can); shown as its tooltip.
@@ -2132,10 +2130,6 @@ function handleSessionSnapshot(session) {
         setWorkspaceTab('live');
     }
     syncScanControls();
-    if (desktopStartupUpdatePending) {
-        desktopStartupUpdatePending = false;
-        void checkDesktopUpdate();
-    }
 }
 
 // ---- WebSocket connection ---------------------------------------------------
@@ -3012,40 +3006,6 @@ function clearFailedLinks(showLog = true, kind = 'all') {
     }
 }
 
-// ---- Desktop updater --------------------------------------------------------
-function desktopUpdaterInvoke() {
-    return window.__TAURI__?.core?.invoke || null;
-}
-
-async function checkDesktopUpdate() {
-    const invoke = desktopUpdaterInvoke();
-    if (!invoke || desktopUpdateCheckInFlight || !websocketSessionReady || scanIsBusy()) return;
-    desktopUpdateCheckInFlight = true;
-    try {
-        const version = await invoke('check_for_update');
-        if (!version || !websocketSessionReady || scanIsBusy()) return;
-        desktopUpdateInstalling = true;
-        syncScanControls();
-        showToast(`Đang cài đặt Riviu Reports ${version}...`, 'info');
-        await invoke('install_update');
-    } catch (error) {
-        console.warn('Desktop updater check failed:', error);
-        addLog(`Chưa cập nhật được ứng dụng: ${String(error)}`);
-    } finally {
-        desktopUpdateInstalling = false;
-        desktopUpdateCheckInFlight = false;
-        syncScanControls();
-    }
-}
-
-// The socket is still connecting here, so checkDesktopUpdate() would return early;
-// the first check runs from the first session snapshot instead.
-function scheduleDesktopUpdates() {
-    if (!desktopUpdaterInvoke()) return;
-    desktopStartupUpdatePending = true;
-    window.setInterval(() => void checkDesktopUpdate(), 5 * 60 * 1000);
-}
-
 // ---- Partner reports and scan history ---------------------------------------
 const DEFAULT_MIN_VIEWS = 100;
 
@@ -3357,7 +3317,7 @@ function updateReportSummary() {
             ? `Đã chọn ${count}/${total} đối tác. Xuất báo cáo hỗ trợ một hoặc nhiều đối tác.`
             : `Đã chọn ${count}/${total} đối tác. Cập nhật lại và xuất báo cáo đều hỗ trợ một hoặc nhiều đối tác.`);
     exportBtn.disabled = count === 0;
-    if (refreshBtn) refreshBtn.disabled = count === 0 || scanIsBusy() || desktopUpdateInstalling;
+    if (refreshBtn) refreshBtn.disabled = count === 0 || scanIsBusy();
     renderSelectedPartnerList();
 }
 
@@ -3787,5 +3747,4 @@ window.onload = async () => {
     await refreshThreadsCookieStatus();
     await refreshTikTokCookieStatus();
     connectWS();
-    scheduleDesktopUpdates();
 };

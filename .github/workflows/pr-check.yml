@@ -1,9 +1,12 @@
 name: PR check
 
-# Builds and smoke-tests every desktop target for a pull request into main,
-# without creating a release: nothing here is published or seen by users.
+# Tests every pull request into main and every push to main. Nothing is built or
+# published here: the server is updated by hand (deploy/server/README.md).
 on:
   pull_request:
+    branches:
+      - main
+  push:
     branches:
       - main
   workflow_dispatch:
@@ -15,8 +18,7 @@ concurrency:
   group: pr-check-${{ github.ref }}
   cancel-in-progress: true
 
-# uv runs on the interpreter from actions/setup-python (the one the sidecar
-# builds were proven with), never a uv-managed download.
+# uv runs on the interpreter from actions/setup-python, never a uv-managed download.
 env:
   UV_PYTHON: '3.12'
   UV_PYTHON_PREFERENCE: only-system
@@ -24,6 +26,8 @@ env:
 jobs:
   quality:
     name: Quality checks
+    # Windows: tests/test_batch_scripts.py runs the source-mode .bat launchers through
+    # cmd.exe, and the DPAPI cookie-store tests only run there.
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +35,6 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-          cache: npm
 
       - uses: actions/setup-python@v5
         with:
@@ -49,78 +52,13 @@ jobs:
       # tests/test_dependency_lock.py also fails if requirements.txt (the pip
       # fallback for source-mode machines) is not the export of uv.lock.
       - name: Install dependencies
-        run: |
-          uv sync --locked
-          npm ci
+        run: uv sync --locked
 
       - name: Install browser test runtime
         run: uv run --locked playwright install chromium
 
       - name: Run Python tests
-        run: uv run --locked pytest -q
+        run: uv run --locked pytest -q tests
 
       - name: Check browser JavaScript syntax
         run: node --check riviu/web/static/app.js
-
-  build:
-    name: Build ${{ matrix.name }}
-    needs: quality
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: Windows x64
-            os: windows-2022
-            target: x86_64-pc-windows-msvc
-          - name: macOS Intel
-            os: macos-15-intel
-            target: x86_64-apple-darwin
-          - name: macOS Apple Silicon
-            os: macos-14
-            target: aarch64-apple-darwin
-          - name: Linux x64
-            os: ubuntu-22.04
-            target: x86_64-unknown-linux-gnu
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
-        with:
-          version: '0.12.13'
-          enable-cache: true
-          cache-dependency-glob: uv.lock
-
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: ${{ matrix.target }}
-
-      - name: Install Linux packaging dependencies
-        if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y build-essential curl wget file libssl-dev libxdo-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev patchelf rpm
-
-      - name: Install Python dependencies
-        run: uv sync --locked
-
-      - name: Install desktop dependencies
-        run: npm ci
-
-      - name: Build bundled server
-        run: uv run --locked python desktop/build_sidecar.py --target ${{ matrix.target }}
-
-      - name: Smoke-test bundled server
-        run: uv run --locked python desktop/smoke_sidecar.py --target ${{ matrix.target }}
-
-      # Unsigned build without updater artifacts: proves the installers build
-      # on every target without needing the release signing secrets.
-      - name: Build installers
-        run: npx tauri build --target ${{ matrix.target }} --config desktop/tauri-pr-check.json

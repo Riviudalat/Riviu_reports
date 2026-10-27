@@ -20,7 +20,7 @@ from riviu import scan_state, scheduler, server_context, server_mode
 from riviu.api import auth, export, google, pages, proxy, scan, schedule, security, sources, threads_session, tiktok_session
 from riviu.workbook_utils import ensure_data_dir
 
-# Public names kept importable from `riviu.app` (tests, desktop_server, older callers).
+# Public names kept importable from `riviu.app` (tests, older callers).
 from riviu.api.export import export_report, report_partners  # noqa: F401
 from riviu.api.google import (  # noqa: F401
     delete_google_service_account,
@@ -113,7 +113,7 @@ _STATE_OWNERS = {
         "GOOGLE_IO_LOCK", "GOOGLE_LOGIN_LOCK",
     )},
     **{name: scan_state for name in (
-        "manager", "SCRAPE_TASK", "SCAN_STARTING", "SOURCE_BUSY", "DESKTOP_UPDATE_PENDING",
+        "manager", "SCRAPE_TASK", "SCAN_STARTING", "SOURCE_BUSY",
     )},
 }
 

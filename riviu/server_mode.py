@@ -1,6 +1,6 @@
 """Opt-in server mode: one shared password in front of the app, hosted behind nginx.
 
-Off unless ``RIVIU_SERVER_MODE=1``; desktop and source mode never read the other
+Off unless ``RIVIU_SERVER_MODE=1``; source mode never reads the other
 variables. ``load_config`` refuses to start (``ServerModeError``) when a required
 setting is missing, so a misconfigured server never comes up without a login.
 
@@ -68,7 +68,7 @@ class ServerConfig:
         return os.path.join(self.data_dir, "data", "server_sessions.json")
 
 
-# The configuration of the running process; None means desktop/source mode.
+# The configuration of the running process; None means source mode.
 ACTIVE: ServerConfig | None = None
 
 
@@ -210,7 +210,7 @@ def load_config(env=None) -> ServerConfig | None:
     except ValueError as error:
         raise ServerModeError(str(error)) from None
 
-    data_dir = os.path.abspath(str(env.get("RIVIU_DATA_DIR", "")).strip() or paths.RESOURCE_ROOT)
+    data_dir = os.path.abspath(str(env.get("RIVIU_DATA_DIR", "")).strip() or paths.REPO_ROOT)
     if _inside(secret_key_file, data_dir):
         raise ServerModeError("RIVIU_SECRET_KEY_FILE phải nằm ngoài thư mục dữ liệu (RIVIU_DATA_DIR).")
     read_secret_key(secret_key_file)

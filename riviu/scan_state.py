@@ -1,7 +1,7 @@
 """Process-wide scan lifecycle state: the WebSocket event hub and the single-operation gates.
 
 Only one scan runs at a time (`SCRAPE_TASK`), and source mutations (file selection, uploads,
-Google syncs, cookie changes) must not overlap a scan or a pending desktop update. Read and
+Google syncs, cookie changes) must not overlap a scan. Read and
 write these names through the module object (`scan_state.SOURCE_BUSY`), never with
 `from riviu.scan_state import SOURCE_BUSY`, so tests and `riviu.app` see one value.
 """
@@ -76,7 +76,6 @@ manager = ConnectionManager()
 SCRAPE_TASK = None
 SCAN_STARTING = False
 SOURCE_BUSY = False
-DESKTOP_UPDATE_PENDING = False
 
 
 def scan_running():
@@ -84,7 +83,7 @@ def scan_running():
 
 
 def source_mutation_blocked():
-    return scan_running() or SOURCE_BUSY or DESKTOP_UPDATE_PENDING
+    return scan_running() or SOURCE_BUSY
 
 
 @contextmanager

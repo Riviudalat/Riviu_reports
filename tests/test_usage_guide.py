@@ -23,7 +23,7 @@ def guide_page(tmp_path, monkeypatch):
         return page.text
 
 
-def test_header_has_guide_button_and_modal_in_desktop_mode(tmp_path, monkeypatch):
+def test_header_has_guide_button_and_modal_in_source_mode(tmp_path, monkeypatch):
     html = guide_page(tmp_path, monkeypatch)
     button = re.search(r'<button[^>]*id="guideButton"[^>]*>', html)
     assert button and 'onclick="openGuideModal()"' in button.group(0)

@@ -41,7 +41,7 @@ def render_app_page(request: Request, role: str):
 @router.get("/", response_class=HTMLResponse)
 async def index(request: Request):
     # Server mode: `/` is the public read-only viewer for everyone (logged in or not);
-    # administration lives at /admin. Desktop/source mode keeps the full app here.
+    # administration lives at /admin. Source mode keeps the full app here.
     return render_app_page(request, "viewer" if server_mode.ACTIVE is not None else "admin")
 
 

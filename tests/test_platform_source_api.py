@@ -48,7 +48,6 @@ def source_backend(tmp_path, monkeypatch):
     monkeypatch.setattr(backend, "SCRAPE_TASK", None)
     monkeypatch.setattr(backend, "SCAN_STARTING", False)
     monkeypatch.setattr(backend, "SOURCE_BUSY", False)
-    monkeypatch.setattr(backend, "DESKTOP_UPDATE_PENDING", False)
     monkeypatch.setattr(backend, "manager", backend.ConnectionManager())
     monkeypatch.setattr(sources_api, "oauth_status", lambda _: {"valid": True, "configured": True})
     for marker in ("A", "B"):

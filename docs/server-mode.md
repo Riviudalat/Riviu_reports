@@ -1,6 +1,6 @@
 # Chế độ server
 
-Bật bằng `RIVIU_SERVER_MODE=1`. Khi tắt (mặc định) bản desktop và source chạy y như cũ.
+Bật bằng `RIVIU_SERVER_MODE=1`. Khi tắt (mặc định) app chạy ở chế độ source (`python -m riviu` trên máy, chỉ nghe loopback) y như cũ.
 Hướng dẫn triển khai (Docker, nginx, Let's Encrypt, đổi mật khẩu, cập nhật, sao lưu): `deploy/server/README.md`.
 
 ## Cấu hình (`riviu/server_mode.py`)
@@ -33,7 +33,6 @@ từ `RIVIU_FORWARDED_ALLOW_IPS` (mặc định `127.0.0.1`; trong Docker là ga
 - Phiên là token ngẫu nhiên; server chỉ lưu SHA-256 (`data/server_sessions.json`) nên khởi động lại không mất đăng nhập.
   Đăng xuất thu hồi token; đổi mật khẩu làm mọi phiên cũ hết hiệu lực.
 - Sai mật khẩu 5 lần trong 15 phút từ một IP: trả 429 tới khi hết cửa sổ, kể cả khi nhập đúng.
-- `/_desktop/*` không tồn tại trên server (404); sidecar desktop từ chối chạy khi bật chế độ server.
 
 ## Lịch tự động (`riviu/scheduler.py`)
 
@@ -55,18 +54,18 @@ Chỉ chạy ở chế độ server (task asyncio khởi động cùng app). Qu�
   `data/scan_schedule_runs.json`: 50 kết quả gần nhất (`status`: completed, failed, skipped, stopped, cancelled).
   Cả hai ghi nguyên tử bằng `write_json_atomic`.
 
-## Khác với desktop
+## Khác với chế độ source
 
 - **Cookie Threads**: không có DPAPI/keyring trên server headless, nên lưu ở `data/threads_session.aesgcm`,
   mã hoá AES-256-GCM bằng khoá `RIVIU_SECRET_KEY_FILE` (thư mục dữ liệu gắn vào dữ liệu liên kết). Không bao giờ ghi bản rõ,
   không ghi cookie vào log.
 - **Cookie TikTok** (tuỳ chọn, mặc định tắt): lưu ở `data/tiktok_session.aesgcm`, cùng khoá và cùng quy tắc
-  như cookie Threads (bản desktop dùng DPAPI/keyring). Chỉ gửi kèm khi bật công tắc **Cookie TikTok** cho phiên quét.
+  như cookie Threads (chế độ source dùng DPAPI/keyring). Chỉ gửi kèm khi bật công tắc **Cookie TikTok** cho phiên quét.
 - **Tài khoản dịch vụ Google** (khuyên dùng trên server): `data/google_service_account.json` được mã hoá
   AES-256-GCM bằng khoá `RIVIU_SECRET_KEY_FILE`; khi có, nó được dùng thay cho đăng nhập Google.
   Cách tạo: `docs/google-service-account.md`.
 - **Đăng nhập Google**: server không mở được trình duyệt. `/google-oauth-login` trả URL đồng ý của Google
   (redirect `http://localhost:<cổng ngẫu nhiên>/`, PKCE S256). Người dùng duyệt trên máy mình, dán lại địa chỉ
   localhost (không tải được) vào hộp thoại; `/google-oauth-complete` kiểm tra `state`, đổi mã bằng code verifier
-  giữ trên server và lưu token như bản desktop. Phiên chờ hết hạn sau 10 phút và chỉ dùng được một lần.
+  giữ trên server và lưu token như chế độ source. Phiên chờ hết hạn sau 10 phút và chỉ dùng được một lần.
 - Mọi người dùng chung dữ liệu và chung quy tắc một phiên quét mỗi lúc.

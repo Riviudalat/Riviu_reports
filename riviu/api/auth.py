@@ -4,7 +4,7 @@ The login guards administration (`/admin` and every non-viewer API); after a log
 browser returns to `next` (only `/admin` or `/`), and logout returns to the public viewer `/`.
 
 The routes exist in every mode but answer 404 outside server mode (the local middleware
-also keeps them behind the per-process cookie there), so desktop/source mode is unchanged.
+also keeps them behind the per-process cookie there), so source mode is unchanged.
 """
 
 import asyncio

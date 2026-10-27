@@ -32,12 +32,8 @@ scripts/
 docs/superpowers/
 .claude/worktrees/
 
-# Desktop build dependencies and generated bundles
+# Local build and scratch output
 node_modules/
 build/
 output/
-src-tauri/target/
-src-tauri/gen/
-src-tauri/binaries/riviu-server-*
-src-tauri/binaries/riviu-server/
 .keys/

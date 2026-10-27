@@ -137,7 +137,7 @@ def test_tick_after_downtime_starts_no_run(tmp_path, monkeypatch):
 @pytest.fixture
 def run_env(tmp_path, monkeypatch):
     monkeypatch.setattr(backend, "EXCEL_DIR", str(tmp_path))
-    for name, value in (("SCRAPE_TASK", None), ("SCAN_STARTING", False), ("SOURCE_BUSY", False), ("DESKTOP_UPDATE_PENDING", False)):
+    for name, value in (("SCRAPE_TASK", None), ("SCAN_STARTING", False), ("SOURCE_BUSY", False)):
         monkeypatch.setattr(scan_state, name, value)
     monkeypatch.setattr(scan_state, "manager", scan_state.ConnectionManager())
     monkeypatch.setattr(backend, "CURRENT_SELECTED_FILE", "")

@@ -1,6 +1,6 @@
 """Request protection.
 
-Desktop/source mode: loopback-only Host/Origin checks and the per-process session cookie.
+Source mode: loopback-only Host/Origin checks and the per-process session cookie.
 
 Server mode (`riviu.server_mode.ACTIVE`): Host/Origin must match RIVIU_PUBLIC_ORIGIN (or
 loopback, for health checks on the box). Anyone may use the read-only viewer allowlist
@@ -286,9 +286,6 @@ def _security_headers(response):
 
 async def protect_server_api(request: Request, call_next):
     path = request.url.path
-    if path.startswith("/_desktop/"):
-        # Desktop updater controls never exist on a server.
-        return JSONResponse({"error": "Not Found"}, status_code=404)
     if not trusted_server_request(request):
         return JSONResponse({"error": "Nguồn truy cập không hợp lệ"}, status_code=403)
     public = (
@@ -324,8 +321,7 @@ async def protect_local_api(request: Request, call_next):
     public_asset = request.method in {"GET", "HEAD"} and (
         request.url.path.startswith("/static/") or request.url.path in PUBLIC_ASSET_PATHS
     )
-    desktop_control = request.url.path.startswith("/_desktop/")
-    if not (bootstrap or public_asset or desktop_control) and not valid_local_session(request):
+    if not (bootstrap or public_asset) and not valid_local_session(request):
         return JSONResponse({"error": "Mở lại trang ứng dụng để kết nối phiên local"}, status_code=403)
     top_navigation = bootstrap and request.headers.get("sec-fetch-mode") == "navigate" and request.headers.get("sec-fetch-dest") == "document"
     if request.headers.get("sec-fetch-site") == "cross-site" and not top_navigation:

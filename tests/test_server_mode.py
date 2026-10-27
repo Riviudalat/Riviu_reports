@@ -1,6 +1,6 @@
 """Server mode (RIVIU_SERVER_MODE=1): shared-password login, origin checks, cookie store, Google paste-back.
 
-Synthetic password, key, cookies and OAuth client only; no network. Desktop/source mode
+Synthetic password, key, cookies and OAuth client only; no network. Source mode
 behaviour stays owned by the existing security tests (test_backend_review_fixes.py).
 """
 
@@ -189,11 +189,6 @@ def test_foreign_host_and_origin_are_rejected_public_origin_accepted(server):
     assert cross_site.status_code == 403
     # Loopback Host stays usable for the container health check.
     assert server.get("/healthz", headers={"Host": "127.0.0.1:1231"}).status_code == 200
-
-
-def test_desktop_control_routes_are_not_exposed(server):
-    login(server)
-    assert server.post("/_desktop/shutdown", headers={"Origin": PUBLIC}).status_code == 404
 
 
 def test_websocket_requires_the_public_origin(server):
