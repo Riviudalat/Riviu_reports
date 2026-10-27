@@ -1463,3 +1463,9 @@ body.compact-page .compact-topbar { min-height: 52px; padding-top: 6px; padding-
 @media (min-width: 761px) {
     .compact-page .scan-advanced-controls { flex: 0 1 auto; }
 }
+
+/* Retry-pass cooldown: "Bỏ qua quét lại" sits next to the progress status while the run waits. */
+.progress-actions { display: inline-flex; align-items: center; gap: 10px; flex: 0 0 auto; min-width: 0; }
+#skipRetryBtn { padding: 4px 10px; font-size: 12px; gap: 4px; white-space: nowrap; }
+#skipRetryBtn .material-icons-outlined { font-size: 16px; }
+#skipRetryBtn[hidden] { display: none; }

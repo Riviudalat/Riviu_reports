@@ -320,20 +320,23 @@ def test_tiktok_retryable_statuses(status, retryable):
     assert scan_journal.tiktok_retryable(status) is retryable
 
 
-def run_with_passes(env, monkeypatch, platform, main_rows, retry_rows, main_status=None, **option_overrides):
+def run_with_passes(env, monkeypatch, platform, main_rows, retry_rows, main_status=None, cooldown=None, **option_overrides):
+    """retry_rows: the rows every retry pass saves (a list), or a function of that pass's only_rows."""
     passes, waits = [], []
 
     async def runner(target_path, events, opts):
-        passes.append({name: opts.get(name) for name in ("skip_rows", "only_rows", "create_result_sheet")})
-        rows = main_rows if len(passes) == 1 else retry_rows
+        passes.append({name: opts.get(name) for name in ("skip_rows", "only_rows", "create_result_sheet", "threads_cookies")})
+        rows = main_rows if len(passes) == 1 else retry_rows(opts["only_rows"]) if callable(retry_rows) else retry_rows
         await opts["on_rows_saved"](rows)
         await events.broadcast_status({"total": len(rows), "processed": len(rows), "done": True, **(main_status or {})})
 
-    async def cooldown(seconds):
+    async def record_wait(seconds):
         waits.append(seconds)
+        if cooldown:
+            await cooldown(seconds)
 
     monkeypatch.setattr(scan_service, "SCAN_RUNNERS", {**scan_service.SCAN_RUNNERS, platform: runner})
-    monkeypatch.setattr(scan_service, "_cooldown_sleep", cooldown)
+    monkeypatch.setattr(scan_service, "_cooldown_sleep", record_wait)
     asyncio.run(scan_service.run_scraper_safely(str(env / "Book.xlsx"), options(platform=platform, **option_overrides)))
     return passes, waits
 
@@ -344,7 +347,7 @@ def test_retry_pass_rescans_only_rows_with_a_transient_tiktok_error(env, monkeyp
     passes, waits = run_with_passes(env, monkeypatch, "tiktok", main, [saved(1, "Success"), saved(3, "Error: HTTP 503")],
                                     create_result_sheet=True)
     assert len(passes) == 2
-    assert passes[1] == {"skip_rows": None, "only_rows": {key(1), key(3)}, "create_result_sheet": False}
+    assert passes[1] == {"skip_rows": None, "only_rows": {key(1), key(3)}, "create_result_sheet": False, "threads_cookies": None}
     assert waits == [scan_journal.RETRY_COOLDOWN_SECONDS["tiktok"]]
     assert any("Quét lại 2 link lỗi" in log for log in logs)
     assert any("1/2 link đọc được" in log for log in logs)
@@ -357,13 +360,108 @@ def test_retry_pass_can_be_switched_off(env, monkeypatch):
     assert len(passes) == 1 and waits == []
 
 
+INVALID_POST = "Error: Link Threads không khả dụng (invalid_post)"
+SESSION_COOKIES = ({"name": "sessionid", "value": "synthetic-threads-cookie", "domain": ".threads.com"},)
+
+
+class FakeThreadsSession:
+    """The stored Cookie Threads session as scan_service sees it (no store, no network)."""
+    def __init__(self, configured=True, state="valid"):
+        self.configured, self.state, self.invalidated = configured, state, []
+
+    def status(self):
+        return {"configured": self.configured, "state": self.state, "generation": "gen-1" if self.configured else "",
+                "message": ""}
+
+    def snapshot(self, generation=None):
+        return SESSION_COOKIES
+
+    def invalidate(self, generation, state="unknown"):
+        self.invalidated.append((generation, state))
+
+
+def threads_session(monkeypatch, **state):
+    session = FakeThreadsSession(**state)
+    monkeypatch.setattr(server_context, "threads_session_manager", lambda: session)
+    return session
+
+
 def test_threads_retry_pass_waits_out_a_route_429_and_skips_blocks(env, monkeypatch):
-    main = [saved(0, "Error: Link Threads không khả dụng (invalid_post)", "invalid_post"),
+    threads_session(monkeypatch, configured=False)
+    main = [saved(0, INVALID_POST, "invalid_post"),
             saved(1, "Error: Bài Threads bị giới hạn theo vị trí hiện tại", "geo_restricted"),
             saved(2, "Error: HTTP 429", "rate_limit"), saved(3, "Success")]
-    passes, waits = run_with_passes(env, monkeypatch, "threads", main, [saved(0, "Success"), saved(2, "Success")])
-    assert passes[1]["only_rows"] == {key(0), key(2)}
+    passes, waits = run_with_passes(env, monkeypatch, "threads", main, [saved(2, "Success")])
+    # invalid_post is never retried anonymously; without a cookie session it is reported instead.
+    assert len(passes) == 2 and passes[1]["only_rows"] == {key(2)}
     assert waits == [max(scan_journal.RETRY_COOLDOWN_SECONDS["threads"], scan_service.THREADS_RATE_LIMIT_WAIT_MINUTES * 60)]
+    assert scan_state.manager.last_status["loginRequired"] == 1
+
+
+def test_threads_login_only_posts_without_a_cookie_end_the_run_at_once_with_a_hint(env, monkeypatch):
+    threads_session(monkeypatch, state="expired")
+    logs = logs_of(monkeypatch)
+    main = [saved(0, INVALID_POST, "invalid_post"), saved(1, INVALID_POST, "invalid_post"), saved(2, "Success")]
+    passes, waits = run_with_passes(env, monkeypatch, "threads", main, [])
+    assert len(passes) == 1 and waits == []
+    final = scan_state.manager.last_status
+    assert (final["phase"], final["loginRequired"]) == ("completed", 2)
+    assert final["notice"].startswith("2 bài Threads chỉ xem được khi đăng nhập")
+    assert "Cookie Threads" in final["notice"] and final["notice"] in logs
+    assert not journal_file(env).exists()
+
+
+def test_threads_login_only_posts_are_retried_through_the_cookie_session_after_a_short_wait(env, monkeypatch):
+    session = threads_session(monkeypatch)
+    main = [saved(0, INVALID_POST, "invalid_post"), saved(1, "Error: timeout", "transport"), saved(2, "Success")]
+    by_pass = {frozenset({key(1)}): [saved(1, "Success")], frozenset({key(0)}): [saved(0, "Success")]}
+    passes, waits = run_with_passes(env, monkeypatch, "threads", main, lambda only: by_pass[frozenset(only)])
+    # Transient rows first (anonymous, as before), then the login-only rows on the stored session.
+    assert [(p["only_rows"], p["threads_cookies"]) for p in passes[1:]] == [({key(1)}, None), ({key(0)}, SESSION_COOKIES)]
+    assert waits == [scan_journal.RETRY_COOLDOWN_SECONDS["threads"]]
+    final = scan_state.manager.last_status
+    assert (final["success"], final["error"], "notice" in final) == (3, 0, False)
+    assert session.invalidated == []
+
+    passes, waits = run_with_passes(env, monkeypatch, "threads", main[:1] + main[2:], [saved(0, "Success")])
+    assert waits == [scan_journal.LOGIN_RETRY_COOLDOWN_SECONDS] and passes[1]["threads_cookies"] == SESSION_COOKIES
+
+
+def test_threads_login_only_posts_are_not_retried_when_the_run_already_used_the_cookie(env, monkeypatch):
+    threads_session(monkeypatch)
+    main = [saved(0, INVALID_POST, "invalid_post"), saved(1, "Success")]
+    passes, waits = run_with_passes(env, monkeypatch, "threads", main, [], threads_cookies=SESSION_COOKIES)
+    assert len(passes) == 1 and waits == []
+    final = scan_state.manager.last_status
+    assert final["phase"] == "completed" and "notice" not in final and "loginRequired" not in final
+
+
+def test_a_cookie_rejected_in_the_login_retry_keeps_the_run_completed(env, monkeypatch):
+    session = threads_session(monkeypatch)
+
+    def rejected(only):
+        raise scan_service.SessionError("invalid")
+
+    passes, waits = run_with_passes(env, monkeypatch, "threads", [saved(0, INVALID_POST, "invalid_post")], rejected)
+    final = scan_state.manager.last_status
+    assert final["phase"] == "completed" and final["error"] == 1
+    assert session.invalidated == [("gen-1", "invalid")]
+    assert not journal_file(env).exists()
+
+
+def test_skip_retry_ends_the_cooldown_as_a_completed_run_with_the_main_pass_results(env, monkeypatch):
+    async def admin_skips(seconds):
+        assert scan_service.skip_retry_wait() and not scan_service.skip_retry_wait()
+        await asyncio.Event().wait()  # the cooldown itself would never end
+
+    main = [saved(0, "Success"), saved(1, "Error: HTTP 503")]
+    passes, waits = run_with_passes(env, monkeypatch, "tiktok", main, [saved(1, "Success")], cooldown=admin_skips)
+    assert len(passes) == 1 and len(waits) == 1
+    final = scan_state.manager.last_status
+    assert (final["phase"], final.get("cancelled"), final["success"], final["error"]) == ("completed", None, 1, 1)
+    assert "retryPass" not in final and "retryWaitSeconds" not in final
+    assert scan_state.RETRY_SKIP is None and not scan_service.skip_retry_wait()
+    assert not journal_file(env).exists()
 
 
 def test_no_retry_pass_after_a_threads_429_stop(env, monkeypatch):

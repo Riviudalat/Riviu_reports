@@ -309,7 +309,7 @@ def _result_from_status(status, task):
         result = "stopped"
     else:
         result = "completed"
-    counts = {key: status.get(key) for key in ("total", "processed", "success", "error", "hidden") if key in status}
+    counts = {key: status.get(key) for key in ("total", "processed", "success", "error", "hidden", "loginRequired") if key in status}
     return result, counts
 
 
@@ -426,7 +426,8 @@ class Scheduler:
         status = manager.last_status if manager.context.get("runId") == run_context["runId"] else {}
         result, counts = _result_from_status(status, task)
         messages = {
-            "completed": "Đã nạp sheet và quét xong.",
+            # e.g. Threads posts only a logged-in viewer sees: the run log says what to do about them.
+            "completed": " ".join(filter(None, ["Đã nạp sheet và quét xong.", status.get("notice")])),
             "stopped": "Quét dừng sớm, kết quả chưa đầy đủ.",
             "cancelled": "Phiên quét đã bị hủy.",
             "failed": f"Quét thất bại: {status.get('message') or 'lỗi không rõ'}",

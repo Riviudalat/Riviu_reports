@@ -271,6 +271,19 @@ def test_a_run_stopped_early_by_threads_429_is_recorded_as_stopped(run_env, monk
     assert entry["status"] == "stopped"
 
 
+def test_the_run_log_keeps_the_login_only_threads_posts_and_their_hint(run_env, monkeypatch):
+    notice = "41 bài Threads chỉ xem được khi đăng nhập (hoặc đã bị xoá) — nạp Cookie Threads ở /admin rồi quét lại."
+
+    async def runner(target_path, options, run_context=None):
+        await scan_state.manager.broadcast_status({"total": 526, "processed": 526, "success": 482, "error": 44, "hidden": 0,
+                                                   "loginRequired": 41, "notice": notice, "done": True, "phase": "completed"})
+
+    monkeypatch.setattr(scan_service, "run_scraper_safely", runner)
+    entry = asyncio.run(scheduler.Scheduler(sync=synced_workbook(run_env, [])).run_job("threads", "08:00"))
+    assert entry["status"] == "completed" and entry["message"] == f"Đã nạp sheet và quét xong. {notice}"
+    assert entry["counts"]["loginRequired"] == 41
+
+
 def test_jobs_due_together_run_one_after_another(run_env, monkeypatch):
     sources_api.save_source_preferences({"sources": {
         "threads": {"fileId": "Old.xlsx", "url": SHEET_URL}, "tiktok": {"fileId": "Old.xlsx", "url": SHEET_URL},

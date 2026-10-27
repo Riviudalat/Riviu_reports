@@ -5,6 +5,7 @@ The server is the gate: anonymous requests may use only the viewer allowlist
 login), and `/ws` refuses start/cancel without an admin login. Synthetic workbooks only.
 """
 
+import asyncio
 import json
 import re
 
@@ -201,14 +202,32 @@ def scan_spy(server, monkeypatch):
     return calls
 
 
-def test_anonymous_socket_watches_but_cannot_start_or_cancel(server, scan_spy):
+def test_anonymous_socket_watches_but_cannot_start_cancel_or_skip_the_retry(server, scan_spy, monkeypatch):
+    skip = asyncio.Event()
+    monkeypatch.setattr(scan_state, "RETRY_SKIP", skip)
     with server.websocket_connect(WS_URL, headers={"Origin": PUBLIC}) as ws:
         assert ws.receive_json()["type"] == "session"
-        for action in ("start", "cancel"):
+        for action in ("start", "cancel", "skip_retry"):
             ws.send_text(json.dumps({"action": action, "platform": "tiktok", "file_id": "A.xlsx"}))
             refused = ws.receive_json()
             assert refused == {"type": "log", "message": scan_api.VIEWER_REFUSED, "level": "WARN"}
-    assert scan_spy == []
+    assert scan_spy == [] and not skip.is_set()
+
+
+def test_admin_socket_skips_the_retry_wait_only_while_one_is_pending(server, monkeypatch):
+    login(server)
+    token = server.cookies.get(security.AUTH_COOKIE)
+    headers = {"Origin": PUBLIC, "Cookie": f"{security.AUTH_COOKIE}={token}"}
+    monkeypatch.setattr(scan_state, "RETRY_SKIP", None)
+    with server.websocket_connect(WS_URL, headers=headers) as ws:
+        assert ws.receive_json()["type"] == "session"
+        ws.send_text(json.dumps({"action": "skip_retry"}))
+        assert ws.receive_json()["message"] == "Phiên quét không còn chờ quét lại."
+        skip = asyncio.Event()
+        monkeypatch.setattr(scan_state, "RETRY_SKIP", skip)
+        ws.send_text(json.dumps({"action": "skip_retry"}))
+        assert "Bỏ qua quét lại" in ws.receive_json()["message"]
+    assert skip.is_set()
 
 
 def test_admin_socket_starts_and_a_logout_revokes_it_at_once(server, scan_spy):

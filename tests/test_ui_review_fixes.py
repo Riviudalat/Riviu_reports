@@ -47,14 +47,15 @@ const document = {getElementById:el, body:element('body'), createElement:element
 el('cancelBtn').disabled=true;
 el('workerCountSelect').value='2'; el('scrapeModeSelect').value='request';
 el('scanSheetSelect').value='Sheet A';
-const sent=[]; const sockets=[];
+const sent=[]; const sockets=[]; const intervals=new Map(); let intervalIds=0;
 class WebSocket {static OPEN=1; constructor(url){this.url=url;this.readyState=1;sockets.push(this);} send(x){sent.push(JSON.parse(x));}}
 const context = vm.createContext({console,document,WebSocket,Map,Set,Date,Number,JSON,Promise,URL,
   URLSearchParams,TextEncoder,
   window:{location:{protocol:'http:',hostname:'localhost',host:'localhost:1231',port:'1231'},
     matchMedia(){return {matches:true};},addEventListener(){},setInterval(){}},
-  setTimeout(){},clearTimeout(){},localStorage:{getItem(){return null;},setItem(){}},
-  fetch:async()=>({ok:true,json:async()=>({})}),assert,el,sent,sockets,buttons});
+  setTimeout(){},clearTimeout(){},setInterval(fn){intervals.set(++intervalIds,fn); return intervalIds;},
+  clearInterval(id){intervals.delete(id);},localStorage:{getItem(){return null;},setItem(){}},
+  fetch:async()=>({ok:true,json:async()=>({})}),assert,el,sent,sockets,buttons,intervals});
 vm.runInContext(fs.readFileSync('riviu/web/static/app.js','utf8'),context);
 for (const config of Object.values(vm.runInContext('PLATFORMS',context))) {
   for (const [role, id] of Object.entries(config.dom)) {
@@ -559,6 +560,86 @@ def test_threads_rate_limit_stop_shows_as_stopped_not_failed():
       assert.equal(el('startBtn').disabled,false);
       assert.equal(logs.filter(m=>String(m).includes('THREADS GIỚI HẠN TẦN SUẤT')).length,1);
       assert.equal(logs.filter(m=>String(m).includes('THẤT BẠI')).length,0);
+    """)
+
+
+RETRY_RUN_JS = """
+  const logs=[]; addLog=message=>logs.push(String(message));
+  let now=Date.UTC(2026,9,28,6,11,28); Date.now=()=>now;
+  const run={runId:'r1',platform:'threads',fileId:'T.xlsx',sheetName:'S'};
+  connectWS();
+  const status=data=>sockets[0].onmessage({data:JSON.stringify({type:'status',...run,data:{...run,...data}})});
+  const tick=()=>{ for (const fn of intervals.values()) fn(); };
+  const mainDone={total:526,processed:526,success:482,error:44};
+  const cooldown={...mainDone,phase:'running',done:false,retryPass:true,retryWaitSeconds:300,retryAt:now/1000+300,retryCount:44};
+"""
+
+
+def test_retry_cooldown_counts_down_offers_skip_and_returns_to_idle():
+    run_js(RETRY_RUN_JS + """
+      status({phase:'running',total:526,processed:100,success:90});
+      status(cooldown);
+      const text=()=>el('progressText').textContent;
+      assert.match(text(),/^Đã quét xong lượt chính \\(482\\/526 thành công\\)\\. Chờ quét lại 44 link lỗi lúc \\d\\d:\\d\\d \\(còn 5:00\\)$/);
+      assert.equal(el('progressStatus').textContent,'Chờ quét lại');
+      assert.equal(el('skipRetryBtn').hidden,false); assert.equal(el('skipRetryBtn').disabled,false);
+      assert.equal(el('startBtn').disabled,true); assert.equal(el('cancelBtn').disabled,false);
+      assert.equal(intervals.size,1);
+      now+=28000; tick();
+      assert.ok(text().endsWith('(còn 4:32)'), text());
+      sent.length=0; skipRetryWait(); skipRetryWait();
+      assert.equal(JSON.stringify(sent),'[{"action":"skip_retry"}]');
+      assert.equal(el('skipRetryBtn').disabled,true);
+      assert.ok(text().includes('Đã bỏ qua quét lại'), text());
+      // The run ends as completed with the main-pass results: the page is idle again.
+      status({...mainDone,phase:'completed',done:true});
+      assert.equal(scanPhase,'completed'); assert.equal(el('startBtn').disabled,false);
+      assert.equal(el('skipRetryBtn').hidden,true); assert.equal(intervals.size,0);
+      assert.notEqual(el('progressStatus').textContent,'Chờ quét lại');
+      assert.equal(logs.filter(m=>m.includes('HOÀN TẤT')).length,1);
+    """)
+
+
+def test_retry_pass_is_labelled_and_its_final_status_always_ends_the_tracked_run():
+    run_js(RETRY_RUN_JS + """
+      status(cooldown);
+      now+=300000; tick();
+      assert.ok(el('progressText').textContent.endsWith('Sắp quét lại 44 link lỗi…'));
+      status({phase:'starting',retryPass:true,retryCount:44,total:44,processed:0});
+      assert.ok(el('progressText').textContent.startsWith('Đang quét lại 44 link lỗi… • '));
+      assert.equal(el('progressStatus').textContent,'Đang quét lại link lỗi');
+      assert.equal(el('skipRetryBtn').hidden,true); assert.equal(intervals.size,0);
+      status({phase:'saving',retryPass:true,retryCount:44,total:44,processed:44,success:30,error:14});
+      assert.equal(el('progressStatus').textContent,'Đang lưu kết quả...');
+      // The page's source moved meanwhile (e.g. a re-synced sheet); the tracked run's end still applies.
+      currentFileId='Other.xlsx';
+      status({total:526,processed:526,success:512,error:14,phase:'completed',done:true});
+      assert.equal(scanPhase,'completed'); assert.equal(el('startBtn').disabled,false);
+      // A finished run this page never tracked stays ignored.
+      scanPhase='running'; currentFileId='Other.xlsx';
+      sockets[0].onmessage({data:JSON.stringify({type:'status',runId:'other',platform:'threads',fileId:'X.xlsx',
+        data:{runId:'other',phase:'completed',done:true,total:1,processed:1,success:1}})});
+      assert.equal(scanPhase,'running');
+    """)
+
+
+def test_completed_run_leads_with_its_login_only_notice():
+    run_js(RETRY_RUN_JS + """
+      const notice='2 bài Threads chỉ xem được khi đăng nhập (hoặc đã bị xoá) — nạp Cookie Threads ở /admin rồi quét lại.';
+      status({phase:'running',total:3,processed:1,success:1});
+      status({total:3,processed:3,success:1,error:2,loginRequired:2,notice,phase:'completed',done:true});
+      assert.ok(el('progressText').textContent.startsWith(notice+' • Tiến độ: 3/3'), el('progressText').textContent);
+      assert.equal(el('progressText').title,notice);
+      assert.equal(scanPhase,'completed'); assert.equal(intervals.size,0);
+    """)
+
+
+def test_reconnecting_mid_cooldown_counts_down_to_the_servers_retry_time():
+    run_js(RETRY_RUN_JS + """
+      sockets[0].onmessage({data:JSON.stringify({type:'session',data:{...run,running:true,results:[],
+        status:{...run,...cooldown,retryAt:now/1000+100}}})});
+      assert.ok(el('progressText').textContent.endsWith('(còn 1:40)'), el('progressText').textContent);
+      assert.equal(el('skipRetryBtn').hidden,false);
     """)
 
 
