@@ -3444,6 +3444,13 @@ function scheduleSlotHtml(platform, label, slot, index) {
         + `</div>`;
 }
 
+// The saved cookie's state next to the schedule's cookie option; a scan with an unusable cookie is refused.
+function scheduleCookieNote(key) {
+    const state = (PLATFORMS[key].cookieSession ? threadsCookieState : tiktokCookieState)?.state || 'none';
+    const notes = { none: 'chưa nạp', expired: 'hết hạn', invalid: 'không hợp lệ', checkpoint: 'cần xác minh', valid: 'đã kiểm tra', unchecked: 'chưa kiểm tra' };
+    return notes[state] ? ` (${notes[state]})` : '';
+}
+
 function schedulePlatformHtml(key) {
     const config = PLATFORMS[key];
     const item = scheduleDraft.platforms[key] || { slots: [], options: {} };
@@ -3465,7 +3472,8 @@ function schedulePlatformHtml(key) {
         + `<label class="scan-setting"><span>Luồng</span><select class="schedule-opt-workers">${workerOptions}</select></label>`
         + `<label class="scan-setting"><span>Chế độ</span><select class="schedule-opt-mode">${modeOptions}</select></label>`
         + `<label class="schedule-check"><input type="checkbox" class="schedule-opt-proxy"${options.useProxy ? ' checked' : ''}> Proxy (danh sách đã lưu)</label>`
-        + (cookieLabel ? `<label class="schedule-check"><input type="checkbox" class="schedule-opt-session"${options.useSession ? ' checked' : ''}> ${escapeHtml(cookieLabel)}</label>` : '')
+        + (cookieLabel ? `<label class="schedule-check"><input type="checkbox" class="schedule-opt-session"${options.useSession ? ' checked' : ''}> ${escapeHtml(cookieLabel)}${escapeHtml(scheduleCookieNote(key))}</label>` : '')
+        + `<label class="schedule-check" title="Sau lượt quét chính, chờ vài phút rồi quét lại một lần các link lỗi tạm thời"><input type="checkbox" class="schedule-opt-retry"${options.retryFailed !== false ? ' checked' : ''}> Quét lại link lỗi</label>`
         + `</div></section>`;
 }
 
@@ -3509,6 +3517,7 @@ function collectScheduleForm() {
             scrapeMode: section.querySelector('.schedule-opt-mode')?.value || PLATFORMS[key].defaultScrapeMode,
             useProxy: Boolean(section.querySelector('.schedule-opt-proxy')?.checked),
             useSession: Boolean(section.querySelector('.schedule-opt-session')?.checked),
+            retryFailed: section.querySelector('.schedule-opt-retry') ? Boolean(section.querySelector('.schedule-opt-retry').checked) : true,
         };
         scheduleDraft.platforms[key] = { slots, options };
     }

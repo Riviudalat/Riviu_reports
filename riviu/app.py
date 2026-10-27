@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
-from riviu import scan_state, scheduler, server_context, server_mode
+from riviu import scan_service, scan_state, scheduler, server_context, server_mode
 from riviu.api import auth, export, google, pages, proxy, scan, schedule, security, sources, threads_session, tiktok_session
 from riviu.workbook_utils import ensure_data_dir
 
@@ -149,12 +149,16 @@ os.makedirs(server_context.EXCEL_DIR, exist_ok=True)
 
 @asynccontextmanager
 async def lifespan(_app):
-    # Scheduled automatic runs exist only on a server (riviu/scheduler.py).
+    # Scheduled automatic runs and resuming a scan the previous process left unfinished
+    # (riviu/scan_journal.py) exist only on a server. The resume starts first, so a slot
+    # due at the same minute is skipped as busy.
     if server_mode.ACTIVE is not None:
+        scan_service.schedule_resume()
         scheduler.start()
     try:
         yield
     finally:
+        await scan_service.stop_resume()
         await scheduler.stop()
 
 

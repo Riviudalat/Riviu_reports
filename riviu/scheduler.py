@@ -9,6 +9,9 @@ scan options to use. At a slot the server, for that platform:
    pages follow it live over `/ws` like a manual scan,
 3. never pushes to Google: "Tạo sheet" stays a manual admin action.
 
+Option `retryFailed` (default on) adds the scan's retry pass over transient failures; a scheduled
+run interrupted by a restart is resumed at startup (riviu/scan_journal.py) and still never pushes.
+
 A slot is skipped (and logged) when a scan or a source operation is already running, and a failed
 sync records the error and skips the scan. From the sync until the scan task exists the run holds
 `scan_state.scan_starting()`, so a manual start or source change cannot slip in between.
@@ -70,7 +73,8 @@ LOG_LEVELS = {"completed": "OK", "skipped": "WARN", "stopped": "WARN", "cancelle
 
 
 def default_options(platform):
-    return {"workers": 10, "scrapeMode": DEFAULT_SCRAPE_MODES.get(platform, "request"), "useProxy": False, "useSession": False}
+    return {"workers": 10, "scrapeMode": DEFAULT_SCRAPE_MODES.get(platform, "request"), "useProxy": False, "useSession": False,
+            "retryFailed": True}
 
 
 def empty_schedule():
@@ -96,8 +100,8 @@ def _normalize_options(platform, raw):
     if mode not in SCRAPE_MODES:
         raise _invalid("Chế độ quét của lịch tự động không hợp lệ.")
     flags = {}
-    for key in ("useProxy", "useSession"):
-        value = raw.get(key, False)
+    for key in ("useProxy", "useSession", "retryFailed"):
+        value = raw.get(key, options[key])
         if not isinstance(value, bool):
             raise _invalid()
         flags[key] = value
@@ -128,7 +132,7 @@ def _normalize_slots(raw):
 
 def normalize_schedule(payload):
     """`{"version": 1, "platforms": {platform: {"slots": [{"time": "HH:MM", "enabled": bool}],
-    "options": {"workers", "scrapeMode", "useProxy", "useSession"}}}}`; raises ValueError."""
+    "options": {"workers", "scrapeMode", "useProxy", "useSession", "retryFailed"}}}}`; raises ValueError."""
     if not isinstance(payload, dict) or not isinstance(payload.get("platforms", {}), dict):
         raise _invalid()
     platforms = payload.get("platforms", {})
@@ -284,12 +288,12 @@ async def scan_payload(platform, file_id, sheet, options):
         # Empty text: the scan uses the saved proxy list, like the page does.
         "use_proxy": options["useProxy"], "proxy_text": "",
         "partners": [], "partner": "",
-        "create_result_sheet": False, "push_to_google": False,
+        "create_result_sheet": False, "push_to_google": False, "retry_failed": options.get("retryFailed", True),
     }
     if options["useSession"] and platform == "threads":
         status = await context.complete_blocking(context.threads_session_manager().status)
         if not status.get("configured") or not status.get("generation"):
-            raise ValueError("Bật cookie Threads nhưng chưa có phiên đã kiểm tra.")
+            raise ValueError(scan_service.cookie_problem_message("threads", status.get("message") or ""))
         payload.update(use_threads_session=True, threads_session_generation=status["generation"])
     elif options["useSession"] and platform == "tiktok":
         payload["use_tiktok_session"] = True
@@ -407,8 +411,9 @@ class Scheduler:
                 raise
             except Exception as error:
                 return await self.record(platform, slot, scheduled, "failed", f"Không bắt đầu quét được: {error}", started, fileId=file_id)
-            # Pushing stays a manual "Tạo sheet"; never let a scheduled scan push.
+            # Pushing stays a manual "Tạo sheet"; never let a scheduled scan push (a resume keeps this).
             scan_options["push_to_google"] = False
+            scan_options["scheduled"] = True
             await scan_state.manager.broadcast_log(
                 f"Lịch tự động {label} {slot}: bắt đầu quét sheet \"{scan_options['sheet_name']}\" • file: {file_id} • "
                 f"{scan_options['scrape_mode']}{' • proxy bật' if scan_options['use_proxy'] else ''} • luồng: {scan_options['worker_count']}."

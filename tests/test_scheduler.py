@@ -42,12 +42,12 @@ def config(**platforms):
 
 def test_schedule_normalizes_sorts_and_fills_defaults():
     schedule = scheduler.normalize_schedule({"platforms": {
-        "tiktok": {"slots": [{"time": "17:30", "enabled": False}, {"time": "08:00"}], "options": {"workers": 20, "scrapeMode": "hybrid", "useProxy": True, "useSession": False}},
+        "tiktok": {"slots": [{"time": "17:30", "enabled": False}, {"time": "08:00"}], "options": {"workers": 20, "scrapeMode": "hybrid", "useProxy": True, "useSession": False, "retryFailed": False}},
     }})
     assert schedule == {"version": 1, "platforms": {
         "tiktok": {"slots": [{"time": "08:00", "enabled": True}, {"time": "17:30", "enabled": False}],
-                   "options": {"workers": 20, "scrapeMode": "hybrid", "useProxy": True, "useSession": False}},
-        "threads": {"slots": [], "options": {"workers": 10, "scrapeMode": "hybrid", "useProxy": False, "useSession": False}},
+                   "options": {"workers": 20, "scrapeMode": "hybrid", "useProxy": True, "useSession": False, "retryFailed": False}},
+        "threads": {"slots": [], "options": {"workers": 10, "scrapeMode": "hybrid", "useProxy": False, "useSession": False, "retryFailed": True}},
     }}
 
 
@@ -259,7 +259,7 @@ def test_threads_cookie_option_without_a_verified_session_fails_before_scanning(
 
     monkeypatch.setattr(scheduler.context, "threads_session_manager", lambda: NoCookies())
     entry = asyncio.run(scheduler.Scheduler(sync=synced_workbook(run_env, [])).run_job("threads", "08:00"))
-    assert entry["status"] == "failed" and "cookie Threads" in entry["message"]
+    assert entry["status"] == "failed" and "Cookie Threads đã hết hạn hoặc chưa nạp" in entry["message"]
 
 
 def test_a_run_stopped_early_by_threads_429_is_recorded_as_stopped(run_env, monkeypatch):

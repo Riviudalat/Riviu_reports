@@ -272,7 +272,7 @@ def test_scan_start_passes_cookies_only_with_the_toggle(monkeypatch, tmp_path):
     monkeypatch.setattr(scan_service, "resolve_source_file", lambda *_args: ("book.xlsx", str(path), None, "tiktok"))
     store = MemoryStore()
     store.saved = session.normalize_tiktok_cookies(export(cookie()))
-    monkeypatch.setattr(server_context, "tiktok_session_manager", lambda: session.TikTokSession("unused", store=store))
+    monkeypatch.setattr(server_context, "tiktok_session_manager", lambda: session.TikTokSession("unused", store=store, verifier=lambda _cookies: "valid"))
     _, default = asyncio.run(scan_service.prepare_scan_start({"platform": "tiktok", "file_id": "book.xlsx"}))
     _, toggled = asyncio.run(scan_service.prepare_scan_start({"platform": "tiktok", "file_id": "book.xlsx", "use_tiktok_session": True}))
     assert "tiktok_cookies" not in default

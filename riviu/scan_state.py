@@ -76,6 +76,8 @@ manager = ConnectionManager()
 SCRAPE_TASK = None
 SCAN_STARTING = False
 SOURCE_BUSY = False
+# Run ids the user cancelled: their journal is dropped, so they are never auto-resumed.
+USER_CANCELLED_RUNS = set()
 
 
 def scan_running():

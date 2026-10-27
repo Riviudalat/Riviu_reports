@@ -2,15 +2,23 @@
 
 Platform differences live in the `SCAN_RUNNERS` and `PROXY_VALIDATORS` tables (a test
 asserts they cover the same platforms as `workbook_utils.PLATFORMS`).
+
+One scan is a main pass over the sheet, then (option `retry_failed`, on by default) one retry
+pass over the rows that ended with a transient error, after a cooldown. Each pass runs under a
+stall watchdog, and `riviu.scan_journal` records the rows each save wrote, so a stalled pass or
+a restarted server continues with only the rows not yet saved (`resume_interrupted_scan`).
 """
 
 import asyncio
+import logging
 import os
+import secrets
+import time
 
-from riviu import scan_state
+from riviu import scan_journal, scan_state, server_mode
 from riviu import server_context as context
 from riviu.google_sheets_sync import GoogleLoginRequired, push_rows_to_new_sheet
-from riviu.platforms.threads import resolve_threads_proxies, run_threads_scraper
+from riviu.platforms.threads import THREADS_RATE_LIMIT_WAIT_MINUTES, resolve_threads_proxies, run_threads_scraper
 from riviu.platforms.threads_session import SessionError, chromium_proxy_unsupported
 from riviu.platforms.tiktok import clamp_worker_count, run_scraper
 from riviu.platforms.tiktok_session import TikTokSessionError
@@ -24,7 +32,25 @@ from riviu.source_files import (
     source_sheet_default,
     validate_platform,
 )
-from riviu.workbook_utils import build_workbook_rows, clean_text, find_data_sheet_names, google_sheet_source_for_file
+from riviu.workbook_utils import PLATFORMS, build_workbook_rows, clean_text, find_data_sheet_names, google_sheet_source_for_file
+
+
+logger = logging.getLogger("riviu.scan_service")
+# Clock of the stall watchdog and sleep of the retry cooldown; tests replace them.
+_clock = time.monotonic
+_cooldown_sleep = asyncio.sleep
+
+COOKIE_LABELS = {"threads": "Cookie Threads", "tiktok": "Cookie TikTok"}
+# Saved-session states that cannot log a scan in; the scan is refused instead of running anonymously.
+UNUSABLE_COOKIE_STATES = frozenset({"none", "expired", "invalid", "checkpoint", "storage_unavailable", "missing_session"})
+
+
+def cookie_problem_message(platform, detail=""):
+    """The fail-fast message for a scan started with a cookie session that cannot be used."""
+    label = COOKIE_LABELS[platform]
+    where = f"vào /admin › {label} để nạp lại" if server_mode.ACTIVE is not None else f"mở {label} › Cấu hình để nạp lại"
+    detail = clean_text(detail).rstrip(".")
+    return f"{label} đã hết hạn hoặc chưa nạp{f' ({detail})' if detail else ''} — {where}."
 
 
 def tiktok_proxy_error(proxy_text, base_dir, mode):
@@ -51,32 +77,50 @@ def validate_proxy_start(use_proxy: bool, proxy_text: str, base_dir: str, platfo
 
 
 class RunEvents:
-    """Forward progress, but reserve terminal events for the transaction wrapper."""
+    """Forward progress, but reserve terminal events for the transaction wrapper.
+
+    `last_progress` (the `_clock` time of the last status or result) feeds the stall watchdog;
+    logs do not count, since a stuck TikTok pass still logs "Đang chờ kết quả...".
+    """
     def __init__(self, connection_manager):
         self.manager = connection_manager
         self.terminal = None
+        self.retry_pass = False
+        self.last_progress = _clock()
+
+    def touch(self):
+        self.last_progress = _clock()
 
     async def broadcast_status(self, status):
+        self.touch()
+        extra = {"retryPass": True} if self.retry_pass else {}
         if status.get("done"):
             self.terminal = dict(status)
-            await self.manager.broadcast_status({**status, "done": False, "phase": "saving"})
+            await self.manager.broadcast_status({**status, **extra, "done": False, "phase": "saving"})
         else:
             phase = "starting" if status.get("phase") == "starting" else "running"
-            await self.manager.broadcast_status({**status, "phase": phase})
+            await self.manager.broadcast_status({**status, **extra, "phase": phase})
 
     async def broadcast_log(self, *args, **kwargs):
         await self.manager.broadcast_log(*args, **kwargs)
 
     async def broadcast_data(self, row):
+        self.touch()
         await self.manager.broadcast_data(row)
 
     async def broadcast_duplicates(self, data):
         await self.manager.broadcast_duplicates(data)
 
 
+def pass_options(options):
+    """Row limits and the save hook of one pass (set by run_scan_passes; absent: every row)."""
+    return {key: options[key] for key in ("skip_rows", "only_rows", "on_rows_saved") if options.get(key) is not None}
+
+
 async def run_tiktok_scan(target_path, events, options):
     # Only a scan started with "Cookie TikTok" on passes cookies; the default call is unchanged.
     session_options = {"session_cookies": options["tiktok_cookies"]} if options.get("tiktok_cookies") else {}
+    session_options.update(pass_options(options))
     await run_scraper(
         target_path,
         events,
@@ -96,9 +140,9 @@ async def run_tiktok_scan(target_path, events, options):
 
 
 async def run_threads_scan(target_path, events, options):
-    session_options = {}
+    session_options = pass_options(options)
     if options.get("threads_cookies") is not None:
-        session_options = {"session_cookies": options["threads_cookies"], "proxy_configs": options.get("threads_proxies") or []}
+        session_options.update(session_cookies=options["threads_cookies"], proxy_configs=options.get("threads_proxies") or [])
     await run_threads_scraper(
         target_path, events, worker_count=options["worker_count"],
         selected_partners=options["partners"] or ([options["partner"]] if options["partner"] else []),
@@ -116,8 +160,11 @@ def scan_options(**overrides):
         "platform": "tiktok", "file_id": "", "sheet_name": "", "worker_count": 1, "scrape_mode": "request",
         "use_proxy": False, "proxy_text": "", "partner": None, "partners": [],
         "create_result_sheet": False, "push_to_google": False,
+        # One more pass over transient failures after a cooldown; `scheduled`: started by the scheduler.
+        "retry_failed": True, "scheduled": False,
     }
-    unknown = set(overrides) - set(options) - {"threads_cookies", "threads_proxies", "threads_generation", "tiktok_cookies"}
+    # `resume`: the journal of an interrupted run this start continues (resume_interrupted_scan).
+    unknown = set(overrides) - set(options) - {"threads_cookies", "threads_proxies", "threads_generation", "tiktok_cookies", "resume"}
     if unknown:
         raise TypeError(f"Unknown scan options: {sorted(unknown)}")
     return {**options, **overrides}
@@ -143,32 +190,225 @@ async def push_scan_results(target_path, file_id, scan_sheet, platform):
         await manager.broadcast_log(f"Đã đẩy kết quả lên Google Sheet: {sheet_title}.")
 
 
+def journal_payload(options):
+    """The start payload a resume replays: no proxy text, no cookies (flags only)."""
+    return {
+        "platform": options["platform"], "file_id": options["file_id"], "sheet_name": options["sheet_name"],
+        "workers": options["worker_count"], "scrape_mode": options["scrape_mode"], "use_proxy": options["use_proxy"],
+        "partners": list(options["partners"]), "partner": options["partner"] or "",
+        "create_result_sheet": options["create_result_sheet"], "push_to_google": options["push_to_google"],
+        "retry_failed": options.get("retry_failed", True),
+        "use_threads_session": options.get("threads_cookies") is not None,
+        "use_tiktok_session": bool(options.get("tiktok_cookies")),
+    }
+
+
+def proxy_route(platform, proxy_text, mode):
+    """The proxies a scan with this text would use (the saved list when the text is empty)."""
+    if platform == "threads":
+        return resolve_threads_proxies(context.EXCEL_DIR, proxy_text, mode)
+    return [config for config in resolve_proxy_configs(context.EXCEL_DIR, proxy_text) if config.get("enabled", True)]
+
+
+async def begin_journal(options):
+    resume = options.get("resume")
+    if resume:
+        journal = scan_journal.RunJournal(resume, context.EXCEL_DIR)
+    else:
+        proxy_hash = salt = None
+        if options["use_proxy"]:
+            salt = secrets.token_hex(16)
+            try:
+                route = options.get("threads_proxies") if options.get("threads_cookies") is not None else proxy_route(
+                    options["platform"], options["proxy_text"], options["scrape_mode"])
+                proxy_hash = scan_journal.fingerprint(route, salt)
+            except Exception:
+                proxy_hash = None  # no fingerprint: a resume is refused rather than guessing the route
+        journal = scan_journal.RunJournal.begin(
+            context.EXCEL_DIR, options, journal_payload(options), proxy_hash=proxy_hash, salt=salt or "")
+    await journal.save()
+    return journal
+
+
+async def run_watched_pass(runner, target_path, events, options):
+    """Run one pass under the stall watchdog. True: the watchdog stopped it (results saved)."""
+    events.terminal = None
+    events.touch()
+    pass_task = asyncio.create_task(runner(target_path, events, options))
+    stalled = False
+
+    async def watchdog():
+        nonlocal stalled
+        while not pass_task.done():
+            await asyncio.sleep(scan_journal.STALL_CHECK_SECONDS)
+            if not pass_task.done() and _clock() - events.last_progress >= scan_journal.STALL_SECONDS:
+                stalled = True
+                pass_task.cancel()  # the scanner saves what it has before it ends
+                return
+
+    watcher = asyncio.create_task(watchdog())
+    try:
+        await pass_task
+    except asyncio.CancelledError:
+        current = asyncio.current_task()
+        if not stalled or (current is not None and current.cancelling()):
+            raise
+        return True
+    finally:
+        watcher.cancel()
+        await asyncio.gather(watcher, return_exceptions=True)
+    return False
+
+
+async def handle_stall(journal):
+    """Count one stall restart; past the cap the run fails (its saved results stay)."""
+    attempts = journal.resume_attempts + 1
+    journal.mark(resumeAttempts=attempts)
+    await journal.save()
+    minutes = max(1, scan_journal.STALL_SECONDS // 60)
+    if attempts > scan_journal.MAX_RESUME_ATTEMPTS:
+        raise RuntimeError(
+            f"Phiên quét không có kết quả mới trong {minutes} phút và đã tự tiếp tục {scan_journal.MAX_RESUME_ATTEMPTS} lần; "
+            "dừng hẳn. Kết quả đã quét vẫn được lưu.")
+    await scan_state.manager.broadcast_log(
+        f"CẢNH BÁO: Phiên quét không có kết quả mới trong {minutes} phút. Đã dừng lượt bị treo (kết quả đã lưu) và tự tiếp tục "
+        f"với các link còn lại (lần {attempts}/{scan_journal.MAX_RESUME_ATTEMPTS}).", level="WARN")
+
+
+def _url_count(keys):
+    return len({key[2].casefold() for key in keys})
+
+
+def _wait_text(seconds):
+    return f"{seconds // 60} phút" if seconds >= 60 and seconds % 60 == 0 else f"{seconds} giây"
+
+
+async def run_scan_passes(target_path, events, options, journal):
+    """Main pass (resumed past saved rows), then the retry pass. Returns the terminal status."""
+    manager = scan_state.manager
+    platform = options["platform"]
+    runner = SCAN_RUNNERS[platform]
+    combined = False  # counts come from the journal once a resume or a retry pass happened
+    prior = None
+    main_terminal = None
+    if not journal.main_done:
+        while True:
+            skip = journal.saved_keys()
+            if skip:
+                prior, combined = journal.counts(), True
+                await manager.broadcast_log(
+                    f"Tiếp tục phiên quét: bỏ qua {len(skip)} dòng đã lưu trong lượt này, chỉ quét các link còn lại.")
+            stalled = await run_watched_pass(runner, target_path, events, {
+                **options, "skip_rows": skip or None, "on_rows_saved": journal.recorder(),
+            })
+            if not stalled:
+                break
+            await handle_stall(journal)
+        main_terminal = dict(events.terminal) if events.terminal else None
+        journal.mark(mainDone=True, stopReason=(main_terminal or {}).get("stopReason") or "")
+        await journal.save()
+    else:
+        combined = True
+        await manager.broadcast_log("Lượt quét chính đã xong trước khi gián đoạn; chuyển sang quét lại link lỗi.")
+
+    candidates = journal.retry_candidates()
+    if options.get("retry_failed", True) and candidates and not journal.data.get("stopReason"):
+        combined = True
+        count = _url_count(candidates)
+        cooldown = int(scan_journal.RETRY_COOLDOWN_SECONDS.get(platform, 120))
+        if journal.has_rate_limited(candidates):
+            # Links that got HTTP 429 on a retired route wait out the rate limit first.
+            cooldown = max(cooldown, THREADS_RATE_LIMIT_WAIT_MINUTES * 60)
+        await manager.broadcast_log(f"Còn {count} link lỗi tạm thời. Chờ {_wait_text(cooldown)} rồi quét lại một lần.")
+        await manager.broadcast_status({
+            **(main_terminal or manager.last_status), "done": False, "phase": "running",
+            "retryPass": True, "retryWaitSeconds": cooldown,
+        })
+        await _cooldown_sleep(cooldown)
+        await manager.broadcast_log(f"Quét lại {count} link lỗi...")
+        events.retry_pass = True
+        while True:
+            only = journal.retry_candidates()
+            if not only:
+                break
+            stalled = await run_watched_pass(runner, target_path, events, {
+                # A result tab is a snapshot of the main pass; the retry pass never adds another.
+                **options, "create_result_sheet": False, "only_rows": only,
+                "on_rows_saved": journal.recorder(retry_pass=True),
+            })
+            if not stalled:
+                break
+            await handle_stall(journal)
+        retry_counts = journal.counts(candidates)
+        fixed = retry_counts["success"] + retry_counts["hidden"]
+        await manager.broadcast_log(
+            f"Quét lại xong: {fixed}/{count} link đọc được, {count - fixed} link vẫn lỗi (giữ số cũ).",
+            level="OK" if fixed == count else "WARN")
+        if (events.terminal or {}).get("stopReason"):
+            await manager.broadcast_log("Lượt quét lại dừng sớm; các link chưa quét lại giữ kết quả lượt chính.", level="WARN")
+
+    terminal = dict(main_terminal or events.terminal or manager.last_status)
+    for key in ("retryPass", "retryWaitSeconds", "stopReason"):
+        terminal.pop(key, None)
+    # Only the main pass decides whether the run is complete (a 429 there stops it).
+    if main_terminal and main_terminal.get("stopReason"):
+        terminal["stopReason"] = main_terminal["stopReason"]
+    if combined:
+        counts = journal.counts()
+        total = (prior or {}).get("processed", 0) + main_terminal.get("total", 0) if main_terminal else counts["processed"]
+        terminal.update(counts, total=max(total, counts["processed"]))
+    return terminal
+
+
+def user_cancel_scan():
+    """Cancel the running scan for the user: its journal is dropped and it is never resumed."""
+    task = scan_state.SCRAPE_TASK
+    if not task or task.done():
+        return False
+    run_id = scan_state.manager.context.get("runId")
+    if run_id:
+        scan_state.USER_CANCELLED_RUNS.add(run_id)
+    # Repeated cancel must not interrupt the pending save/cleanup.
+    if not task.cancelling():
+        task.cancel()
+    return True
+
+
 async def run_scraper_safely(target_path, options, run_context=None):
     """Run one scan transaction; `options` holds the validated start payload (see websocket start)."""
     manager = scan_state.manager
     platform = options["platform"]
     events = RunEvents(manager)
+    journal = None
+    run_id = (run_context or {}).get("runId")
     try:
         file_id = file_id_for_path(target_path)
         if run_context is None:
-            manager.begin_run(platform, file_id, options["sheet_name"])
+            run_id = manager.begin_run(platform, file_id, options["sheet_name"])["runId"]
         sheets = await asyncio.to_thread(find_data_sheet_names, target_path)
         scan_sheet = clean_text(options["sheet_name"]) or (sheets[0] if sheets else "")
         if not scan_sheet or scan_sheet not in sheets:
             raise ValueError("Sheet không tồn tại trong file đã chọn")
         options = {**options, "sheet_name": scan_sheet, "file_label": file_display_label(file_id)}
-        await SCAN_RUNNERS[platform](target_path, events, options)
-        if options["push_to_google"] and (events.terminal or {}).get("stopReason"):
+        journal = await begin_journal(options)
+        terminal = await run_scan_passes(target_path, events, options, journal)
+        if options["push_to_google"] and terminal.get("stopReason"):
             # A run stopped early (Threads HTTP 429) is incomplete: never push it as a result tab.
             await manager.broadcast_log("BỎ QUA đẩy Google: phiên quét đã dừng sớm, kết quả chưa đầy đủ.", level="WARN")
         elif options["push_to_google"]:
             await push_scan_results(target_path, file_id, scan_sheet, platform)
-        await manager.broadcast_status({**(events.terminal or manager.last_status), "done": True, "phase": "completed"})
+        await journal.clear()
+        await manager.broadcast_status({**terminal, "done": True, "phase": "completed"})
     except asyncio.CancelledError:
+        if journal is not None and run_id in scan_state.USER_CANCELLED_RUNS:
+            await journal.clear()
+        # Any other cancellation (server shutdown) keeps the journal: the next start resumes the run.
         await manager.broadcast_log("Đã hủy phiên quét.")
         await manager.broadcast_status({**manager.last_status, "done": True, "cancelled": True, "phase": "cancelled"})
         raise
     except Exception as error:
+        if journal is not None:
+            await journal.clear()
         message = str(error)
         if options.get("threads_cookies") is not None and not isinstance(error, (SessionError, ValueError)):
             # Unexpected errors from a logged-in run may echo request details; keep them out of the log.
@@ -176,6 +416,8 @@ async def run_scraper_safely(target_path, options, run_context=None):
         if options.get("tiktok_cookies") and not isinstance(error, ValueError):
             message = "Phiên quét TikTok dùng cookie gặp lỗi kỹ thuật; cookie vẫn được giữ, hãy thử lại."
         if isinstance(error, SessionError) and options.get("threads_cookies") is not None:
+            if error.state in UNUSABLE_COOKIE_STATES:
+                message = cookie_problem_message("threads", message)
             # Only a session failure says anything about the cookies; other errors leave them valid.
             try:
                 await context.complete_blocking(context.threads_session_manager().invalidate, options.get("threads_generation"), error.state)
@@ -183,6 +425,8 @@ async def run_scraper_safely(target_path, options, run_context=None):
                 pass
         await manager.broadcast_log(f"Lỗi quét: {message}")
         await manager.broadcast_status({**manager.last_status, "error": max(1, manager.last_status.get("error", 0)), "done": True, "phase": "failed", "message": message})
+    finally:
+        scan_state.USER_CANCELLED_RUNS.discard(run_id)
 
 
 def start_scan_task(target_path, options):
@@ -243,6 +487,7 @@ async def prepare_scan_start(payload):
         partners=[clean_text(name) for name in partners_payload if clean_text(name)] if isinstance(partners_payload, list) else [],
         create_result_sheet=bool(payload.get("create_result_sheet", False)),
         push_to_google=bool(payload.get("push_to_google", False)),
+        retry_failed=payload.get("retry_failed", True) is not False,
     )
     if platform == "threads" and payload.get("use_threads_session") is True:
         generation = payload.get("threads_session_generation")
@@ -257,14 +502,108 @@ async def prepare_scan_start(payload):
                 if options["threads_proxies"] and chromium_proxy_unsupported(options["threads_proxies"][0]):
                     raise SessionError("proxy_unsupported")
             except SessionError as error:
-                raise ValueError(str(error)) from error
+                # Missing/expired cookies fail here; a rejected login fails in the run's preflight,
+                # which verifies the session on the chosen route before any row is touched.
+                detail = str(error)
+                raise ValueError(cookie_problem_message("threads", detail) if error.state in UNUSABLE_COOKIE_STATES else detail) from error
             except Exception as error:
                 raise ValueError("Không nạp được phiên Threads đã lưu.") from error
     if platform == "tiktok" and payload.get("use_tiktok_session") is True:
-        try:
-            options["tiktok_cookies"] = await context.complete_blocking(context.tiktok_session_manager().snapshot)
-        except TikTokSessionError as error:
-            raise ValueError(str(error)) from error
-        except Exception as error:
-            raise ValueError("Không nạp được cookie TikTok đã lưu.") from error
+        with scan_state.scan_starting():
+            session = context.tiktok_session_manager()
+            try:
+                options["tiktok_cookies"] = await context.complete_blocking(session.snapshot)
+                # One small account-info request: an expired login fails now instead of scanning anonymously.
+                check = (await context.complete_blocking(session.verify)).get("check") or {}
+            except TikTokSessionError as error:
+                detail = str(error)
+                raise ValueError(cookie_problem_message("tiktok", detail) if error.state in UNUSABLE_COOKIE_STATES else detail) from error
+            except Exception as error:
+                raise ValueError("Không nạp được cookie TikTok đã lưu.") from error
+        if check.get("state") in UNUSABLE_COOKIE_STATES:
+            raise ValueError(cookie_problem_message("tiktok", check.get("message", "")))
+        if check.get("state") != "valid":
+            await scan_state.manager.broadcast_log(
+                "Chưa xác minh được cookie TikTok lúc bắt đầu (lỗi kết nối); vẫn quét với cookie đã lưu.", level="WARN")
     return target_path, options
+
+
+RESUME_TASK = None
+
+
+async def resume_interrupted_scan():
+    """Server start: continue a scan the previous process left unfinished (its journal remains).
+
+    Only the rows not yet saved in that run are scanned, through the normal prepare/start path
+    (cookie check included). Never after a user cancel or a Threads HTTP 429 stop (no journal or
+    `stopReason`), at most `MAX_RESUME_ATTEMPTS` times, and never on another proxy route.
+    """
+    manager = scan_state.manager
+    if scan_state.source_mutation_blocked():
+        return None
+    # Held from before the first await until the task exists: a scheduled slot is skipped meanwhile.
+    with scan_state.scan_starting():
+        base_dir = context.EXCEL_DIR
+        data = await asyncio.to_thread(scan_journal.load_journal, base_dir)
+        if data is None:
+            return None
+        platform = data.get("platform")
+        label = PLATFORMS[platform].label if platform in PLATFORMS else str(platform)
+        attempts = int(data.get("resumeAttempts") or 0)
+
+        async def give_up(reason, level="WARN"):
+            logger.warning("Không tự tiếp tục phiên quét %s: %s", label, reason)
+            await manager.broadcast_log(f"Không tự tiếp tục phiên quét {label} bị gián đoạn: {reason}", level=level)
+            await asyncio.to_thread(scan_journal.clear_journal, base_dir)
+            return None
+
+        if data.get("stopReason"):
+            return await give_up("phiên trước đã dừng vì Threads giới hạn tần suất (HTTP 429).")
+        if attempts >= scan_journal.MAX_RESUME_ATTEMPTS:
+            return await give_up(f"đã tự tiếp tục {scan_journal.MAX_RESUME_ATTEMPTS} lần.")
+        # Counted before starting, so a crash during the resumed run still uses up this attempt.
+        data["resumeAttempts"] = attempts + 1
+        await asyncio.to_thread(scan_journal.write_json_atomic, scan_journal.journal_path(base_dir), data)
+        payload = {**data["payload"], "action": "start", "proxy_text": ""}
+        try:
+            if payload.get("use_threads_session"):
+                status = await context.complete_blocking(context.threads_session_manager().status)
+                payload["threads_session_generation"] = status.get("generation") or ""
+                if not status.get("configured"):
+                    raise ValueError(cookie_problem_message("threads", status.get("message", "")))
+            target_path, options = await prepare_scan_start(payload)
+            fingerprint = data.get("proxyFingerprint")
+            if options["use_proxy"]:
+                route = options.get("threads_proxies") if options.get("threads_cookies") is not None else proxy_route(
+                    platform, "", options["scrape_mode"])
+                if not fingerprint or scan_journal.fingerprint(route, fingerprint.get("salt", "")) != fingerprint.get("hash"):
+                    raise ValueError("danh sách proxy đã lưu khác tuyến của phiên trước; không tự đổi proxy.")
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            return await give_up(str(error), level="ERROR")
+        options["resume"] = data
+        options["scheduled"] = bool(data.get("scheduled"))
+        if options["scheduled"]:
+            options["push_to_google"] = False  # a scheduled run never pushes, resumed or not
+        task, _run_context = start_scan_task(target_path, options)
+        await manager.broadcast_log(
+            f"Tự tiếp tục phiên quét {label} bị gián đoạn (sheet \"{options['sheet_name']}\", lần {attempts + 1}/"
+            f"{scan_journal.MAX_RESUME_ATTEMPTS}): chỉ quét các link chưa lưu.", level="WARN")
+        await manager.broadcast_status(manager.last_status)
+        return task
+
+
+def schedule_resume():
+    """Start resume_interrupted_scan in the background (server mode lifespan)."""
+    global RESUME_TASK
+    RESUME_TASK = asyncio.create_task(resume_interrupted_scan())
+    return RESUME_TASK
+
+
+async def stop_resume():
+    global RESUME_TASK
+    task, RESUME_TASK = RESUME_TASK, None
+    if task is not None and not task.done():
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)

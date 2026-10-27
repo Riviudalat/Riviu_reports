@@ -48,9 +48,11 @@ Chỉ chạy ở chế độ server (task asyncio khởi động cùng app). Qu�
 - Bỏ qua (và ghi lại) khi đang có phiên quét hoặc thao tác nguồn, hay khi nền tảng chưa có link. Nạp lỗi
   (ví dụ cần đăng nhập Google) thì ghi lỗi và không quét. Hai nền tảng cùng giờ chạy lần lượt, không bao giờ song song.
 - Vòng lặp thức dậy mỗi phút. Giờ bị lỡ khi server tắt (hoặc vòng lặp kẹt quá 3 phút) bị bỏ qua, không chạy bù.
-- Quy tắc Threads giữ nguyên (giãn nhịp, dừng khi HTTP 429 và ghi là "Dừng sớm", không xoay proxy né 403/429).
+- Quy tắc Threads giữ nguyên (giãn nhịp, cách ly tuyến proxy nhận HTTP 429, dừng và ghi là "Dừng sớm" khi mọi tuyến đều 429, không xoay proxy né 403/geoblock).
+- Tùy chọn **Quét lại link lỗi** (`retryFailed`, mặc định bật) chạy một lượt quét lại các link lỗi tạm thời sau khi chờ; xem `docs/threads-scanning.md`.
+- Phiên quét dở (lịch hoặc tay) bị gián đoạn do crash/restart container được tự tiếp tục khi app khởi động (trước vòng lặp lịch, nên khung giờ trùng lúc bị bỏ qua vì bận); lượt lịch được tiếp tục vẫn không đẩy Google. Xem `riviu/scan_journal.py`.
 - `data/scan_schedule.json` (cấu hình):
-  `{"version": 1, "platforms": {"tiktok": {"slots": [{"time": "08:00", "enabled": true}], "options": {"workers": 10, "scrapeMode": "request", "useProxy": false, "useSession": false}}, "threads": {...}}}`.
+  `{"version": 1, "platforms": {"tiktok": {"slots": [{"time": "08:00", "enabled": true}], "options": {"workers": 10, "scrapeMode": "request", "useProxy": false, "useSession": false, "retryFailed": true}}, "threads": {...}}}`.
   `data/scan_schedule_runs.json`: 50 kết quả gần nhất (`status`: completed, failed, skipped, stopped, cancelled).
   Cả hai ghi nguyên tử bằng `write_json_atomic`.
 

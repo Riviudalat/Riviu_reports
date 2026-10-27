@@ -61,6 +61,18 @@ AUTOSAVE_PAUSE_PER_SAVE_SECOND = 4
 _autosave_clock = time.monotonic
 
 
+def _row_filter(skip_rows=None, only_rows=None):
+    if skip_rows is None and only_rows is None:
+        return None
+    skip = set(skip_rows or ())
+    only = set(only_rows) if only_rows is not None else None
+
+    def keep(item):
+        key = (item["sheet_name"], item["row"], item["url"])
+        return key not in skip and (only is None or key in only)
+    return keep
+
+
 def selected_partner_label(partners):
     if not partners:
         return ""
@@ -123,6 +135,7 @@ def build_url_buckets(rows_to_process, sheet_contexts):
         bucket["rows"].append({
             "sheet_name": item["sheet_name"],
             "row": item["row"],
+            "url": item["url"],
             "partners": item["partners"],
         })
         expected_media_id = clean_text(item.get("expected_media_id", ""))
@@ -137,7 +150,8 @@ def build_url_buckets(rows_to_process, sheet_contexts):
 class _TikTokScan:
     """Workbook, counters and caches of one run_scraper call."""
 
-    def __init__(self, file_path, websocket_manager, *, sheet_name, selected_names, partner_label, save_every):
+    def __init__(self, file_path, websocket_manager, *, sheet_name, selected_names, partner_label, save_every,
+                 row_filter=None, on_rows_saved=None):
         self.file_path = file_path
         self.manager = websocket_manager
         self.selected_names = selected_names
@@ -147,6 +161,15 @@ class _TikTokScan:
         cleared_total_sheets = workbook_io.clear_existing_total_rows(self.workbook, sheet_name=sheet_name)
         self.sheet_contexts = build_sheet_contexts(self.workbook, sheet_name=sheet_name)
         self.rows_to_process = collect_rows(self.workbook, selected_partners=selected_names, sheet_name=sheet_name)
+        if row_filter is not None:
+            # A resumed run or a retry pass: only the rows the scan service names.
+            self.rows_to_process = [item for item in self.rows_to_process if row_filter(item)]
+            for sequence, item in enumerate(self.rows_to_process, start=1):
+                item["sequence"] = sequence
+        self.filtered = row_filter is not None
+        # Rows written since the last successful save, reported to on_rows_saved after it.
+        self.on_rows_saved = on_rows_saved
+        self.unsaved_rows = []
         # Put TỔNG rows back before any save (autosave, cancel cleanup, final) so no
         # saved file ever lacks them. They sit below every occupied row and their
         # formulas reference cells, so writing results later keeps them correct.
@@ -195,6 +218,9 @@ class _TikTokScan:
 
     def write_rows(self, bucket_rows, url, data, channel_name, status, resolved_url=""):
         for target in bucket_rows:
+            self.unsaved_rows.append({
+                "sheet_name": target["sheet_name"], "row": target["row"], "url": target.get("url", url), "status": status,
+            })
             write_result(
                 self.sheet_contexts,
                 {"sheet_name": target["sheet_name"], "row": target["row"], "url": url},
@@ -230,6 +256,12 @@ class _TikTokScan:
             self.error_count += 1
         self.write_rows(result.get("rows") or [], result["url"], result["data"], result["channel_name"], status, resolved_url)
         return result
+
+    async def rows_saved(self):
+        """The workbook was just saved: report the rows it now holds for this run."""
+        rows, self.unsaved_rows = self.unsaved_rows, []
+        if rows and self.on_rows_saved is not None:
+            await self.on_rows_saved(rows)
 
     async def abandon_remaining(self):
         remaining = [bucket for bucket in self.bucket_order if bucket["sequence"] not in self.completed_sequences]
@@ -294,6 +326,7 @@ class _TikTokScan:
         self.next_autosave_at = save_finished + AUTOSAVE_PAUSE_PER_SAVE_SECOND * (save_finished - save_started)
         if saved:
             self.pending_save_count = 0
+            await self.rows_saved()
             if self.manager:
                 await self.manager.broadcast_log(f"Đã lưu tạm workbook tại {self.processed}/{self.total} links.")
         else:
@@ -450,6 +483,7 @@ async def save_pending_results(scan):
     if not saved:
         raise RuntimeError("Lưu file Excel khi dừng quét thất bại; kết quả mới chưa được lưu.")
     scan.pending_save_count = 0
+    await scan.rows_saved()
 
 
 async def _shutdown_scan(scan, workers, finalize_task, browser, executor, *, save_pending):
@@ -575,6 +609,7 @@ async def _finish_scan(scan, *, create_result_sheet, file_label, base_dir):
             raise RuntimeError("Lưu file Excel thất bại vì file đang mở.")
         raise RuntimeError("Lưu file Excel thất bại.")
     scan.pending_save_count = 0
+    await scan.rows_saved()
     await finish_pending_task(asyncio.create_task(asyncio.to_thread(
         _record_scan_history, scan, file_label=file_label, base_dir=base_dir,
     )))
@@ -596,8 +631,13 @@ async def _finish_scan(scan, *, create_result_sheet, file_label, base_dir):
     await manager.broadcast_log(message, level="OK")
 
 
-async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None, create_result_sheet=False, base_dir=None, file_label="", sheet_name=None, use_request=True, browser_fallback=False, use_proxy=False, proxy_text="", session_cookies=None):
-    """session_cookies: the saved "Cookie TikTok" session for this run only (None: anonymous, as before)."""
+async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WORKERS, retries=DEFAULT_RETRIES, save_every=DEFAULT_SAVE_EVERY, selected_partner=None, selected_partners=None, create_result_sheet=False, base_dir=None, file_label="", sheet_name=None, use_request=True, browser_fallback=False, use_proxy=False, proxy_text="", session_cookies=None, skip_rows=None, only_rows=None, on_rows_saved=None):
+    """session_cookies: the saved "Cookie TikTok" session for this run only (None: anonymous, as before).
+
+    skip_rows / only_rows: sets of `(sheet_name, row, url)` keys a resumed run skips or a retry
+    pass is limited to (riviu/scan_journal.py). on_rows_saved(rows) is awaited after each
+    successful save with the rows (`sheet_name`, `row`, `url`, `status`) that save wrote.
+    """
     if not os.path.exists(file_path):
         if websocket_manager:
             await websocket_manager.broadcast_log(f"Lỗi: Không tìm thấy file {file_path}")
@@ -628,6 +668,8 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
         selected_names=selected_names,
         partner_label=partner_label,
         save_every=save_every,
+        row_filter=_row_filter(skip_rows, only_rows),
+        on_rows_saved=on_rows_saved,
     )
     if websocket_manager:
         broadcast_duplicates = getattr(websocket_manager, "broadcast_duplicates", None)
@@ -640,7 +682,9 @@ async def run_scraper(file_path, websocket_manager=None, worker_count=DEFAULT_WO
                 progress_payload(0, 0, 0, 0, worker_count, scan.started_at, done=True, mode=scan.mode, partner=partner_label, phase="done")
             )
             message = "Không tìm thấy link TikTok nào phù hợp để quét."
-            if selected_names:
+            if scan.filtered:
+                message = "Không còn link TikTok nào cần quét trong lượt này."
+            elif selected_names:
                 message = f"Không tìm thấy link nào cho {partner_label}."
             await websocket_manager.broadcast_log(message)
         scan.workbook.close()
