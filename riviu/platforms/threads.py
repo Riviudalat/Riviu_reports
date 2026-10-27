@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 import os
+import random
 import re
 import time
 import urllib.error
@@ -73,6 +74,21 @@ THREADS_CHECKPOINT_SECONDS = 30
 # Clock of the checkpoint timer; tests replace it (patching time.monotonic would
 # also move asyncio's own clock).
 _checkpoint_clock = time.monotonic
+# Polite pacing of Threads HTTP requests: on one route (direct, or one proxy) a new
+# request starts at least THREADS_HTTP_MIN_INTERVAL s after the previous one, plus
+# up to THREADS_HTTP_JITTER s, shared by every worker of the run (retries count too).
+# Evidence (27/10/2026 server scan): about 150-185 requests in 1-2 minutes, 10
+# workers and no pacing (1.5-3 requests/s), then HTTP 429 for almost every
+# remaining link. 0.8-1.2 s (about one request a second) stays well below that.
+# This is pacing, not a way around a block: a 429 still stops the run.
+THREADS_HTTP_MIN_INTERVAL = 0.8
+THREADS_HTTP_JITTER = 0.4
+# Clock and sleep of the pacer; tests replace them for a deterministic schedule.
+_pacer_clock = time.monotonic
+_pacer_sleep = asyncio.sleep
+# Suggested wait before scanning again after Threads answers HTTP 429.
+THREADS_RATE_LIMIT_WAIT_MINUTES = 15
+RATE_LIMIT_STOP_REASON = "rate_limit"
 
 
 def resolve_threads_proxies(base_dir, proxy_text="", mode="request"):
@@ -769,7 +785,7 @@ async def run_threads_scraper(file_path, websocket_manager=None, worker_count=3,
         await _run_threads_scraper(file_path, websocket_manager, worker_count, selected_partners,
                                    sheet_name, mode, base_dir, use_proxy, proxy_text, diagnostics=diagnostic,
                                    session_cookies=session_cookies, proxy_configs=proxy_configs)
-        diagnostic["phase"] = "completed"
+        diagnostic["phase"] = "rate_limited" if diagnostic.get("stopReason") == RATE_LIMIT_STOP_REASON else "completed"
     except asyncio.CancelledError:
         diagnostic["phase"] = "cancelled"
         raise
@@ -808,12 +824,58 @@ async def _request_once(url, config, session_cookies):
     return await finish_pending_task(asyncio.create_task(asyncio.to_thread(fetch_threads_http, url, **options)))
 
 
-async def _request_check(url, config, session_cookies):
+def rate_limit_stop_message(processed, total):
+    left = max(total - processed, 0)
+    return (
+        f"CẢNH BÁO: Threads đang giới hạn tần suất (HTTP 429) trên tuyến kết nối này. "
+        f"Đã dừng quét sau {processed}/{total} link; {left} link chưa quét được giữ nguyên số liệu và trạng thái cũ. "
+        f"Chờ khoảng {THREADS_RATE_LIMIT_WAIT_MINUTES} phút rồi quét lại. "
+        "Cookie Threads không vượt được giới hạn này; app không tự đổi proxy để né."
+    )
+
+
+class _RoutePacer:
+    """Run-wide spacing of Threads HTTP requests per route, shared by every worker.
+
+    A token bucket of size one per route: each request reserves the next start time
+    synchronously (no await in between), so concurrent workers queue in order.
+    """
+
+    def __init__(self, interval, jitter=0.0, *, clock=None, sleep=None, rand=None):
+        self._interval = max(float(interval or 0), 0.0)
+        self._jitter = max(float(jitter or 0), 0.0)
+        self._clock = clock or (lambda: _pacer_clock())
+        self._sleep = sleep or (lambda seconds: _pacer_sleep(seconds))
+        self._rand = rand or random.random
+        self._next_start = {}
+
+    async def wait(self, route):
+        if not self._interval and not self._jitter:
+            return
+        now = self._clock()
+        start = max(now, self._next_start.get(route, now))
+        self._next_start[route] = start + self._interval + self._jitter * self._rand()
+        if start > now:
+            await self._sleep(start - now)
+
+
+class _RequestsStopped(Exception):
+    """The run stopped requesting Threads (HTTP 429) before this request started."""
+
+
+async def _request_check(url, config, session_cookies, pace=None):
     """HTTP with at most one retry for a transport error or missing core metrics."""
+    if pace is not None:
+        await pace()
     request_result = await _request_once(url, config, session_cookies)
     if request_result.get("error_kind") not in TERMINAL_ERRORS:
         if (missing_core_metrics(request_result) and not request_result.get("error")) or request_result.get("error_kind") == "transport":
             await asyncio.sleep(0.5)
+            if pace is not None:
+                try:
+                    await pace()
+                except _RequestsStopped:
+                    return request_result  # keep what the first request confirmed
             retried = await _request_once(url, config, session_cookies)
             request_result = merge_results(request_result, retried)
             if retried.get("error_kind") in TERMINAL_ERRORS:
@@ -961,7 +1023,11 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
     slots = _RouteSlots(workers)
     # Hybrid fallbacks never take every slot while HTTP work is queued.
     fallback_slots = asyncio.Semaphore(max(1, min(BROWSER_FALLBACK_LIMIT, workers - 1)))
+    pacer = _RoutePacer(THREADS_HTTP_MIN_INTERVAL, THREADS_HTTP_JITTER)
+    # Set by the first HTTP 429: no Threads request of this run starts after it.
+    requests_stopped = asyncio.Event()
     processed = success = hidden = errors = 0
+    stop_reason = None
     dirty = False
     last_saved = _checkpoint_clock()
     # Column indexes of this run's freshly loaded workbook. Only the result loop
@@ -991,18 +1057,73 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
         async def check(index, item):
             # A cookie session keeps one route for the whole run; anonymous runs round-robin.
             # HTTP, its retry and any browser fallback of a URL use the same route.
-            config = proxies[0 if session_cookies is not None else index % len(proxies)] if proxies else None
-            if mode == "browser":
+            route = (0 if session_cookies is not None else index % len(proxies)) if proxies else None
+            config = proxies[route] if proxies else None
+
+            async def pace():
+                await pacer.wait(route)
+                if requests_stopped.is_set():
+                    raise _RequestsStopped()
+
+            def noted(result):
+                # Checked by every worker before its next request, not when the result loop gets here.
+                if result.get("error_kind") == "rate_limit":
+                    requests_stopped.set()
+                return result
+
+            try:
+                if mode == "browser":
+                    async with slots.hold():
+                        if requests_stopped.is_set():
+                            raise _RequestsStopped()
+                        return item, noted(await _browser_check(item["url"], config, session_cookies, get_browser)), "Browser"
                 async with slots.hold():
-                    return item, await _browser_check(item["url"], config, session_cookies, get_browser), "Browser"
-            async with slots.hold():
-                request_result = await _request_check(item["url"], config, session_cookies)
+                    request_result = noted(await _request_check(item["url"], config, session_cookies, pace=pace))
+            except _RequestsStopped:
+                return item, None, None  # never requested: the row stays untouched
             if mode == "request" or not needs_browser_fallback(request_result):
                 return item, request_result, "Request"
             # The HTTP slot is released first: a slow page never holds it.
             async with fallback_slots, slots.hold(fallback=True):
-                browser_result = await _browser_check(item["url"], config, session_cookies, get_browser)
+                if requests_stopped.is_set():
+                    return item, request_result, "Request"
+                browser_result = noted(await _browser_check(item["url"], config, session_cookies, get_browser))
             return item, merge_results(request_result, browser_result), "Hybrid"
+
+        recorded = set()
+
+        async def record(item, result, source):
+            nonlocal processed, success, hidden, errors, dirty
+            if session_cookies is not None and result.get("error_kind") in {"auth_invalid", "auth_checkpoint", "auth_unknown"}:
+                if diagnostics is not None:
+                    diagnostics["authState"] = result["error_kind"].removeprefix("auth_")
+                raise threads_session.SessionError(result["error_kind"].removeprefix("auth_"))
+            recorded.add(id(item))
+            processed += 1
+            status = result_status(result)
+            if status == "Success":
+                success += 1
+            elif status.startswith("Error:"):
+                errors += 1
+            else:
+                hidden += 1
+            for row in item["rows"]:
+                write_threads_result(workbook[row["sheet_name"]], row["row"], result, columns)
+                dirty = True
+            if diagnostics is not None:
+                diagnostics.update(processedUrls=processed, success=success, partial=hidden, error=errors)
+                diagnostics["processedRows"] += len(item["rows"])
+                if result.get("error"):
+                    kind = result.get("error_kind", "unknown")
+                    diagnostics["errorKinds"][kind] = diagnostics["errorKinds"].get(kind, 0) + 1
+            if websocket_manager:
+                await _broadcast_result(websocket_manager, item, result, status, source, processed, total)
+                await websocket_manager.broadcast_status({
+                    "total": total, "processed": processed, "success": success,
+                    "hidden": hidden, "error": errors, "workers": workers,
+                    "mode": "partner" if selected_partners else "full", "done": False,
+                    "rate": round(processed / max(time.monotonic() - started, 0.1) * 60, 1),
+                })
 
         tasks = [asyncio.create_task(check(index, item)) for index, item in enumerate(items)]
         waiting = None
@@ -1020,38 +1141,33 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                     else:
                         await asyncio.wait({waiting}, timeout=due_in)
                 item, result, source = waiting.result()
-                if session_cookies is not None and result.get("error_kind") in {"auth_invalid", "auth_checkpoint", "auth_unknown"}:
-                    if diagnostics is not None:
-                        diagnostics["authState"] = result["error_kind"].removeprefix("auth_")
-                    raise threads_session.SessionError(result["error_kind"].removeprefix("auth_"))
-                processed += 1
-                status = result_status(result)
-                if status == "Success":
-                    success += 1
-                elif status.startswith("Error:"):
-                    errors += 1
-                else:
-                    hidden += 1
-                for row in item["rows"]:
-                    write_threads_result(workbook[row["sheet_name"]], row["row"], result, columns)
-                    dirty = True
+                if result is None:
+                    continue
+                await record(item, result, source)
+                if result.get("error_kind") == "rate_limit":
+                    stop_reason = RATE_LIMIT_STOP_REASON
+                    break
+            if stop_reason:
+                # Threads answered 429: stop asking it. Queued URLs are never requested,
+                # so their rows keep their values and status; answers already in hand count.
+                for task in tasks:
+                    if not task.done():
+                        task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                for task in tasks:
+                    if task.cancelled() or task.exception() is not None:
+                        continue
+                    item, result, source = task.result()
+                    if result is not None and id(item) not in recorded:
+                        await record(item, result, source)
                 if diagnostics is not None:
-                    diagnostics.update(processedUrls=processed, success=success, partial=hidden, error=errors)
-                    diagnostics["processedRows"] += len(item["rows"])
-                    if result.get("error"):
-                        kind = result.get("error_kind", "unknown")
-                        diagnostics["errorKinds"][kind] = diagnostics["errorKinds"].get(kind, 0) + 1
+                    diagnostics["stopReason"] = stop_reason
                 if websocket_manager:
-                    await _broadcast_result(websocket_manager, item, result, status, source, processed, total)
-                    await websocket_manager.broadcast_status({
-                        "total": total, "processed": processed, "success": success,
-                        "hidden": hidden, "error": errors, "workers": workers,
-                        "mode": "partner" if selected_partners else "full", "done": False,
-                        "rate": round(processed / max(time.monotonic() - started, 0.1) * 60, 1),
-                    })
+                    await websocket_manager.broadcast_log(rate_limit_stop_message(processed, total))
             # Every page load is done: Chromium closes while the workbook is finalized.
             closing = asyncio.ensure_future(close_browser_bounded(browser))
-            if sheet_name:
+            # A stopped run is incomplete: like a cancelled one it leaves the summary tab as it was.
+            if sheet_name and not stop_reason:
                 await _rebuild_threads_summary(workbook, sheet_name, selected_partners, websocket_manager)
                 dirty = True
             completed = True
@@ -1079,4 +1195,5 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
             "total": total, "processed": processed, "success": success,
             "hidden": hidden, "error": errors, "workers": workers,
             "mode": "partner" if selected_partners else "full", "done": True,
+            **({"stopReason": stop_reason} if stop_reason else {}),
         })

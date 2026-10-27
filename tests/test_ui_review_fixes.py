@@ -549,6 +549,19 @@ def test_progress_requires_final_saved_confirmation_and_reports_failure(platform
     """)
 
 
+def test_threads_rate_limit_stop_shows_as_stopped_not_failed():
+    run_js("""
+      const logs=[]; addLog=message=>logs.push(message);
+      activePlatform='threads';
+      updateProgress({platform:'threads',phase:'completed',done:true,total:5,processed:2,success:1,error:1,stopReason:'rate_limit'});
+      assert.ok(el('progressStatus').textContent.includes('HTTP 429'));
+      assert.equal(el('progressStatus').className,'progress-status warn');
+      assert.equal(el('startBtn').disabled,false);
+      assert.equal(logs.filter(m=>String(m).includes('THREADS GIỚI HẠN TẦN SUẤT')).length,1);
+      assert.equal(logs.filter(m=>String(m).includes('THẤT BẠI')).length,0);
+    """)
+
+
 def test_desktop_update_does_not_install_during_scan_or_on_reconnect_before_snapshot():
     run_js("""
       (async()=>{

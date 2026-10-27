@@ -158,7 +158,10 @@ async def run_scraper_safely(target_path, options, run_context=None):
             raise ValueError("Sheet không tồn tại trong file đã chọn")
         options = {**options, "sheet_name": scan_sheet, "file_label": file_display_label(file_id)}
         await SCAN_RUNNERS[platform](target_path, events, options)
-        if options["push_to_google"]:
+        if options["push_to_google"] and (events.terminal or {}).get("stopReason"):
+            # A run stopped early (Threads HTTP 429) is incomplete: never push it as a result tab.
+            await manager.broadcast_log("BỎ QUA đẩy Google: phiên quét đã dừng sớm, kết quả chưa đầy đủ.", level="WARN")
+        elif options["push_to_google"]:
             await push_scan_results(target_path, file_id, scan_sheet, platform)
         await manager.broadcast_status({**(events.terminal or manager.last_status), "done": True, "phase": "completed"})
     except asyncio.CancelledError:
