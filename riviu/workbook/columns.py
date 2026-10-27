@@ -105,6 +105,12 @@ def dataframe_partner_columns(frame):
 
 
 # openpyxl worksheets: columns are returned as 1-based indexes.
+#
+# worksheet.max_column walks every cell of the sheet (about 0.1 s for a 1,900-row
+# month sheet). A caller that runs several lookups on one sheet reads the header
+# row once with worksheet_headers() and passes that list as `headers`;
+# worksheet_ensure_column appends any header it adds to that list, so it stays
+# equal to a fresh worksheet_headers() as long as only these helpers write row 1.
 
 def worksheet_headers(worksheet):
     max_column = worksheet.max_column or 0
@@ -113,30 +119,36 @@ def worksheet_headers(worksheet):
     return [worksheet.cell(row=1, column=index).value for index in range(1, max_column + 1)]
 
 
-def worksheet_find_column_index(worksheet, aliases):
-    position = find_header_position(worksheet_headers(worksheet), aliases)
+def worksheet_find_column_index(worksheet, aliases, headers=None):
+    position = find_header_position(worksheet_headers(worksheet) if headers is None else headers, aliases)
     return None if position is None else position + 1
 
 
-def worksheet_ensure_column(worksheet, header, aliases=None, *, hidden=False):
+def worksheet_ensure_column(worksheet, header, aliases=None, *, hidden=False, headers=None):
     """Find a column the same way previews/reports do, appending it only when truly absent."""
-    index = worksheet_find_column_index(worksheet, aliases or COLUMN_ALIASES.get(header) or (header,))
+    index = worksheet_find_column_index(worksheet, aliases or COLUMN_ALIASES.get(header) or (header,), headers=headers)
     if index is None:
-        index = (worksheet.max_column or 0) + 1
+        if headers is None:
+            index = (worksheet.max_column or 0) + 1
+        else:
+            index = len(headers) + 1
+            headers.append(header)
         worksheet.cell(row=1, column=index).value = header
     if hidden:
         worksheet.column_dimensions[get_column_letter(index)].hidden = True
     return index
 
 
-def worksheet_find_link_column_index(worksheet):
-    column_index = worksheet_find_column_index(worksheet, COLUMN_ALIASES["link"])
+def worksheet_find_link_column_index(worksheet, headers=None):
+    if headers is None:
+        headers = worksheet_headers(worksheet)
+    column_index = worksheet_find_column_index(worksheet, COLUMN_ALIASES["link"], headers=headers)
     if column_index:
         return column_index
 
     last_row = min(worksheet.max_row or 0, LINK_COLUMN_SAMPLE_ROWS + 1)
     index = pick_link_column(
-        worksheet_headers(worksheet),
+        headers,
         lambda position: (worksheet.cell(row=row, column=position + 1).value for row in range(2, last_row + 1)),
     )
     return None if index is None else index + 1
@@ -146,5 +158,6 @@ def worksheet_find_last_update_column_index(worksheet):
     return worksheet_find_column_index(worksheet, COLUMN_ALIASES[LAST_UPDATE_COLUMN])
 
 
-def worksheet_partner_column_indexes(worksheet):
-    return [position + 1 for position in partner_column_positions(worksheet_headers(worksheet))]
+def worksheet_partner_column_indexes(worksheet, headers=None):
+    headers = worksheet_headers(worksheet) if headers is None else headers
+    return [position + 1 for position in partner_column_positions(headers)]

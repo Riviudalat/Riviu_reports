@@ -22,6 +22,7 @@ from riviu.workbook_utils import (
     worksheet_ensure_column,
     worksheet_find_column_index,
     worksheet_find_link_column_index,
+    worksheet_headers,
     worksheet_partner_column_indexes,
     worksheet_row_partners,
 )
@@ -131,36 +132,40 @@ def _find_link_column_by_content(sheet, skip_columns):
     return None
 
 
-def detect_columns(sheet):
+def detect_columns(sheet, headers=None):
     """Map scanner columns by exact (case/diacritic-insensitive) header aliases.
 
     No positional guesses: a column that is not found stays None and
     ensure_columns appends it, so notes or channel-link columns are never
-    mistaken for metric columns.
+    mistaken for metric columns. The header row is read once (see `headers`
+    in riviu.workbook.columns).
     """
+    if headers is None:
+        headers = worksheet_headers(sheet)
     column_map = {
-        key: worksheet_find_column_index(sheet, (header,))
+        key: worksheet_find_column_index(sheet, (header,), headers=headers)
         for key, header in INTERNAL_COLUMN_HEADERS.items()
     }
-    column_map["url"] = worksheet_find_link_column_index(sheet) or _find_link_column_by_content(
+    column_map["url"] = worksheet_find_link_column_index(sheet, headers=headers) or _find_link_column_by_content(
         sheet, {index for index in column_map.values() if index}
     )
-    column_map["channel"] = worksheet_find_column_index(sheet, COLUMN_ALIASES[CHANNEL_HEADER])
-    column_map["date"] = worksheet_find_column_index(sheet, COLUMN_ALIASES["date"])
-    column_map["last_update"] = worksheet_find_column_index(sheet, COLUMN_ALIASES[LAST_UPDATE_HEADER])
+    column_map["channel"] = worksheet_find_column_index(sheet, COLUMN_ALIASES[CHANNEL_HEADER], headers=headers)
+    column_map["date"] = worksheet_find_column_index(sheet, COLUMN_ALIASES["date"], headers=headers)
+    column_map["last_update"] = worksheet_find_column_index(sheet, COLUMN_ALIASES[LAST_UPDATE_HEADER], headers=headers)
     for key, header in METRIC_HEADERS.items():
-        column_map[key] = worksheet_find_column_index(sheet, (header,))
+        column_map[key] = worksheet_find_column_index(sheet, (header,), headers=headers)
     return column_map
 
 
 def ensure_columns(sheet):
-    column_map = detect_columns(sheet)
-    column_map["channel"] = worksheet_ensure_column(sheet, CHANNEL_HEADER)
+    headers = worksheet_headers(sheet)
+    column_map = detect_columns(sheet, headers=headers)
+    column_map["channel"] = worksheet_ensure_column(sheet, CHANNEL_HEADER, headers=headers)
     for key, header in METRIC_HEADERS.items():
-        column_map[key] = worksheet_ensure_column(sheet, header, (header,))
-    column_map["last_update"] = worksheet_ensure_column(sheet, LAST_UPDATE_HEADER)
+        column_map[key] = worksheet_ensure_column(sheet, header, (header,), headers=headers)
+    column_map["last_update"] = worksheet_ensure_column(sheet, LAST_UPDATE_HEADER, headers=headers)
     for key, header in INTERNAL_COLUMN_HEADERS.items():
-        column_map[key] = worksheet_ensure_column(sheet, header, (header,), hidden=True)
+        column_map[key] = worksheet_ensure_column(sheet, header, (header,), hidden=True, headers=headers)
     return column_map
 
 
@@ -187,8 +192,9 @@ def collect_rows(workbook, selected_partner=None, selected_partners=None, sheet_
 
     for sheet_name in selected_data_sheet_names(workbook, sheet_name):
         worksheet = workbook[sheet_name]
-        partner_columns = worksheet_partner_column_indexes(worksheet)
-        columns = detect_columns(worksheet)
+        headers = worksheet_headers(worksheet)
+        partner_columns = worksheet_partner_column_indexes(worksheet, headers=headers)
+        columns = detect_columns(worksheet, headers=headers)
         url_column = columns["url"]
         if not url_column:
             continue

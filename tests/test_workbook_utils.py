@@ -1,4 +1,5 @@
 import pandas as pd
+import pytest
 
 from riviu.workbook_utils import (
     dataframe_partner_columns,
@@ -1019,3 +1020,80 @@ def test_preview_drops_midnight_time_from_date_only_cells(tmp_path):
 
     assert [row["Ngày"] for row in rows] == ["01/08/2026", "01/08/2026"]
     assert [row["Cập nhật"] for row in rows] == ["02/08/2026-14:30", "03/08/2026"]
+
+
+def _inline_string_workbook(path, cells):
+    """A one-sheet .xlsx whose text cells are inline strings, as a Google Sheets export writes them."""
+    import zipfile
+
+    main = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+    rel = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
+    rows = "".join(f'<row r="{index}"><c r="A{index}" {cell}</c></row>' for index, cell in enumerate(cells, start=1))
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("[Content_Types].xml", (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">'
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>'
+            '<Default Extension="xml" ContentType="application/xml"/>'
+            '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>'
+            '<Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>'
+            '</Types>'))
+        archive.writestr("_rels/.rels", (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            f'<Relationship Id="rId1" Type="{rel}/officeDocument" Target="xl/workbook.xml"/></Relationships>'))
+        archive.writestr("xl/workbook.xml", (
+            f'<?xml version="1.0" encoding="UTF-8"?><workbook xmlns="{main}" xmlns:r="{rel}">'
+            '<sheets><sheet name="Data" sheetId="1" r:id="rId1"/></sheets></workbook>'))
+        archive.writestr("xl/_rels/workbook.xml.rels", (
+            '<?xml version="1.0" encoding="UTF-8"?>'
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+            f'<Relationship Id="rId1" Type="{rel}/worksheet" Target="worksheets/sheet1.xml"/></Relationships>'))
+        archive.writestr("xl/worksheets/sheet1.xml", (
+            f'<?xml version="1.0" encoding="UTF-8"?><worksheet xmlns="{main}"><sheetData>{rows}</sheetData></worksheet>'))
+
+
+INLINE_STRING_CELLS = [
+    't="inlineStr"><is><t>https://www.tiktok.com/@kênh/video/1</t></is>',
+    't="inlineStr"><is><t xml:space="preserve">  Tiệm  cà phê </t></is>',
+    't="inlineStr"><is><t/></is>',
+    't="inlineStr"><is><t>A &amp; B &lt;3</t></is>',
+    't="inlineStr"><is><r><rPr><b/></rPr><t>Đậm</t></r><r><t> thường</t></r></is>',
+    't="inlineStr"><is><t>漢字</t><rPh sb="0" eb="1"><t>かんじ</t></rPh></is>',
+    't="inlineStr"><is><t>bỏ qua</t></is><f>"công thức"</f>',
+    't="inlineStr">',
+]
+
+
+@pytest.mark.parametrize("read_only", [False, True], ids=["full", "read-only"])
+def test_inline_string_fast_path_reads_the_same_values_as_openpyxl(tmp_path, monkeypatch, read_only):
+    """Google-export text cells read through the fast path equal openpyxl's own parse."""
+    import openpyxl
+    from openpyxl.cell import text as openpyxl_text
+    from openpyxl.worksheet import _reader
+    from riviu.workbook import inline_strings
+
+    path = tmp_path / "google-export.xlsx"
+    _inline_string_workbook(path, INLINE_STRING_CELLS)
+
+    def read_cells():
+        book = openpyxl.load_workbook(path, read_only=read_only)
+        values = [(cell.value, cell.data_type) for row in book["Data"].iter_rows() for cell in row]
+        book.close()
+        return values
+
+    assert _reader.Text is inline_strings.InlineText
+    slow_parses = []
+    original_from_tree = openpyxl_text.Text.from_tree
+    monkeypatch.setattr(openpyxl_text.Text, "from_tree", lambda node: slow_parses.append(node) or original_from_tree(node))
+    fast = read_cells()
+    # Only the rich-text and phonetic cells need openpyxl's generic parser.
+    assert len(slow_parses) == 2
+
+    monkeypatch.setattr(_reader, "Text", openpyxl_text.Text)
+    assert fast == read_cells()
+    assert fast[:3] == [
+        ("https://www.tiktok.com/@kênh/video/1", "s"),
+        ("  Tiệm  cà phê ", "s"),
+        ("", "s"),
+    ]
