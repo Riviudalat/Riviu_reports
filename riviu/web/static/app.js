@@ -285,7 +285,9 @@ function renderPlatformBar() {
     bar.innerHTML = PLATFORM_KEYS.map(key => {
         const config = PLATFORMS[key];
         const selected = key === activePlatform;
-        return `<button class="platform-option${selected ? ' active' : ''}" id="${escapeHtml(config.dom.button)}" type="button" aria-pressed="${selected}" onclick="setPlatform('${escapeHtml(key)}')"><img class="platform-brand-icon" src="${escapeHtml(config.icon)}" alt="" aria-hidden="true">${escapeHtml(config.label)}</button>`;
+        // The mark is the icon used as a mask, painted in the button's text colour, so it
+        // matches the label in every state (inactive grey, hover, active).
+        return `<button class="platform-option${selected ? ' active' : ''}" id="${escapeHtml(config.dom.button)}" type="button" aria-pressed="${selected}" onclick="setPlatform('${escapeHtml(key)}')"><span class="platform-glyph" style="--platform-glyph: url('${escapeHtml(config.icon)}')" aria-hidden="true"></span><span class="platform-option-label">${escapeHtml(config.label)}</span></button>`;
     }).join('');
 }
 
@@ -302,9 +304,11 @@ function renderPlatformSourceRows() {
         const head = `<div class="field-stack platform-source-row" data-source-platform="${platform}"> `
             + `<div class="platform-source-label"><span class="platform-source-name"><img class="platform-brand-icon" src="${escapeHtml(config.icon)}" alt="" aria-hidden="true">${label}</span> <span id="${id.sourceLabel}" class="platform-source-file">Chưa chọn file</span></div> `;
         if (IS_VIEWER) {
-            return head + `<div class="google-action-row"> `
-                + `<label class="scan-setting"><span>Sheet</span><select id="${id.sheet}" class="sheet-select" aria-label="Sheet ${label}"></select></label> `
-                + `</div> </div>`;
+            // The viewer's picker: only the active platform's sheet select shows (applyPlatformUI).
+            return `<div class="platform-source-row vw-sheet-row" data-source-platform="${platform}"${key === activePlatform ? '' : ' hidden'}> `
+                + `<label class="vw-field-label" for="${id.sheet}">Sheet</label> `
+                + `<select id="${id.sheet}" class="vw-select sheet-select" aria-label="Sheet ${label}"></select> `
+                + `<span id="${id.sourceLabel}" class="platform-source-file" hidden>Chưa chọn file</span> </div>`;
         }
         return head
             + `<div class="source-inline"> `
@@ -340,6 +344,11 @@ function applyPlatformUI(platform) {
     const reportLabel = document.getElementById('reportPlatformLabel');
     if (reportIcon) reportIcon.src = config.icon;
     if (reportLabel) reportLabel.textContent = `Đối tác & báo cáo ${config.label}`;
+    if (IS_VIEWER) {
+        document.querySelectorAll('#platformSourceRows .platform-source-row').forEach(row => { row.hidden = row.dataset.sourcePlatform !== platform; });
+        const savedLabel = document.getElementById('vwKpiSavedLabel');
+        if (savedLabel) savedLabel.textContent = config.savedMetric.label;
+    }
 }
 
 const PROGRESS_COUNTER_IDS = ['processedLinks', 'successLinks', 'hiddenCountBadge', 'failedCountBadge'];
@@ -490,6 +499,7 @@ function syncCompactSourceSummary(fileLabel = '', sheetName = '') {
         sheetEl.textContent = resolvedSheet || 'Chưa chọn sheet';
         sheetEl.title = resolvedSheet || 'Chưa chọn sheet';
     }
+    if (IS_VIEWER) renderViewerHeader();
 }
 
 function showNewestLiveResults() {
@@ -1832,6 +1842,7 @@ function renderPreviewMessage(message, color = '') {
     document.getElementById('previewHeader').innerHTML = '';
     const style = `text-align:center; padding:40px${color ? `; color:${color}` : ''}`;
     document.getElementById('previewBody').innerHTML = `<tr><td colspan="10" style="${style}">${escapeHtml(message)}</td></tr>`;
+    if (IS_VIEWER) resetViewerOverview();
 }
 
 function renderEmptySourcePreview() {
@@ -1844,6 +1855,7 @@ function renderEmptySourcePreview() {
     window.lastWorkbookSheets = [];
     resetProgressCounters(['totalLinks', ...PROGRESS_COUNTER_IDS]);
     renderSheetTabs([], '');
+    if (IS_VIEWER) resetViewerOverview();
     syncScanControls();
 }
 
@@ -1882,6 +1894,7 @@ function previewRowHtml(row, columns) {
 }
 
 function renderPreviewTable(preview) {
+    if (IS_VIEWER) return renderViewerTable(preview);
     const header = document.getElementById('previewHeader');
     const body = document.getElementById('previewBody');
     header.innerHTML = `<tr>${preview.columns.map(column => `<th>${escapeHtml(column)}</th>`).join('')}</tr>`;
@@ -1911,6 +1924,16 @@ async function loadPreview(sheetName = '') {
         }
 
         applyPreviewSource(data);
+        if (IS_VIEWER && isSummarySheetName(currentSheetName)) {
+            // The viewer shows partner totals beside the data sheet; open that sheet instead.
+            const sheets = data.sheets || [];
+            const dataSheet = dataSheetNameForSummaryTab(currentSheetName, sheets) || dataSheetsVisibleFirst(sheets)[0] || '';
+            if (dataSheet) {
+                currentSheetName = dataSheet;
+                currentScanSheetName = dataSheet;
+                return loadPreview(dataSheet);
+            }
+        }
         if (isSummarySheetName(currentSheetName)) {
             // Ask for the opened tab itself: a data sheet can have one summary tab per
             // platform, and the server reads that tab with the platform that owns it.
@@ -1930,7 +1953,8 @@ async function loadPreview(sheetName = '') {
         if (!scanIsBusy()) {
             document.getElementById('totalLinks').textContent = visibleRows.filter(row => linkColumn && matchingLink(row[linkColumn])).length;
         }
-        renderPreviewTable({ rows: visibleRows, columns });
+        renderPreviewTable({ rows: visibleRows, columns, linkColumn });
+        if (IS_VIEWER) void loadViewerOverview();
     } catch (error) {
         if (!isCurrent()) return;
         console.error(error);
@@ -2061,6 +2085,8 @@ function syncScanControls() {
     document.querySelectorAll('.platform-option').forEach(button => { button.disabled = busy; });
     const refreshPartnerBtn = document.getElementById('refreshPartnerBtn');
     if (refreshPartnerBtn) refreshPartnerBtn.disabled = busy || selectedPartners.size === 0;
+    const viewerScanState = IS_VIEWER && document.getElementById('vwScanState');
+    if (viewerScanState) viewerScanState.hidden = !scanIsBusy();
     setGooglePushState();
 }
 
@@ -3333,6 +3359,22 @@ function buildExportFallbackFilename(partners, sheetName) {
     return sheet ? `bao_cao_doi_tac ${sheet} ${stamp}.zip` : `bao_cao_doi_tac ${stamp}.zip`;
 }
 
+// POST /export-report for these partners of the active source and save the file it returns
+// (one .xlsx, or a .zip for several partners). Shared by the report dialog and the viewer page.
+async function downloadPartnerReport(partners, sheetName) {
+    const { applyMinViews, minViews } = reportFilterParams();
+    const res = await postJson('/export-report', { partners, applyMinViews, minViews, sheetName, platform: activePlatform, file_id: currentFileId });
+    if (!res.ok) {
+        const data = await res.json().catch(() => ({}));
+        throw new Error(data.error || 'Không xuất được báo cáo');
+    }
+    const blob = await res.blob();
+    const fallback = buildExportFallbackFilename(partners, sheetName);
+    const filename = filenameFromDisposition(res.headers.get('Content-Disposition') || '', fallback);
+    downloadBlob(blob, filename);
+    return filename;
+}
+
 async function exportPartnerReport() {
     if (!currentFileId || sourceBusy) return;
     const partners = partnerNamesFromSelection();
@@ -3347,18 +3389,7 @@ async function exportPartnerReport() {
     btn.innerHTML = '<span class="material-icons-outlined">hourglass_top</span> Đang xuất...';
 
     try {
-        const { applyMinViews, minViews } = reportFilterParams();
-        const res = await postJson('/export-report', { partners, applyMinViews, minViews, sheetName: reportSheetName || document.getElementById('reportSheetSelect')?.value || '', platform: activePlatform, file_id: currentFileId });
-        if (!res.ok) {
-            const data = await res.json().catch(() => ({}));
-            throw new Error(data.error || 'Không xuất được báo cáo');
-        }
-
-        const blob = await res.blob();
-        const sheetName = reportSheetName || document.getElementById('reportSheetSelect')?.value || '';
-        const fallback = buildExportFallbackFilename(partners, sheetName);
-        const filename = filenameFromDisposition(res.headers.get('Content-Disposition') || '', fallback);
-        downloadBlob(blob, filename);
+        const filename = await downloadPartnerReport(partners, reportSheetName || document.getElementById('reportSheetSelect')?.value || '');
         notify(`Đã xuất báo cáo: ${filename}`, 'success');
         closeReportModal();
     } catch (error) {
@@ -3563,6 +3594,314 @@ async function saveSchedule() {
     }
 }
 
+// ---- Viewer report page (server mode `/`, data-role="viewer") ------------------
+// The viewer shows one sheet as a report: KPI totals, partners with their export, and the
+// link table. It reuses the admin page's source state and reads (preview, partners, summary,
+// export) and calls nothing outside the viewer allowlist. Unknown metrics stay blank ("—").
+const VIEWER_METRICS = Object.freeze([
+    { key: 'views', id: 'vwKpiViews', aliases: ['luot xem', 'view', 'views'] },
+    { key: 'likes', id: 'vwKpiLikes', aliases: ['tim', 'like', 'likes', 'luot thich'] },
+    { key: 'comments', id: 'vwKpiComments', aliases: ['binh luan', 'comment', 'comments'] },
+    { key: 'saved', id: 'vwKpiSaved', aliases: [] }, // the platform's fourth metric (saves / reposts)
+    { key: 'shares', id: 'vwKpiShares', aliases: ['chia se', 'share', 'shares'] },
+]);
+const VIEWER_LINK_KINDS = Object.freeze({ video: 'video', photo: 'ảnh', post: 'bài' });
+let viewerTable = { columns: [], rows: [], linkColumn: '', numeric: new Set() };
+let viewerPartners = [];
+let viewerPartnerSheet = '';
+let viewerUpdated = { key: '', text: '' };
+let viewerOverviewSequence = 0;
+let viewerExporting = null; // null, 'all' or the index of the partner being exported
+
+function viewerSourceKey() {
+    return `${activePlatform}|${currentFileId}|${currentSheetName}`;
+}
+
+// A known metric as a number, or null when the cell is blank or not a number (never 0 for unknown).
+function viewerMetricNumber(value) {
+    if (value === null || value === undefined) return null;
+    if (typeof value === 'number') return Number.isFinite(value) ? Math.trunc(value) : null;
+    const text = String(value).trim();
+    if (!text) return null;
+    if (/^\d{1,3}([.,]\d{3})+$/.test(text)) return Number(text.replace(/[.,]/g, ''));
+    const compact = text.replace(/[,\s]/g, '');
+    return /^\d+(\.\d+)?$/.test(compact) ? Math.trunc(Number(compact)) : null;
+}
+
+function viewerMetricColumns(columns, platform = activePlatform) {
+    const saved = platformConfig(platform).savedMetric;
+    const keys = columns.map(column => normalizeVietnameseKey(column));
+    return Object.fromEntries(VIEWER_METRICS.map(metric => {
+        const aliases = metric.key === 'saved' ? [normalizeVietnameseKey(saved.column), normalizeVietnameseKey(saved.label)] : metric.aliases;
+        const index = keys.findIndex(key => aliases.includes(key));
+        return [metric.key, index >= 0 ? columns[index] : ''];
+    }));
+}
+
+// Workbook headers are often in capitals ("LƯỢT XEM"); the viewer shows them in sentence case.
+function viewerHeaderLabel(column) {
+    const text = String(column || '');
+    if (/^https?:\/\//i.test(text)) return '#'; // a link pasted into the header cell of the index column
+    if (text !== text.toLocaleUpperCase('vi') || text === text.toLocaleLowerCase('vi')) return text;
+    const lower = text.toLocaleLowerCase('vi');
+    return lower.charAt(0).toLocaleUpperCase('vi') + lower.slice(1);
+}
+
+// "https://www.tiktok.com/@kenh/video/7391…" -> "@kenh · video …123456"; the full link stays in the title.
+function viewerShortLink(url) {
+    try {
+        const parsed = new URL(url);
+        const parts = parsed.pathname.split('/').filter(Boolean);
+        const handleIndex = parts.findIndex(part => part.startsWith('@'));
+        if (handleIndex >= 0) {
+            const kind = VIEWER_LINK_KINDS[parts[handleIndex + 1]] || '';
+            const id = parts[handleIndex + 2] || '';
+            const shortId = id.length > 10 ? `…${id.slice(-6)}` : id;
+            const handle = decodeURIComponent(parts[handleIndex]);
+            const shortHandle = handle.length > 20 ? `${handle.slice(0, 19)}…` : handle;
+            return [shortHandle, [kind, shortId].filter(Boolean).join(' ')].filter(Boolean).join(' · ');
+        }
+        const text = parsed.hostname.replace(/^www\./, '') + parsed.pathname.replace(/\/$/, '');
+        return text.length > 34 ? `${text.slice(0, 33)}…` : text;
+    } catch {
+        return url.length > 34 ? `${url.slice(0, 33)}…` : url;
+    }
+}
+
+// The post kind and id after the handle drop out on a phone (.vw-link-detail).
+function viewerShortLinkHtml(url) {
+    const [handle, ...detail] = viewerShortLink(url).split(' · ');
+    return escapeHtml(handle) + (detail.length ? `<span class="vw-link-detail"> · ${escapeHtml(detail.join(' · '))}</span>` : '');
+}
+
+function viewerCellHtml(column, value) {
+    const text = String(value ?? '').trim();
+    if (viewerTable.numeric.has(column)) {
+        const number = viewerMetricNumber(text);
+        return `<td class="vw-num">${number === null ? escapeHtml(text) : formatNumber(number)}</td>`;
+    }
+    if (/^https?:\/\//i.test(text)) {
+        return `<td class="vw-link-cell"><a href="${escapeHtml(text)}" target="_blank" rel="noopener noreferrer" title="${escapeHtml(text)}">${viewerShortLinkHtml(text)}</a></td>`;
+    }
+    return `<td title="${escapeHtml(text)}">${escapeHtml(text)}</td>`;
+}
+
+function setViewerText(id, text, title = '') {
+    const node = document.getElementById(id);
+    if (!node) return;
+    node.textContent = text;
+    if (title) node.title = title;
+    else node.removeAttribute?.('title');
+}
+
+function renderViewerKpis(rows, metricColumns) {
+    setViewerText('vwKpiLinks', rows.length ? formatNumber(rows.length) : '—');
+    setViewerText('vwKpiSavedLabel', platformConfig().savedMetric.label);
+    let viewsKnown = 0;
+    for (const metric of VIEWER_METRICS) {
+        const column = metricColumns[metric.key];
+        const known = column ? rows.map(row => viewerMetricNumber(row[column])).filter(value => value !== null) : [];
+        if (metric.key === 'views') viewsKnown = known.length;
+        // Totals sum the known values and stay blank only when nothing in the column is known.
+        if (known.length) setViewerText(metric.id, formatNumber(known.reduce((sum, value) => sum + value, 0)));
+        else setViewerText(metric.id, '—', 'Chưa có số liệu');
+    }
+    const missing = rows.length - viewsKnown;
+    setViewerText('vwKpiLinksNote', rows.length && missing > 0 ? `${formatNumber(missing)} link chưa có số liệu` : '');
+    setViewerText('vwKpiViewsNote', rows.length && viewsKnown ? `từ ${formatNumber(viewsKnown)} link có số liệu` : '');
+}
+
+// Called by renderPreviewTable() on the viewer page.
+function renderViewerTable(preview) {
+    const linkColumn = preview.linkColumn || '';
+    // The sheet's own "Tổng" row is shown as the KPI totals instead.
+    const rows = preview.rows.filter(row => !linkColumn || normalizeVietnameseKey(row[linkColumn]) !== 'tong');
+    const metricColumns = viewerMetricColumns(preview.columns);
+    // Columns that are blank on every row (unused partner slots, spare columns) are left out,
+    // and the link, channel and metrics come right after the first (index) column.
+    const filled = rows.length
+        ? preview.columns.filter(column => rows.some(row => String(row[column] ?? '').trim() !== ''))
+        : preview.columns;
+    const channelColumn = filled.find(column => normalizeVietnameseKey(column) === 'ten kenh') || '';
+    const leading = [filled[0], linkColumn, channelColumn, ...VIEWER_METRICS.map(metric => metricColumns[metric.key])]
+        .filter((column, index, list) => column && filled.includes(column) && list.indexOf(column) === index);
+    const columns = [...leading, ...filled.filter(column => !leading.includes(column))];
+    const numeric = new Set(Object.values(metricColumns).filter(column => column && columns.includes(column)));
+    viewerTable = {
+        columns, linkColumn, numeric,
+        rows: rows.map(row => ({ row, text: normalizeVietnameseKey(columns.map(column => row[column] ?? '').join(' ')) })),
+    };
+    document.getElementById('previewHeader').innerHTML = `<tr>${columns.map(column => `<th scope="col"${numeric.has(column) ? ' class="vw-num"' : ''} title="${escapeHtml(column)}">${escapeHtml(viewerHeaderLabel(column))}</th>`).join('')}</tr>`;
+    renderViewerKpis(rows, metricColumns);
+    renderViewerTableRows();
+}
+
+function renderViewerTableRows() {
+    const body = document.getElementById('previewBody');
+    const total = viewerTable.rows.length;
+    const query = normalizeVietnameseKey(document.getElementById('vwTableSearch')?.value || '');
+    const visible = query ? viewerTable.rows.filter(item => item.text.includes(query)) : viewerTable.rows;
+    const colspan = Math.max(viewerTable.columns.length, 1);
+    setViewerText('vwRowCount', query ? `${formatNumber(visible.length)} / ${formatNumber(total)}` : (total ? formatNumber(total) : ''));
+    if (!total) {
+        body.innerHTML = `<tr><td colspan="${colspan}" class="vw-table-empty">Sheet này chưa có link ${escapeHtml(platformConfig().label)}.</td></tr>`;
+    } else if (!visible.length) {
+        body.innerHTML = `<tr><td colspan="${colspan}" class="vw-table-empty">Không có link nào khớp với tìm kiếm.</td></tr>`;
+    } else {
+        body.innerHTML = visible.map(item => `<tr>${viewerTable.columns.map(column => viewerCellHtml(column, item.row[column])).join('')}</tr>`).join('');
+    }
+}
+
+function renderViewerHeader() {
+    const source = activeSource();
+    const label = source.label || source.fileId || '';
+    setViewerText('vwReportTitle', label || 'Chưa chọn file báo cáo', label);
+    setViewerText('vwReportSheet', !source.fileId ? 'Chọn file và sheet để xem số liệu.' : (currentSheetName ? `Sheet ${currentSheetName}` : ''));
+    setViewerText('vwReportUpdated', viewerUpdated.key === viewerSourceKey() ? viewerUpdated.text : '');
+}
+
+function resetViewerOverview() {
+    ++viewerOverviewSequence;
+    viewerTable = { columns: [], rows: [], linkColumn: '', numeric: new Set() };
+    viewerPartners = [];
+    for (const id of ['vwKpiLinks', ...VIEWER_METRICS.map(metric => metric.id)]) setViewerText(id, '—');
+    for (const id of ['vwKpiLinksNote', 'vwKpiViewsNote', 'vwRowCount', 'vwPartnerCount']) setViewerText(id, '');
+    const list = document.getElementById('vwPartnerList');
+    if (list) list.innerHTML = `<li class="vw-empty">${currentFileId ? 'Chưa có đối tác.' : 'Chọn file báo cáo để xem đối tác.'}</li>`;
+    renderViewerExportAll();
+    renderViewerHeader();
+}
+
+function summaryRowValue(row, key) {
+    const column = Object.keys(row || {}).find(name => normalizeVietnameseKey(name) === key);
+    return column ? row[column] : '';
+}
+
+// "27/10/2026-15:14" (the summary's "Cập nhật lần cuối") -> a sortable number, or 0.
+function viewerUpdateStamp(text) {
+    const match = String(text || '').match(/(\d{1,2})\/(\d{1,2})\/(\d{4})\D+(\d{1,2}):(\d{2})/);
+    if (!match) return 0;
+    const [, day, month, year, hour, minute] = match.map(Number);
+    return ((((year * 100 + month) * 100 + day) * 100 + hour) * 100) + minute;
+}
+
+function viewerUpdatedText(summaryRows) {
+    let best = null;
+    for (const row of summaryRows) {
+        const text = String(summaryRowValue(row, 'cap nhat lan cuoi') || '').trim();
+        const stamp = viewerUpdateStamp(text);
+        if (stamp && (!best || stamp > best.stamp)) best = { stamp, text };
+    }
+    if (!best) return 'Chưa có lần quét nào cho sheet này';
+    const match = best.text.match(/(\d{1,2}\/\d{1,2}\/\d{4})\D+(\d{1,2}:\d{2})/);
+    return `Số liệu cập nhật lúc ${match ? `${match[2]}, ${match[1]}` : best.text}`;
+}
+
+// The partner list (with each partner's links and views from the sheet's summary) and the
+// time the numbers were last scanned. Called after every preview load on the viewer page.
+async function loadViewerOverview() {
+    if (!IS_VIEWER || !currentFileId) return;
+    const sequence = ++viewerOverviewSequence;
+    const fileId = currentFileId, platform = activePlatform, sheet = currentSheetName, key = viewerSourceKey();
+    const isCurrent = () => sequence === viewerOverviewSequence && fileId === currentFileId && platform === activePlatform;
+    const list = document.getElementById('vwPartnerList');
+    if (list) list.innerHTML = '<li class="vw-empty">Đang tải danh sách đối tác…</li>';
+    const { applyMinViews, minViews } = reportFilterParams();
+    const partnerQuery = new URLSearchParams({ sheet_name: sheet, apply_min_views: applyMinViews ? 'true' : 'false', min_views: String(minViews), platform, file_id: fileId });
+    try {
+        const [partnersRes, summaryRes] = await Promise.all([
+            fetch(`/report-partners?${partnerQuery}`),
+            fetch(`/summary-dashboard?${sourceQuery({ sheet_name: sheet }, platform, fileId)}`),
+        ]);
+        const partnersData = await partnersRes.json();
+        const summaryData = await summaryRes.json().catch(() => ({}));
+        if (!isCurrent()) return;
+        if (!partnersRes.ok || partnersData.error) throw new Error(partnersData.error || 'Không tải được danh sách đối tác');
+        const summaryRows = summaryRes.ok && Array.isArray(summaryData.rows) ? summaryData.rows : [];
+        const summaryByName = new Map(summaryRows.map(row => [normalizeVietnameseKey(summaryRowValue(row, 'doi tac')), row]));
+        viewerPartners = normalizeReportPartners(partnersData.partners).map(partner => {
+            const row = summaryByName.get(normalizeVietnameseKey(partner.name));
+            return { ...partner, views: row ? viewerMetricNumber(summaryRowValue(row, 'tong luot xem')) : null };
+        }).sort((a, b) => (b.views ?? -1) - (a.views ?? -1) || a.name.localeCompare(b.name, 'vi'));
+        viewerPartnerSheet = partnersData.currentSheet || partnersData.dataSheet || sheet;
+        viewerUpdated = { key, text: viewerUpdatedText(summaryRows) };
+        renderViewerHeader();
+        renderViewerPartners();
+    } catch (error) {
+        if (!isCurrent()) return;
+        viewerPartners = [];
+        renderViewerExportAll();
+        if (list) list.innerHTML = `<li class="vw-empty">${escapeHtml(error.message)}</li>`;
+    }
+}
+
+function renderViewerExportAll() {
+    const button = document.getElementById('vwExportAll');
+    if (!button) return;
+    const exportable = viewerPartners.filter(partner => partner.linkCount > 0).length;
+    button.disabled = viewerExporting !== null || exportable === 0;
+    button.title = exportable ? `Tải một file .zip gồm báo cáo của ${exportable} đối tác` : 'Chưa có đối tác nào có link đủ điều kiện xuất';
+    setViewerText('vwExportAllLabel', viewerExporting === 'all' ? 'Đang xuất…' : (exportable ? `Xuất tất cả (${formatNumber(exportable)})` : 'Xuất tất cả'));
+}
+
+function renderViewerPartners() {
+    const list = document.getElementById('vwPartnerList');
+    if (!list) return;
+    const { applyMinViews, minViews } = reportFilterParams();
+    setViewerText('vwPartnerRule', applyMinViews
+        ? `Báo cáo bỏ qua link chưa có số liệu hoặc dưới ${formatNumber(minViews)} lượt xem.`
+        : 'Báo cáo bỏ qua link chưa có số liệu.');
+    setViewerText('vwPartnerCount', viewerPartners.length ? formatNumber(viewerPartners.length) : '');
+    renderViewerExportAll();
+    const query = normalizeVietnameseKey(document.getElementById('vwPartnerSearch')?.value || '');
+    const visible = viewerPartners.map((partner, index) => ({ partner, index }))
+        .filter(({ partner }) => !query || normalizeVietnameseKey(partner.name).includes(query));
+    if (!viewerPartners.length) {
+        list.innerHTML = '<li class="vw-empty">Sheet này chưa có đối tác.</li>';
+        return;
+    }
+    if (!visible.length) {
+        list.innerHTML = '<li class="vw-empty">Không tìm thấy đối tác phù hợp.</li>';
+        return;
+    }
+    list.innerHTML = visible.map(({ partner, index }) => {
+        const status = partner.linkCount > 0 ? '' : (partner.rawLinkCount > 0
+            ? `${formatNumber(partner.rawLinkCount)} link · chưa đủ điều kiện xuất`
+            : 'Chưa có link');
+        const meta = status || [
+            `${formatNumber(partner.rawLinkCount || partner.linkCount)} link`,
+            partner.views === null ? '' : `${formatNumber(partner.views)} lượt xem`,
+        ].filter(Boolean).join(' · ');
+        const busy = viewerExporting === index;
+        const disabled = viewerExporting !== null || partner.linkCount <= 0;
+        const title = partner.linkCount > 0 ? `Tải báo cáo Excel của ${partner.name}` : 'Chưa có link đủ điều kiện xuất';
+        return `<li class="vw-partner"><div class="vw-partner-copy"><span class="vw-partner-name" title="${escapeHtml(partner.name)}">${escapeHtml(partner.name)}</span>`
+            + `<span class="vw-partner-meta${status ? ' vw-muted' : ''}">${escapeHtml(meta)}</span></div>`
+            + `<button class="vw-btn vw-btn-small" type="button" onclick="exportViewerPartners(${index})" title="${escapeHtml(title)}" aria-label="Xuất báo cáo ${escapeHtml(partner.name)}"${disabled ? ' disabled' : ''}>`
+            + `<span class="material-icons-outlined" aria-hidden="true">${busy ? 'hourglass_top' : 'download'}</span><span>${busy ? 'Đang xuất' : 'Xuất'}</span></button></li>`;
+    }).join('');
+}
+
+// One partner (its index in viewerPartners) or, without an index, every partner with exportable links.
+async function exportViewerPartners(index) {
+    if (viewerExporting !== null || !currentFileId) return;
+    const partners = index === undefined
+        ? viewerPartners.filter(partner => partner.linkCount > 0).map(partner => partner.name)
+        : [viewerPartners[index]?.name].filter(Boolean);
+    if (!partners.length) return;
+    viewerExporting = index === undefined ? 'all' : index;
+    renderViewerPartners();
+    try {
+        const filename = await downloadPartnerReport(partners, viewerPartnerSheet || currentSheetName);
+        notify(`Đã xuất báo cáo: ${filename}`, 'success');
+    } catch (error) {
+        notify(`Lỗi xuất báo cáo: ${error.message}`, 'error');
+    } finally {
+        viewerExporting = null;
+        renderViewerPartners();
+    }
+}
+
 // ---- Event wiring and startup -----------------------------------------------
 const area = document.getElementById('uploadArea');
 area?.addEventListener('dragover', (event) => { event.preventDefault(); area.classList.add('dragover'); });
@@ -3586,12 +3925,14 @@ document.getElementById('minViewToggle').addEventListener('change', (event) => {
     if (document.getElementById('reportModal').classList.contains('active')) {
         loadReportPartners();
     }
+    if (IS_VIEWER) void loadViewerOverview();
 });
 
 document.getElementById('minViewInput').addEventListener('change', () => {
     if (document.getElementById('reportModal').classList.contains('active')) {
         loadReportPartners();
     }
+    if (IS_VIEWER) void loadViewerOverview();
 });
 
 document.getElementById('reportSheetSelect').addEventListener('change', (event) => {

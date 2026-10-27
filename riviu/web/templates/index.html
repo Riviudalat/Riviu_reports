@@ -4,17 +4,22 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
-    <title>Riviu Reports</title>
+    <title>{{ "Riviu Reports" if is_admin else "Báo cáo chiến dịch · Riviu" }}</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
     <link href="https://fonts.googleapis.com/icon?family=Material+Icons+Outlined" rel="stylesheet">
     <link rel="stylesheet" href="/static/styles.css?v={{ asset_version }}">
 </head>
 {#- role "viewer" (server mode `/`) leaves out every admin-only control; the server enforces the same split. -#}
 {%- set is_admin = role != "viewer" -%}
-<body class="compact-page" data-workspace-tab="sheet" data-platform="tiktok" data-role="{{ 'admin' if is_admin else 'viewer' }}"{% if server_mode %} data-server-mode="1"{% endif %}>
+{% if is_admin %}
+<body class="compact-page" data-workspace-tab="sheet" data-platform="tiktok" data-role="admin"{% if server_mode %} data-server-mode="1"{% endif %}>
+{% else %}
+<body class="viewer-page" data-workspace-tab="sheet" data-platform="tiktok" data-role="viewer"{% if server_mode %} data-server-mode="1"{% endif %}>
+{% endif %}
     <div class="toast-stack" id="toastStack" aria-live="assertive"></div>
     <div class="server-banner" id="serverBanner" hidden>Server đã cập nhật — restart Khoidong.bat rồi F5 trang này.</div>
     <div class="server-banner" id="connectionBanner" role="alert" hidden>Mất kết nối tới server. Ứng dụng vẫn tự thử lại, hoặc tải lại trang (F5).</div>
+    {% if is_admin %}
     <div class="compact-drawer-backdrop" id="compactDrawerBackdrop" onclick="closeCompactDrawers()"></div>
     <div class="compact-app">
         <div class="compact-header">
@@ -442,6 +447,10 @@
             </div>
         </main>
     </div>
+    {% else %}
+    {#- The read-only viewer (server mode `/`): its own report layout, see viewer_body.html. -#}
+    {% include "viewer_body.html" %}
+    {% endif %}
 
     <div class="modal-backdrop" id="reportModal" aria-hidden="true">
         <div class="report-modal" role="dialog" aria-modal="true" aria-labelledby="reportModalTitle">

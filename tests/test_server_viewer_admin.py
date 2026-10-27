@@ -116,7 +116,10 @@ ADMIN_ONLY_IDS = (
     "googleServiceAccountBtn", "googleOauthBtn", "googleLoginBtn", "googlePasteModal", "refreshPartnerBtn",
     "logoutButton", "scheduleButton", "scheduleModal",
 )
-SHARED_IDS = ("platformBar", "sourceDrawerButton", "excelFileSelect", "reportModal", "exportReportBtn", "historyModal", "guideButton", "previewTable")
+SHARED_IDS = ("platformBar", "excelFileSelect", "reportModal", "exportReportBtn", "historyModal", "guideButton", "previewTable")
+# The viewer's own report layout (KPIs, partner export, link table) and the admin's scan workspace.
+VIEWER_ONLY_IDS = ("vwKpis", "vwPartnerList", "vwExportAll", "vwTableSearch")
+ADMIN_WORKSPACE_IDS = ("sourceDrawerButton", "sourceDrawer", "scanSettingsDrawer")
 
 
 def ids(html):
@@ -128,7 +131,13 @@ def test_viewer_page_renders_no_admin_controls_and_links_to_admin(server):
     assert page.status_code == 200 and 'data-role="viewer"' in page.text
     rendered = ids(page.text)
     assert not rendered & set(ADMIN_ONLY_IDS), rendered & set(ADMIN_ONLY_IDS)
-    assert set(SHARED_IDS) <= rendered
+    assert set(SHARED_IDS) | set(VIEWER_ONLY_IDS) <= rendered
+    assert not rendered & set(ADMIN_WORKSPACE_IDS)
+    every_id = re.findall(r'\sid="([^"]+)"', page.text)
+    assert len(every_id) == len(set(every_id))  # viewer_body.html keeps the ids unique
+    # No scan workspace for viewers: no status tabs, progress bar or log on screen.
+    for marker in ('class="workspace-tabs"', 'class="progress-section"', 'class="scan-toolbar"'):
+        assert marker not in page.text
     assert 'id="adminLink" href="/admin"' in page.text and "Quản trị" in page.text
     for text in ("downloadCurrentWorkbook()", 'action="/logout"', "startScraping()", "uploadFile(this)", "refreshPartnerLinks()", "syncGoogleSheet"):
         assert text not in page.text
@@ -138,7 +147,8 @@ def test_admin_page_has_every_control_and_no_admin_link(server):
     login(server)
     page = server.get("/admin")
     assert page.status_code == 200 and 'data-role="admin"' in page.text
-    assert set(ADMIN_ONLY_IDS) | set(SHARED_IDS) <= ids(page.text)
+    assert set(ADMIN_ONLY_IDS) | set(SHARED_IDS) | set(ADMIN_WORKSPACE_IDS) <= ids(page.text)
+    assert not ids(page.text) & set(VIEWER_ONLY_IDS)
     assert "adminLink" not in page.text and "Lịch tự động" in page.text
     # `/` stays the viewer for a logged-in admin too.
     assert 'data-role="viewer"' in server.get("/").text
@@ -276,3 +286,22 @@ def test_viewer_script_only_reads_allowlisted_apis_and_keeps_its_choice_in_the_b
       }}
       assert.ok(calls.some(([,path])=>path==='/list-files'));
     }})()""")
+
+
+def test_viewer_kpis_sum_known_metrics_and_keep_unknown_blank():
+    run_viewer_js(r"""
+      const rows=[
+        {Link:'https://www.tiktok.com/@a/video/1', 'LƯỢT XEM':'1.200', TIM:'0', 'BÌNH LUẬN':'', 'LƯỢT LƯU':'', 'CHIA SẺ':'', Spare:''},
+        {Link:'https://www.tiktok.com/@b/video/2', 'LƯỢT XEM':'', TIM:'3', 'BÌNH LUẬN':'', 'LƯỢT LƯU':'', 'CHIA SẺ':'', Spare:''},
+        {Link:'Tổng', 'LƯỢT XEM':'1200', TIM:'3', 'BÌNH LUẬN':'', 'LƯỢT LƯU':'', 'CHIA SẺ':'', Spare:''},
+      ];
+      renderPreviewTable({rows, columns:['Link','LƯỢT XEM','TIM','BÌNH LUẬN','LƯỢT LƯU','CHIA SẺ','Spare'], linkColumn:'Link'});
+      assert.equal(el('vwKpiLinks').textContent,'2');            // the sheet's "Tổng" row is not a link
+      assert.equal(el('vwKpiViews').textContent,(1200).toLocaleString('vi-VN'));
+      assert.equal(el('vwKpiLikes').textContent,'3');            // a confirmed 0 counts
+      assert.equal(el('vwKpiComments').textContent,'—');         // nothing known: blank, never 0
+      assert.equal(el('vwKpiLinksNote').textContent,'1 link chưa có số liệu');
+      assert.ok(!el('previewHeader').innerHTML.includes('Spare'));  // a column blank on every row is left out
+      assert.match(el('previewBody').innerHTML,/<td class="vw-num"><\/td>/);  // unknown views stay blank in the table
+      assert.match(el('previewBody').innerHTML,/>@a<span class="vw-link-detail"> · video 1<\/span><\/a>/);
+    """)
