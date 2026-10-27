@@ -18,6 +18,8 @@ TEMPLATES_DIR = os.path.join(WEB_DIR, "templates")
 STATIC_DIR = os.path.join(WEB_DIR, "static")
 LOGO_PATH = os.path.join(WEB_DIR, "logo.png")
 PLATFORM_ICONS_DIR = os.path.join(STATIC_DIR, "platform-icons")
+# Square, trimmed 3x renditions for partner Excel reports (tools/make_report_icons.py).
+REPORT_ICONS_DIR = os.path.join(WEB_DIR, "report-icons")
 
 
 def data_dir() -> str:

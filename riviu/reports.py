@@ -17,7 +17,7 @@ from openpyxl.drawing.image import Image as ExcelImage
 from openpyxl.drawing.spreadsheet_drawing import AnchorMarker, OneCellAnchor
 from openpyxl.drawing.xdr import XDRPositiveSize2D
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
-from openpyxl.utils import get_column_letter
+from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.utils.cell import coordinate_from_string
 from openpyxl.utils.units import pixels_to_EMU
 
@@ -128,6 +128,11 @@ def row_height_to_pixels(height):
 
 
 def add_centered_image_to_cell(ws, cell_address, image_path, max_height_px=36):
+    """Anchor an image in the middle of one cell, scaled down (aspect kept) to fit it.
+
+    The cell's final column width and row height must already be set: the offsets are
+    computed from them, and a width set afterwards leaves the image off centre.
+    """
     if not image_path or not os.path.exists(image_path):
         return False
     try:
@@ -136,24 +141,19 @@ def add_centered_image_to_cell(ws, cell_address, image_path, max_height_px=36):
         return False
 
     col_letter, row_number = coordinate_from_string(cell_address)
-    col_idx = ord(col_letter.upper()) - ord("A")
+    col_idx = column_index_from_string(col_letter) - 1
     row_idx = row_number - 1
 
-    if img.height > max_height_px:
-        scale = max_height_px / img.height
-        img.height = max_height_px
-        img.width = int(img.width * scale)
-
+    source_width, source_height = img.width, img.height
     cell_width_px = column_width_to_pixels(ws.column_dimensions[col_letter].width)
-    max_width_px = max(cell_width_px - 4, 24)
-    if img.width > max_width_px:
-        scale = max_width_px / img.width
-        img.width = max_width_px
-        img.height = int(img.height * scale)
-
     cell_height_px = row_height_to_pixels(ws.row_dimensions[row_number].height)
-    col_off = pixels_to_EMU(max((cell_width_px - img.width) / 2, 0))
-    row_off = pixels_to_EMU(max((cell_height_px - img.height) / 2, 0))
+    max_width_px = max(cell_width_px - 8, 16)
+    scale = min(1, max_height_px / source_height, max_width_px / source_width)
+    img.width = max(round(source_width * scale), 1)
+    img.height = max(round(source_height * scale), 1)
+
+    col_off = pixels_to_EMU(max((cell_width_px - img.width) // 2, 0))
+    row_off = pixels_to_EMU(max((cell_height_px - img.height) // 2, 0))
     img.anchor = OneCellAnchor(
         _from=AnchorMarker(col=col_idx, colOff=col_off, row=row_idx, rowOff=row_off),
         ext=XDRPositiveSize2D(pixels_to_EMU(img.width), pixels_to_EMU(img.height)),
@@ -162,6 +162,10 @@ def add_centered_image_to_cell(ws, cell_address, image_path, max_height_px=36):
     return True
 
 
+# Banner images: Riviu logo in A1 (row 1 is 42pt = 56px), platform icon in the last column of
+# row 2 (26pt = 34px). The icon PNGs are 3x renditions of this size (tools/make_report_icons.py).
+REPORT_LOGO_MAX_HEIGHT_PX = 40
+REPORT_ICON_PX = 24
 REPORT_COLUMN_WIDTHS = {
     "NGÀY AIR": 14, "TÊN KÊNH": 24, "LINK AIR": 72, "LƯỢT XEM": 14, "TIM": 12,
     "BÌNH LUẬN": 14, "LƯỢT LƯU": 14, "REPOST": 14, "CHIA SẺ": 12,
@@ -205,11 +209,18 @@ def report_row_fill(spec, source_row):
     return None
 
 
+def report_platform_icon_path(spec):
+    return os.path.join(paths.REPORT_ICONS_DIR, f"{spec.key}.png")
+
+
 def write_report_banner(ws, spec, partner, link_count, columns):
     ws.row_dimensions[1].height = 42
     ws.row_dimensions[2].height = 26
+    # Final widths first: the images below are centred from them.
+    for index, header in enumerate(columns, start=1):
+        ws.column_dimensions[get_column_letter(index)].width = REPORT_COLUMN_WIDTHS.get(header, 14)
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
-    add_centered_image_to_cell(ws, "A1", LOGO_PATH)
+    add_centered_image_to_cell(ws, "A1", LOGO_PATH, max_height_px=REPORT_LOGO_MAX_HEIGHT_PX)
 
     ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=len(columns))
     title_cell = ws["B1"]
@@ -221,12 +232,11 @@ def write_report_banner(ws, spec, partner, link_count, columns):
     # Row 2: metadata across all but the last column, platform icon in the last one.
     last_column = get_column_letter(len(columns))
     ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(columns) - 1)
-    ws.column_dimensions[last_column].width = REPORT_COLUMN_WIDTHS.get(columns[-1], 12)
-    platform_icon = os.path.join(paths.PLATFORM_ICONS_DIR, f"{spec.key}.png")
-    add_centered_image_to_cell(ws, f"{last_column}2", platform_icon, max_height_px=22)
+    add_centered_image_to_cell(ws, f"{last_column}2", report_platform_icon_path(spec), max_height_px=REPORT_ICON_PX)
     ws["A2"] = f"Tổng link: {link_count} • Ngày cập nhật: {format_display_datetime()}"
     ws["A2"].font = Font(color=REPORT_ACCENT_TEXT, italic=True, bold=True)
-    ws["A2"].alignment = Alignment(horizontal="center")
+    # Vertically centred like the icon beside it.
+    ws["A2"].alignment = Alignment(horizontal="center", vertical="center")
 
 
 def write_report_total(ws, spec, frame, columns, total_row, border):
@@ -315,8 +325,6 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100, 
     ws.freeze_panes = f"A{data_start_row}"
     filter_last_row = (total_row - 1) if total_row else max(data_start_row, table_header_row)
     ws.auto_filter.ref = f"A{table_header_row}:{get_column_letter(len(columns))}{filter_last_row}"
-    for index, header in enumerate(columns, start=1):
-        ws.column_dimensions[get_column_letter(index)].width = REPORT_COLUMN_WIDTHS.get(header, 14)
 
     buffer = io.BytesIO()
     wb.save(buffer)
