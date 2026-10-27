@@ -18,6 +18,7 @@ from riviu import proxy_utils
 import openpyxl
 from openpyxl.utils import get_column_letter
 from riviu.platforms import threads_session
+from riviu.proxy_utils import masked_proxy_label
 from playwright.async_api import async_playwright
 
 from riviu.platforms.tiktok import close_browser_bounded, finish_pending_task, playwright_session
@@ -733,12 +734,29 @@ def collect_threads_rows(workbook, sheet_name="", selected_partners=None, invali
     return rows
 
 
-def _load_threads_rows(file_path, sheet_name, selected_partners):
+def _row_filter(skip_rows=None, only_rows=None):
+    """Keep rows a resumed run has not saved yet, or only those a retry pass rescans
+    (sets of `(sheet_name, row, url)` keys, see riviu/scan_journal.py)."""
+    if skip_rows is None and only_rows is None:
+        return None
+    skip = set(skip_rows or ())
+    only = set(only_rows) if only_rows is not None else None
+
+    def keep(row):
+        key = (row["sheet_name"], row["row"], row["url"])
+        return key not in skip and (only is None or key in only)
+    return keep
+
+
+def _load_threads_rows(file_path, sheet_name, selected_partners, row_filter=None):
     """The workbook, its scannable rows, those rows grouped by post, and its invalid
     Threads links. Blocking: run it off the event loop."""
     workbook = openpyxl.load_workbook(file_path)
     invalid_links = []
     rows = collect_threads_rows(workbook, sheet_name=sheet_name, selected_partners=selected_partners, invalid_links=invalid_links)
+    if row_filter is not None:
+        rows = [row for row in rows if row_filter(row)]
+        invalid_links = []  # already reported by the pass that scanned the whole sheet
     buckets = {}
     for row in rows:
         key = post_identity(row["url"]) or ("share", row["url"].casefold())
@@ -777,7 +795,11 @@ def append_threads_diagnostic(base_dir, entry):
 
 
 async def run_threads_scraper(file_path, websocket_manager=None, worker_count=3, selected_partners=None,
-                              sheet_name="", mode="hybrid", base_dir="", use_proxy=False, proxy_text="", session_cookies=None, proxy_configs=None):
+                              sheet_name="", mode="hybrid", base_dir="", use_proxy=False, proxy_text="", session_cookies=None, proxy_configs=None,
+                              skip_rows=None, only_rows=None, on_rows_saved=None):
+    """skip_rows / only_rows limit a resumed run or a retry pass to some rows; on_rows_saved(rows)
+    is awaited after each successful save with the rows (`sheet_name`, `row`, `url`, `status`,
+    `kind`) that save wrote. Both are for riviu/scan_service.py; the defaults scan every row."""
     started = time.monotonic()
     diagnostic = {
         "startedAt": format_display_datetime(), "platform": "threads", "fileLabel": os.path.basename(file_path),
@@ -789,7 +811,8 @@ async def run_threads_scraper(file_path, websocket_manager=None, worker_count=3,
     try:
         await _run_threads_scraper(file_path, websocket_manager, worker_count, selected_partners,
                                    sheet_name, mode, base_dir, use_proxy, proxy_text, diagnostics=diagnostic,
-                                   session_cookies=session_cookies, proxy_configs=proxy_configs)
+                                   session_cookies=session_cookies, proxy_configs=proxy_configs,
+                                   row_filter=_row_filter(skip_rows, only_rows), on_rows_saved=on_rows_saved)
         diagnostic["phase"] = "rate_limited" if diagnostic.get("stopReason") == RATE_LIMIT_STOP_REASON else "completed"
     except asyncio.CancelledError:
         diagnostic["phase"] = "cancelled"
@@ -829,13 +852,22 @@ async def _request_once(url, config, session_cookies):
     return await finish_pending_task(asyncio.create_task(asyncio.to_thread(fetch_threads_http, url, **options)))
 
 
-def rate_limit_stop_message(processed, total):
+def rate_limit_stop_message(processed, total, route_count=1):
     left = max(total - processed, 0)
+    where = f"trên cả {route_count} proxy" if route_count > 1 else "trên tuyến kết nối này"
     return (
-        f"CẢNH BÁO: Threads đang giới hạn tần suất (HTTP 429) trên tuyến kết nối này. "
+        f"CẢNH BÁO: Threads đang giới hạn tần suất (HTTP 429) {where}. "
         f"Đã dừng quét sau {processed}/{total} link; {left} link chưa quét được giữ nguyên số liệu và trạng thái cũ. "
         f"Chờ khoảng {THREADS_RATE_LIMIT_WAIT_MINUTES} phút rồi quét lại. "
-        "Cookie Threads không vượt được giới hạn này; app không tự đổi proxy để né."
+        "Cookie Threads không vượt được giới hạn này; app không gửi lại link bị 429 qua proxy khác và không chuyển sang direct."
+    )
+
+
+def route_retired_message(route, config, remaining, route_count):
+    return (
+        f"CẢNH BÁO: Threads trả HTTP 429 qua proxy {route + 1} ({masked_proxy_label(config)}); "
+        f"ngừng dùng proxy này trong phiên. Còn {remaining}/{route_count} proxy tiếp tục quét các link chưa gửi; "
+        "link vừa bị 429 giữ số cũ và chờ lượt quét lại."
     )
 
 
@@ -983,7 +1015,7 @@ async def _rebuild_threads_summary(workbook, sheet_name, selected_partners, webs
 
 async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3, selected_partners=None,
                                sheet_name="", mode="hybrid", base_dir="", use_proxy=False, proxy_text="", diagnostics=None,
-                               session_cookies=None, proxy_configs=None):
+                               session_cookies=None, proxy_configs=None, row_filter=None, on_rows_saved=None):
     proxies = (list(proxy_configs) if proxy_configs is not None else resolve_threads_proxies(base_dir or os.path.dirname(os.path.abspath(file_path)), proxy_text, mode)) if use_proxy else []
     if use_proxy and not proxies:
         raise ValueError("Bật proxy nhưng chưa có proxy hợp lệ.")
@@ -993,7 +1025,7 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
     # Owned like a save: a cancellation waits for the read, so no thread of this run
     # still holds the file once the scan is released.
     workbook, rows, items, invalid_links = await finish_pending_task(asyncio.create_task(asyncio.to_thread(
-        _load_threads_rows, file_path, sheet_name, selected_partners)))
+        _load_threads_rows, file_path, sheet_name, selected_partners, row_filter)))
     skipped_profiles = sum(1 for invalid in invalid_links if invalid["kind"] == "profile")
     total = len(items)
     workers = max(1, min(int(worker_count or 3), 5 if mode != "request" else 10))
@@ -1020,7 +1052,9 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                     "cần dạng threads.com/@tên/post/<mã bài> hoặc threads.com/share/<mã>; sửa link rồi quét lại.")
     if not total:
         if websocket_manager:
-            await websocket_manager.broadcast_log("Không tìm thấy link Threads trong sheet hoặc đối tác đã chọn.")
+            await websocket_manager.broadcast_log(
+                "Không còn link Threads nào cần quét trong lượt này." if row_filter is not None
+                else "Không tìm thấy link Threads trong sheet hoặc đối tác đã chọn.")
             await websocket_manager.broadcast_status({"total": 0, "processed": 0, "success": 0, "hidden": 0, "error": 0, "done": True})
         workbook.close()
         return
@@ -1029,11 +1063,16 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
     # Hybrid fallbacks never take every slot while HTTP work is queued.
     fallback_slots = asyncio.Semaphore(max(1, min(BROWSER_FALLBACK_LIMIT, workers - 1)))
     pacer = _RoutePacer(THREADS_HTTP_MIN_INTERVAL, THREADS_HTTP_JITTER)
-    # Set by the first HTTP 429: no Threads request of this run starts after it.
+    # Per-route 429 quarantine: an anonymous proxy run has one route per proxy; direct and a
+    # cookie session's fixed route are a single route. A 429 retires its route for the rest of
+    # the run; once every route is retired, requests_stopped is set and the run stops.
+    route_count = len(proxies) if proxies and session_cookies is None else 1
+    retired = set()
     requests_stopped = asyncio.Event()
     processed = success = hidden = errors = 0
     stop_reason = None
     dirty = False
+    unsaved_rows = []
     last_saved = _checkpoint_clock()
     # Column indexes of this run's freshly loaded workbook. Only the result loop
     # uses them, and nothing there inserts, deletes or renames columns.
@@ -1054,45 +1093,74 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
             return browser
 
         async def save_pending():
-            nonlocal dirty, last_saved
+            nonlocal dirty, last_saved, unsaved_rows
             await asyncio.to_thread(save_workbook_atomic, workbook, file_path)
             dirty = False
             last_saved = _checkpoint_clock()
+            saved_rows, unsaved_rows = unsaved_rows, []
+            if saved_rows and on_rows_saved is not None:
+                await on_rows_saved(saved_rows)
+
+        def pick_route(index):
+            """The URL's round-robin route, or the next one not retired; raises once all are."""
+            for step in range(route_count):
+                candidate = (index + step) % route_count
+                if candidate not in retired:
+                    return candidate
+            raise _RequestsStopped()
+
+        async def retire(route):
+            # Checked by every worker before its next request, not when the result loop gets here.
+            if route in retired:
+                return
+            retired.add(route)
+            if diagnostics is not None:
+                diagnostics["retiredRoutes"] = len(retired)
+            if len(retired) >= route_count:
+                requests_stopped.set()  # the stop message follows in the result loop
+            elif websocket_manager:
+                await websocket_manager.broadcast_log(
+                    route_retired_message(route, proxies[route], route_count - len(retired), route_count))
 
         async def check(index, item):
-            # A cookie session keeps one route for the whole run; anonymous runs round-robin.
-            # HTTP, its retry and any browser fallback of a URL use the same route.
-            route = (0 if session_cookies is not None else index % len(proxies)) if proxies else None
-            config = proxies[route] if proxies else None
+            # A cookie session keeps one route for the whole run; anonymous runs round-robin over
+            # the routes no 429 retired. HTTP, its retry and any browser fallback of a URL use the
+            # same route; only a URL not yet requested moves off a route retired meanwhile.
+            while True:
+                try:
+                    route = pick_route(index)
+                except _RequestsStopped:
+                    return item, None, None  # never requested: the row stays untouched
+                config = proxies[route] if proxies else None
 
-            async def pace():
-                await pacer.wait(route)
-                if requests_stopped.is_set():
-                    raise _RequestsStopped()
+                async def pace(route=route):
+                    await pacer.wait(route)
+                    if route in retired:
+                        raise _RequestsStopped()
 
-            def noted(result):
-                # Checked by every worker before its next request, not when the result loop gets here.
-                if result.get("error_kind") == "rate_limit":
-                    requests_stopped.set()
-                return result
+                async def noted(result, route=route):
+                    if result.get("error_kind") == "rate_limit":
+                        await retire(route)
+                    return result
 
-            try:
-                if mode == "browser":
+                try:
+                    if mode == "browser":
+                        async with slots.hold():
+                            if route in retired:
+                                raise _RequestsStopped()
+                            return item, await noted(await _browser_check(item["url"], config, session_cookies, get_browser)), "Browser"
                     async with slots.hold():
-                        if requests_stopped.is_set():
-                            raise _RequestsStopped()
-                        return item, noted(await _browser_check(item["url"], config, session_cookies, get_browser)), "Browser"
-                async with slots.hold():
-                    request_result = noted(await _request_check(item["url"], config, session_cookies, pace=pace))
-            except _RequestsStopped:
-                return item, None, None  # never requested: the row stays untouched
+                        request_result = await noted(await _request_check(item["url"], config, session_cookies, pace=pace))
+                    break
+                except _RequestsStopped:
+                    continue  # retired before this URL's first request: take a route still in use
             if mode == "request" or not needs_browser_fallback(request_result):
                 return item, request_result, "Request"
             # The HTTP slot is released first: a slow page never holds it.
             async with fallback_slots, slots.hold(fallback=True):
-                if requests_stopped.is_set():
+                if route in retired:
                     return item, request_result, "Request"
-                browser_result = noted(await _browser_check(item["url"], config, session_cookies, get_browser))
+                browser_result = await noted(await _browser_check(item["url"], config, session_cookies, get_browser))
             return item, merge_results(request_result, browser_result), "Hybrid"
 
         recorded = set()
@@ -1114,6 +1182,8 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                 hidden += 1
             for row in item["rows"]:
                 write_threads_result(workbook[row["sheet_name"]], row["row"], result, columns)
+                unsaved_rows.append({"sheet_name": row["sheet_name"], "row": row["row"], "url": row["url"],
+                                     "status": status, "kind": result.get("error_kind", "") if result.get("error") else ""})
                 dirty = True
             if diagnostics is not None:
                 diagnostics.update(processedUrls=processed, success=success, partial=hidden, error=errors)
@@ -1149,7 +1219,7 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                 if result is None:
                     continue
                 await record(item, result, source)
-                if result.get("error_kind") == "rate_limit":
+                if requests_stopped.is_set():
                     stop_reason = RATE_LIMIT_STOP_REASON
                     break
             if stop_reason:
@@ -1168,7 +1238,7 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                 if diagnostics is not None:
                     diagnostics["stopReason"] = stop_reason
                 if websocket_manager:
-                    await websocket_manager.broadcast_log(rate_limit_stop_message(processed, total))
+                    await websocket_manager.broadcast_log(rate_limit_stop_message(processed, total, route_count))
             # Every page load is done: Chromium closes while the workbook is finalized.
             closing = asyncio.ensure_future(close_browser_bounded(browser))
             # A stopped run is incomplete: like a cancelled one it leaves the summary tab as it was.

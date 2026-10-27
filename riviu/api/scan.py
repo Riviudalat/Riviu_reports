@@ -73,11 +73,8 @@ async def websocket_endpoint(websocket: WebSocket):
                 scan_service.start_scan_task(target_path, options)
                 await manager.broadcast_status(manager.last_status)
             elif action == "cancel":
-                task = scan_state.SCRAPE_TASK
-                if task and not task.done():
-                    # Repeated cancel must not interrupt the pending save/cleanup.
-                    if not task.cancelling():
-                        task.cancel()
+                # A user cancel is final: the run is not resumed later (scan_service.user_cancel_scan).
+                if scan_service.user_cancel_scan():
                     await manager.broadcast_log("Đang hủy phiên quét hiện tại...")
                 else:
                     await manager.broadcast_log("Không có phiên quét nào đang chạy.")
