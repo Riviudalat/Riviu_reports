@@ -146,9 +146,6 @@ let proxySavedCount = 0;
 const SERVER_BUILD_KEY = 'serverProxyBuild';
 // localStorage copy of the source preferences, kept only while the server cannot save them.
 const SOURCE_PREFERENCES_FALLBACK_KEY = 'riviuPlatformSourcesV1';
-// A viewer's explicit file choice: kept in this browser tab only (sessionStorage), never posted
-// to the server, so a new visit opens on the admin's current source (the newest synced report).
-const VIEWER_SOURCES_KEY = 'riviuViewerSourcesV1';
 let threadsCookieState = { configured: false, state: 'none', generation: '' };
 let threadsCookieBusy = false;
 let threadsCookieFocus = null;
@@ -307,7 +304,7 @@ function renderPlatformSourceRows() {
             // The viewer's picker: only the active platform's sheet select shows (applyPlatformUI).
             return `<div class="platform-source-row vw-sheet-row" data-source-platform="${platform}"${key === activePlatform ? '' : ' hidden'}> `
                 + `<label class="vw-field-label" for="${id.sheet}">Sheet</label> `
-                + `<select id="${id.sheet}" class="vw-select sheet-select" aria-label="Sheet ${label}"></select> `
+                + `<select id="${id.sheet}" class="vw-select sheet-select" data-viewer-sheets="${platform}" aria-label="Sheet ${label}"></select> `
                 + `<span id="${id.sourceLabel}" class="platform-source-file" hidden>Chưa chọn file</span> </div>`;
         }
         return head
@@ -346,8 +343,6 @@ function applyPlatformUI(platform) {
     if (reportLabel) reportLabel.textContent = `Đối tác & báo cáo ${config.label}`;
     if (IS_VIEWER) {
         document.querySelectorAll('#platformSourceRows .platform-source-row').forEach(row => { row.hidden = row.dataset.sourcePlatform !== platform; });
-        const savedLabel = document.getElementById('vwKpiSavedLabel');
-        if (savedLabel) savedLabel.textContent = config.savedMetric.label;
     }
 }
 
@@ -801,7 +796,8 @@ function appendSheetOptions(selectEl, sheets, selectedSheet, hiddenSheets) {
 }
 
 function renderSheetSelect(selectEl, sheets, preferredSheet, onUpdate, hiddenSheets = activeSource().hiddenSheets) {
-    const validSheets = dataSheetsVisibleFirst(sheets, hiddenSheets);
+    const viewerPlatform = IS_VIEWER && selectEl.dataset?.viewerSheets;
+    const validSheets = viewerPlatform ? viewerSheetChoices(sheets, viewerPlatform, hiddenSheets) : dataSheetsVisibleFirst(sheets, hiddenSheets);
     selectEl.innerHTML = '';
     if (validSheets.length === 0) {
         selectEl.innerHTML = '<option value="">Không có sheet</option>';
@@ -1311,18 +1307,6 @@ function storeSourcePreferencesFallback(sources) {
     try { localStorage.setItem(SOURCE_PREFERENCES_FALLBACK_KEY, JSON.stringify(sources)); } catch {}
 }
 
-function loadViewerSources() {
-    try { return validatedSourcePreferences(JSON.parse(globalThis.sessionStorage?.getItem(VIEWER_SOURCES_KEY) || 'null')); } catch { return null; }
-}
-
-function rememberViewerChoice(platform) {
-    try {
-        const own = loadViewerSources() || validatedSourcePreferences({});
-        own[platform] = sourcePreferencesSnapshot()[platform];
-        globalThis.sessionStorage?.setItem(VIEWER_SOURCES_KEY, JSON.stringify(own));
-    } catch {}
-}
-
 function loadSourcePreferences() {
     if (sourcePreferencesLoad) return sourcePreferencesLoad;
     const generation = sourcePreferencesGeneration;
@@ -1337,14 +1321,6 @@ function loadSourcePreferences() {
             sourcePreferencesSaveFailed = true;
             if (!IS_VIEWER) {
                 try { sources = validatedSourcePreferences(JSON.parse(localStorage.getItem(SOURCE_PREFERENCES_FALLBACK_KEY) || 'null')); } catch {}
-            }
-        }
-        if (IS_VIEWER) {
-            // A platform the viewer picked a file for opens on that file; the others on the admin's.
-            const own = loadViewerSources();
-            if (own) {
-                sources ||= own;
-                for (const platform of PLATFORM_KEYS) if (own[platform].fileId) sources[platform] = own[platform];
             }
         }
         if (sources && generation === sourcePreferencesGeneration) {
@@ -1397,7 +1373,7 @@ async function flushSourcePreferences() {
 
 function persistSources() {
     ++sourcePreferencesGeneration;
-    // The viewer saves nothing on the server; selectFile() remembers its explicit choice.
+    // The viewer saves nothing on the server.
     if (IS_VIEWER) return;
     try {
         sourcePreferencesPending = { sources: sourcePreferencesSnapshot() };
@@ -1600,21 +1576,15 @@ async function updateFileList({ applyGoogleSheetUrl = false } = {}) {
     }
 }
 
+// The viewer has no file choice: each platform shows its source preference's file.
 async function selectFile(fileId) {
-    if (!fileId || uiIsBusy()) return;
+    if (IS_VIEWER || !fileId || uiIsBusy()) return;
     const platform = activePlatform;
     sourceBusy = true; ++sourceRevision; syncScanControls();
     const source = platformSources[platform];
     try {
         source.displaySheet = '';
         setGooglePushState();
-        if (IS_VIEWER) {
-            Object.assign(source, { fileId, displaySheet: '', scanSheet: '', pushSheet: '', sheets: [], hiddenSheets: [], dirty: false });
-            await updateFileList();
-            rememberViewerChoice(platform);
-            await loadPreview();
-            return;
-        }
         const res = await postJson('/select-file', { filename: fileId, platform });
         const data = await res.json();
         if (!data.success) throw new Error(data.error || 'Không chọn được file');
@@ -1797,6 +1767,7 @@ function setPreviewTableVisible(visible) {
     const wrapper = document.querySelector('#previewTable')?.closest('.table-wrap');
     if (wrapper) wrapper.style.display = visible ? '' : 'none';
     document.getElementById('summaryDashboard').classList.toggle('active', !visible);
+    if (IS_VIEWER) setViewerView(visible ? 'links' : 'summary');
 }
 
 function matchesPlatformLink(value, platform = activePlatform) {
@@ -1869,6 +1840,7 @@ function applyPreviewSource(data) {
     renderScanSheetOptions(sheets, source.scanSheet);
     source.sheets = sheets;
     source.label = data.fileLabel || source.fileId;
+    if (IS_VIEWER) source.pushSheet = source.displaySheet; // the viewer's sheet picker shows the open tab
     saveActiveSource(); renderSourceRows();
     window.lastWorkbookSheets = sheets;
 }
@@ -1924,16 +1896,6 @@ async function loadPreview(sheetName = '') {
         }
 
         applyPreviewSource(data);
-        if (IS_VIEWER && isSummarySheetName(currentSheetName)) {
-            // The viewer shows partner totals beside the data sheet; open that sheet instead.
-            const sheets = data.sheets || [];
-            const dataSheet = dataSheetNameForSummaryTab(currentSheetName, sheets) || dataSheetsVisibleFirst(sheets)[0] || '';
-            if (dataSheet) {
-                currentSheetName = dataSheet;
-                currentScanSheetName = dataSheet;
-                return loadPreview(dataSheet);
-            }
-        }
         if (isSummarySheetName(currentSheetName)) {
             // Ask for the opened tab itself: a data sheet can have one summary tab per
             // platform, and the server reads that tab with the platform that owns it.
@@ -1954,7 +1916,7 @@ async function loadPreview(sheetName = '') {
             document.getElementById('totalLinks').textContent = visibleRows.filter(row => linkColumn && matchingLink(row[linkColumn])).length;
         }
         renderPreviewTable({ rows: visibleRows, columns, linkColumn });
-        if (IS_VIEWER) void loadViewerOverview();
+        if (IS_VIEWER) void loadViewerUpdated();
     } catch (error) {
         if (!isCurrent()) return;
         console.error(error);
@@ -2016,7 +1978,7 @@ async function renderSummaryDashboard(dataSheetName = '') {
             </div>
             <div class="summary-table-wrap">
                 <table class="summary-table">
-                    <thead><tr>${columns.map(column => `<th>${escapeHtml(column)}</th>`).join('')}</tr></thead>
+                    <thead><tr>${columns.map(column => `<th>${escapeHtml(IS_VIEWER ? viewerHeaderLabel(column) : column)}</th>`).join('')}</tr></thead>
                     <tbody>${tableRows}</tbody>
                 </table>
             </div>
@@ -3595,23 +3557,21 @@ async function saveSchedule() {
 }
 
 // ---- Viewer report page (server mode `/`, data-role="viewer") ------------------
-// The viewer shows one sheet as a report: KPI totals, partners with their export, and the
-// link table. It reuses the admin page's source state and reads (preview, partners, summary,
-// export) and calls nothing outside the viewer allowlist. Unknown metrics stay blank ("—").
-const VIEWER_METRICS = Object.freeze([
-    { key: 'views', id: 'vwKpiViews', aliases: ['luot xem', 'view', 'views'] },
-    { key: 'likes', id: 'vwKpiLikes', aliases: ['tim', 'like', 'likes', 'luot thich'] },
-    { key: 'comments', id: 'vwKpiComments', aliases: ['binh luan', 'comment', 'comments'] },
-    { key: 'saved', id: 'vwKpiSaved', aliases: [] }, // the platform's fourth metric (saves / reposts)
-    { key: 'shares', id: 'vwKpiShares', aliases: ['chia se', 'share', 'shares'] },
+// The viewer shows the platform's current report file (its source preference) one sheet at a
+// time: the link table, or the partner summary for a "Tổng kết" tab. "Xuất báo cáo" opens the
+// shared report dialog. It reuses the admin page's source state and reads, and calls nothing
+// outside the viewer allowlist. Unknown metrics stay blank.
+const VIEWER_METRIC_ALIASES = Object.freeze([
+    ['luot xem', 'view', 'views'],
+    ['tim', 'like', 'likes', 'luot thich'],
+    ['binh luan', 'comment', 'comments'],
+    ['chia se', 'share', 'shares'],
 ]);
 const VIEWER_LINK_KINDS = Object.freeze({ video: 'video', photo: 'ảnh', post: 'bài' });
+const VIEWER_NO_SOURCE_TEXT = 'Chưa có file báo cáo cho nền tảng này';
 let viewerTable = { columns: [], rows: [], linkColumn: '', numeric: new Set() };
-let viewerPartners = [];
-let viewerPartnerSheet = '';
 let viewerUpdated = { key: '', text: '' };
-let viewerOverviewSequence = 0;
-let viewerExporting = null; // null, 'all' or the index of the partner being exported
+let viewerUpdatedSequence = 0;
 
 function viewerSourceKey() {
     return `${activePlatform}|${currentFileId}|${currentSheetName}`;
@@ -3628,14 +3588,11 @@ function viewerMetricNumber(value) {
     return /^\d+(\.\d+)?$/.test(compact) ? Math.trunc(Number(compact)) : null;
 }
 
+// The metric columns (views, likes, comments, the platform's saves/reposts, shares) in table order.
 function viewerMetricColumns(columns, platform = activePlatform) {
     const saved = platformConfig(platform).savedMetric;
-    const keys = columns.map(column => normalizeVietnameseKey(column));
-    return Object.fromEntries(VIEWER_METRICS.map(metric => {
-        const aliases = metric.key === 'saved' ? [normalizeVietnameseKey(saved.column), normalizeVietnameseKey(saved.label)] : metric.aliases;
-        const index = keys.findIndex(key => aliases.includes(key));
-        return [metric.key, index >= 0 ? columns[index] : ''];
-    }));
+    const aliases = [...VIEWER_METRIC_ALIASES, [normalizeVietnameseKey(saved.column), normalizeVietnameseKey(saved.label)]];
+    return columns.filter(column => aliases.some(list => list.includes(normalizeVietnameseKey(column))));
 }
 
 // Workbook headers are often in capitals ("LƯỢT XEM"); the viewer shows them in sentence case.
@@ -3694,45 +3651,26 @@ function setViewerText(id, text, title = '') {
     else node.removeAttribute?.('title');
 }
 
-function renderViewerKpis(rows, metricColumns) {
-    setViewerText('vwKpiLinks', rows.length ? formatNumber(rows.length) : '—');
-    setViewerText('vwKpiSavedLabel', platformConfig().savedMetric.label);
-    let viewsKnown = 0;
-    for (const metric of VIEWER_METRICS) {
-        const column = metricColumns[metric.key];
-        const known = column ? rows.map(row => viewerMetricNumber(row[column])).filter(value => value !== null) : [];
-        if (metric.key === 'views') viewsKnown = known.length;
-        // Totals sum the known values and stay blank only when nothing in the column is known.
-        if (known.length) setViewerText(metric.id, formatNumber(known.reduce((sum, value) => sum + value, 0)));
-        else setViewerText(metric.id, '—', 'Chưa có số liệu');
-    }
-    const missing = rows.length - viewsKnown;
-    setViewerText('vwKpiLinksNote', rows.length && missing > 0 ? `${formatNumber(missing)} link chưa có số liệu` : '');
-    setViewerText('vwKpiViewsNote', rows.length && viewsKnown ? `từ ${formatNumber(viewsKnown)} link có số liệu` : '');
-}
-
 // Called by renderPreviewTable() on the viewer page.
 function renderViewerTable(preview) {
     const linkColumn = preview.linkColumn || '';
-    // The sheet's own "Tổng" row is shown as the KPI totals instead.
+    // The sheet's own "Tổng" row stays out of the link list.
     const rows = preview.rows.filter(row => !linkColumn || normalizeVietnameseKey(row[linkColumn]) !== 'tong');
-    const metricColumns = viewerMetricColumns(preview.columns);
     // Columns that are blank on every row (unused partner slots, spare columns) are left out,
     // and the link, channel and metrics come right after the first (index) column.
     const filled = rows.length
         ? preview.columns.filter(column => rows.some(row => String(row[column] ?? '').trim() !== ''))
         : preview.columns;
+    const metricColumns = viewerMetricColumns(filled);
     const channelColumn = filled.find(column => normalizeVietnameseKey(column) === 'ten kenh') || '';
-    const leading = [filled[0], linkColumn, channelColumn, ...VIEWER_METRICS.map(metric => metricColumns[metric.key])]
+    const leading = [filled[0], linkColumn, channelColumn, ...metricColumns]
         .filter((column, index, list) => column && filled.includes(column) && list.indexOf(column) === index);
     const columns = [...leading, ...filled.filter(column => !leading.includes(column))];
-    const numeric = new Set(Object.values(metricColumns).filter(column => column && columns.includes(column)));
     viewerTable = {
-        columns, linkColumn, numeric,
+        columns, linkColumn, numeric: new Set(metricColumns),
         rows: rows.map(row => ({ row, text: normalizeVietnameseKey(columns.map(column => row[column] ?? '').join(' ')) })),
     };
-    document.getElementById('previewHeader').innerHTML = `<tr>${columns.map(column => `<th scope="col"${numeric.has(column) ? ' class="vw-num"' : ''} title="${escapeHtml(column)}">${escapeHtml(viewerHeaderLabel(column))}</th>`).join('')}</tr>`;
-    renderViewerKpis(rows, metricColumns);
+    document.getElementById('previewHeader').innerHTML = `<tr>${columns.map(column => `<th scope="col"${viewerTable.numeric.has(column) ? ' class="vw-num"' : ''} title="${escapeHtml(column)}">${escapeHtml(viewerHeaderLabel(column))}</th>`).join('')}</tr>`;
     renderViewerTableRows();
 }
 
@@ -3752,23 +3690,38 @@ function renderViewerTableRows() {
     }
 }
 
+// The link list, the partner summary for a "Tổng kết" tab (setPreviewTableVisible()), or empty.
+function setViewerView(view) {
+    const panel = document.getElementById('vwDataPanel');
+    if (panel) panel.dataset.view = view;
+    const title = document.getElementById('vwDataTitle');
+    if (title?.firstChild) title.firstChild.textContent = view === 'summary' ? 'Tổng kết đối tác ' : 'Danh sách link ';
+    if (view === 'summary') setViewerText('vwRowCount', '');
+}
+
 function renderViewerHeader() {
     const source = activeSource();
+    const hasSource = Boolean(source.fileId);
     const label = source.label || source.fileId || '';
-    setViewerText('vwReportTitle', label || 'Chưa chọn file báo cáo', label);
-    setViewerText('vwReportSheet', !source.fileId ? 'Chọn file và sheet để xem số liệu.' : (currentSheetName ? `Sheet ${currentSheetName}` : ''));
-    setViewerText('vwReportUpdated', viewerUpdated.key === viewerSourceKey() ? viewerUpdated.text : '');
+    setViewerText('vwReportTitle', hasSource ? label : VIEWER_NO_SOURCE_TEXT, label);
+    setViewerText('vwReportSheet', hasSource
+        ? (currentSheetName ? `Sheet ${currentSheetName}` : '')
+        : 'Quản trị viên chưa chọn hoặc chưa nạp file cho nền tảng này.');
+    setViewerText('vwReportUpdated', hasSource && viewerUpdated.key === viewerSourceKey() ? viewerUpdated.text : '');
+    const pickers = document.getElementById('vwPickers');
+    if (pickers) pickers.hidden = !hasSource;
+    const exportButton = document.getElementById('vwExportButton');
+    if (exportButton) exportButton.disabled = !hasSource;
 }
 
 function resetViewerOverview() {
-    ++viewerOverviewSequence;
+    ++viewerUpdatedSequence;
     viewerTable = { columns: [], rows: [], linkColumn: '', numeric: new Set() };
-    viewerPartners = [];
-    for (const id of ['vwKpiLinks', ...VIEWER_METRICS.map(metric => metric.id)]) setViewerText(id, '—');
-    for (const id of ['vwKpiLinksNote', 'vwKpiViewsNote', 'vwRowCount', 'vwPartnerCount']) setViewerText(id, '');
-    const list = document.getElementById('vwPartnerList');
-    if (list) list.innerHTML = `<li class="vw-empty">${currentFileId ? 'Chưa có đối tác.' : 'Chọn file báo cáo để xem đối tác.'}</li>`;
-    renderViewerExportAll();
+    setViewerText('vwRowCount', '');
+    if (!currentFileId) {
+        setViewerView('empty');
+        document.getElementById('previewBody').innerHTML = `<tr><td colspan="10" class="vw-table-empty">${VIEWER_NO_SOURCE_TEXT}.</td></tr>`;
+    }
     renderViewerHeader();
 }
 
@@ -3797,109 +3750,26 @@ function viewerUpdatedText(summaryRows) {
     return `Số liệu cập nhật lúc ${match ? `${match[2]}, ${match[1]}` : best.text}`;
 }
 
-// The partner list (with each partner's links and views from the sheet's summary) and the
-// time the numbers were last scanned. Called after every preview load on the viewer page.
-async function loadViewerOverview() {
+// When the open data sheet was last scanned, from its summary tab ("Cập nhật lần cuối").
+async function loadViewerUpdated() {
     if (!IS_VIEWER || !currentFileId) return;
-    const sequence = ++viewerOverviewSequence;
+    const sequence = ++viewerUpdatedSequence;
     const fileId = currentFileId, platform = activePlatform, sheet = currentSheetName, key = viewerSourceKey();
-    const isCurrent = () => sequence === viewerOverviewSequence && fileId === currentFileId && platform === activePlatform;
-    const list = document.getElementById('vwPartnerList');
-    if (list) list.innerHTML = '<li class="vw-empty">Đang tải danh sách đối tác…</li>';
-    const { applyMinViews, minViews } = reportFilterParams();
-    const partnerQuery = new URLSearchParams({ sheet_name: sheet, apply_min_views: applyMinViews ? 'true' : 'false', min_views: String(minViews), platform, file_id: fileId });
     try {
-        const [partnersRes, summaryRes] = await Promise.all([
-            fetch(`/report-partners?${partnerQuery}`),
-            fetch(`/summary-dashboard?${sourceQuery({ sheet_name: sheet }, platform, fileId)}`),
-        ]);
-        const partnersData = await partnersRes.json();
-        const summaryData = await summaryRes.json().catch(() => ({}));
-        if (!isCurrent()) return;
-        if (!partnersRes.ok || partnersData.error) throw new Error(partnersData.error || 'Không tải được danh sách đối tác');
-        const summaryRows = summaryRes.ok && Array.isArray(summaryData.rows) ? summaryData.rows : [];
-        const summaryByName = new Map(summaryRows.map(row => [normalizeVietnameseKey(summaryRowValue(row, 'doi tac')), row]));
-        viewerPartners = normalizeReportPartners(partnersData.partners).map(partner => {
-            const row = summaryByName.get(normalizeVietnameseKey(partner.name));
-            return { ...partner, views: row ? viewerMetricNumber(summaryRowValue(row, 'tong luot xem')) : null };
-        }).sort((a, b) => (b.views ?? -1) - (a.views ?? -1) || a.name.localeCompare(b.name, 'vi'));
-        viewerPartnerSheet = partnersData.currentSheet || partnersData.dataSheet || sheet;
-        viewerUpdated = { key, text: viewerUpdatedText(summaryRows) };
+        const response = await fetch(`/summary-dashboard?${sourceQuery({ sheet_name: sheet }, platform, fileId)}`);
+        const data = await response.json().catch(() => ({}));
+        if (sequence !== viewerUpdatedSequence || key !== viewerSourceKey()) return;
+        viewerUpdated = { key, text: viewerUpdatedText(response.ok && Array.isArray(data.rows) ? data.rows : []) };
         renderViewerHeader();
-        renderViewerPartners();
-    } catch (error) {
-        if (!isCurrent()) return;
-        viewerPartners = [];
-        renderViewerExportAll();
-        if (list) list.innerHTML = `<li class="vw-empty">${escapeHtml(error.message)}</li>`;
-    }
+    } catch {}
 }
 
-function renderViewerExportAll() {
-    const button = document.getElementById('vwExportAll');
-    if (!button) return;
-    const exportable = viewerPartners.filter(partner => partner.linkCount > 0).length;
-    button.disabled = viewerExporting !== null || exportable === 0;
-    button.title = exportable ? `Tải một file .zip gồm báo cáo của ${exportable} đối tác` : 'Chưa có đối tác nào có link đủ điều kiện xuất';
-    setViewerText('vwExportAllLabel', viewerExporting === 'all' ? 'Đang xuất…' : (exportable ? `Xuất tất cả (${formatNumber(exportable)})` : 'Xuất tất cả'));
-}
-
-function renderViewerPartners() {
-    const list = document.getElementById('vwPartnerList');
-    if (!list) return;
-    const { applyMinViews, minViews } = reportFilterParams();
-    setViewerText('vwPartnerRule', applyMinViews
-        ? `Báo cáo bỏ qua link chưa có số liệu hoặc dưới ${formatNumber(minViews)} lượt xem.`
-        : 'Báo cáo bỏ qua link chưa có số liệu.');
-    setViewerText('vwPartnerCount', viewerPartners.length ? formatNumber(viewerPartners.length) : '');
-    renderViewerExportAll();
-    const query = normalizeVietnameseKey(document.getElementById('vwPartnerSearch')?.value || '');
-    const visible = viewerPartners.map((partner, index) => ({ partner, index }))
-        .filter(({ partner }) => !query || normalizeVietnameseKey(partner.name).includes(query));
-    if (!viewerPartners.length) {
-        list.innerHTML = '<li class="vw-empty">Sheet này chưa có đối tác.</li>';
-        return;
-    }
-    if (!visible.length) {
-        list.innerHTML = '<li class="vw-empty">Không tìm thấy đối tác phù hợp.</li>';
-        return;
-    }
-    list.innerHTML = visible.map(({ partner, index }) => {
-        const status = partner.linkCount > 0 ? '' : (partner.rawLinkCount > 0
-            ? `${formatNumber(partner.rawLinkCount)} link · chưa đủ điều kiện xuất`
-            : 'Chưa có link');
-        const meta = status || [
-            `${formatNumber(partner.rawLinkCount || partner.linkCount)} link`,
-            partner.views === null ? '' : `${formatNumber(partner.views)} lượt xem`,
-        ].filter(Boolean).join(' · ');
-        const busy = viewerExporting === index;
-        const disabled = viewerExporting !== null || partner.linkCount <= 0;
-        const title = partner.linkCount > 0 ? `Tải báo cáo Excel của ${partner.name}` : 'Chưa có link đủ điều kiện xuất';
-        return `<li class="vw-partner"><div class="vw-partner-copy"><span class="vw-partner-name" title="${escapeHtml(partner.name)}">${escapeHtml(partner.name)}</span>`
-            + `<span class="vw-partner-meta${status ? ' vw-muted' : ''}">${escapeHtml(meta)}</span></div>`
-            + `<button class="vw-btn vw-btn-small" type="button" onclick="exportViewerPartners(${index})" title="${escapeHtml(title)}" aria-label="Xuất báo cáo ${escapeHtml(partner.name)}"${disabled ? ' disabled' : ''}>`
-            + `<span class="material-icons-outlined" aria-hidden="true">${busy ? 'hourglass_top' : 'download'}</span><span>${busy ? 'Đang xuất' : 'Xuất'}</span></button></li>`;
-    }).join('');
-}
-
-// One partner (its index in viewerPartners) or, without an index, every partner with exportable links.
-async function exportViewerPartners(index) {
-    if (viewerExporting !== null || !currentFileId) return;
-    const partners = index === undefined
-        ? viewerPartners.filter(partner => partner.linkCount > 0).map(partner => partner.name)
-        : [viewerPartners[index]?.name].filter(Boolean);
-    if (!partners.length) return;
-    viewerExporting = index === undefined ? 'all' : index;
-    renderViewerPartners();
-    try {
-        const filename = await downloadPartnerReport(partners, viewerPartnerSheet || currentSheetName);
-        notify(`Đã xuất báo cáo: ${filename}`, 'success');
-    } catch (error) {
-        notify(`Lỗi xuất báo cáo: ${error.message}`, 'error');
-    } finally {
-        viewerExporting = null;
-        renderViewerPartners();
-    }
+// The viewer's sheet picker lists the tabs the admin page shows: data sheets and this
+// platform's own "Tổng kết" tabs, sheets hidden in Excel last.
+function viewerSheetChoices(sheets, platform, hiddenSheets) {
+    const hidden = hiddenSheetSet(hiddenSheets);
+    const tabs = visibleSheetTabs(sheets, platform);
+    return [...tabs.filter(sheet => !hidden.has(sheet)), ...tabs.filter(sheet => hidden.has(sheet))];
 }
 
 // ---- Event wiring and startup -----------------------------------------------
@@ -3925,14 +3795,12 @@ document.getElementById('minViewToggle').addEventListener('change', (event) => {
     if (document.getElementById('reportModal').classList.contains('active')) {
         loadReportPartners();
     }
-    if (IS_VIEWER) void loadViewerOverview();
 });
 
 document.getElementById('minViewInput').addEventListener('change', () => {
     if (document.getElementById('reportModal').classList.contains('active')) {
         loadReportPartners();
     }
-    if (IS_VIEWER) void loadViewerOverview();
 });
 
 document.getElementById('reportSheetSelect').addEventListener('change', (event) => {
@@ -4046,9 +3914,13 @@ for (const platform of PLATFORM_KEYS) {
     const controls = sourceControls(platform);
     controls.sheet?.addEventListener('change', () => {
         const sheet = controls.sheet.value;
-        Object.assign(platformSources[platform], { pushSheet: sheet, scanSheet: sheet, displaySheet: sheet });
+        // The viewer may open a "Tổng kết" tab; its report dialog then defaults to that tab's data sheet.
+        const scanSheet = IS_VIEWER && isSummarySheetName(sheet)
+            ? (dataSheetNameForSummaryTab(sheet, platformSources[platform].sheets) || platformSources[platform].scanSheet)
+            : sheet;
+        Object.assign(platformSources[platform], { pushSheet: sheet, scanSheet, displaySheet: sheet });
         if (platform === activePlatform) {
-            renderScanSheetOptions(platformSources[platform].sheets, sheet);
+            renderScanSheetOptions(platformSources[platform].sheets, scanSheet);
             void loadPreview(sheet);
         }
         persistSources(); setGooglePushState();

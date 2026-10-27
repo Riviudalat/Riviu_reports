@@ -118,7 +118,7 @@ ADMIN_ONLY_IDS = (
 )
 SHARED_IDS = ("platformBar", "excelFileSelect", "reportModal", "exportReportBtn", "historyModal", "guideButton", "previewTable")
 # The viewer's own report layout (KPIs, partner export, link table) and the admin's scan workspace.
-VIEWER_ONLY_IDS = ("vwKpis", "vwPartnerList", "vwExportAll", "vwTableSearch")
+VIEWER_ONLY_IDS = ("vwExportButton", "vwDataPanel", "vwTableSearch")
 ADMIN_WORKSPACE_IDS = ("sourceDrawerButton", "sourceDrawer", "scanSettingsDrawer")
 
 
@@ -248,13 +248,14 @@ def run_viewer_js(source):
         ui.NODE_HARNESS = original
 
 
-def test_viewer_script_only_reads_allowlisted_apis_and_keeps_its_choice_in_the_browser():
+def test_viewer_script_only_reads_allowlisted_apis_and_always_shows_the_platform_source():
     assert VIEWER_HARNESS.count("role:'viewer'") == 1 and "['sourceLabel','sheet']" in VIEWER_HARNESS
     allowed_get = sorted(security.VIEWER_GET_PATHS)
     allowed_post = sorted(security.VIEWER_POST_PATHS)
     run_viewer_js(f"""(async()=>{{
       assert.equal(IS_VIEWER, true);
-      const calls=[]; const stored={{}};
+      // A file choice an earlier viewer page kept in this tab no longer overrides the platform's source.
+      const calls=[]; const stored={{riviuViewerSourcesV1:JSON.stringify({{tiktok:{{fileId:'B.xlsx',displaySheet:'Data',scanSheet:'Data',pushSheet:'',url:''}}}})}};
       globalThis.sessionStorage={{getItem:k=>stored[k]??null,setItem:(k,v)=>{{stored[k]=v;}}}};
       const files=[{{id:'A.xlsx',label:'A'}},{{id:'B.xlsx',label:'B'}}];
       fetch=async(url,options={{}})=>{{
@@ -270,8 +271,7 @@ def test_viewer_script_only_reads_allowlisted_apis_and_keeps_its_choice_in_the_b
       await window.onload();
       assert.equal(currentFileId,'A.xlsx');
       await selectFile('B.xlsx');
-      assert.equal(currentFileId,'B.xlsx');
-      assert.equal(JSON.parse(stored.{ 'riviuViewerSourcesV1' }).tiktok.fileId,'B.xlsx');
+      assert.equal(currentFileId,'A.xlsx');  // no file choice on the viewer
       await setPlatform('threads'); await setPlatform('tiktok');
       ws=new WebSocket('test'); sent.length=0;
       startScraping(); cancelScraping(); await refreshPartnerLinks(); await syncGoogleSheet('tiktok');
@@ -288,20 +288,21 @@ def test_viewer_script_only_reads_allowlisted_apis_and_keeps_its_choice_in_the_b
     }})()""")
 
 
-def test_viewer_kpis_sum_known_metrics_and_keep_unknown_blank():
+def test_viewer_table_formats_known_metrics_and_keeps_unknown_blank():
     run_viewer_js(r"""
       const rows=[
-        {Link:'https://www.tiktok.com/@a/video/1', 'LƯỢT XEM':'1.200', TIM:'0', 'BÌNH LUẬN':'', 'LƯỢT LƯU':'', 'CHIA SẺ':'', Spare:''},
-        {Link:'https://www.tiktok.com/@b/video/2', 'LƯỢT XEM':'', TIM:'3', 'BÌNH LUẬN':'', 'LƯỢT LƯU':'', 'CHIA SẺ':'', Spare:''},
-        {Link:'Tổng', 'LƯỢT XEM':'1200', TIM:'3', 'BÌNH LUẬN':'', 'LƯỢT LƯU':'', 'CHIA SẺ':'', Spare:''},
+        {STT:'1', 'LƯỢT XEM':'1.200', TIM:'0', Link:'https://www.tiktok.com/@a/video/1', 'TÊN KÊNH':'A', Spare:''},
+        {STT:'2', 'LƯỢT XEM':'', TIM:'3', Link:'https://www.tiktok.com/@b/video/2', 'TÊN KÊNH':'B', Spare:''},
+        {STT:'', 'LƯỢT XEM':'1200', TIM:'3', Link:'Tổng', 'TÊN KÊNH':'', Spare:''},
       ];
-      renderPreviewTable({rows, columns:['Link','LƯỢT XEM','TIM','BÌNH LUẬN','LƯỢT LƯU','CHIA SẺ','Spare'], linkColumn:'Link'});
-      assert.equal(el('vwKpiLinks').textContent,'2');            // the sheet's "Tổng" row is not a link
-      assert.equal(el('vwKpiViews').textContent,(1200).toLocaleString('vi-VN'));
-      assert.equal(el('vwKpiLikes').textContent,'3');            // a confirmed 0 counts
-      assert.equal(el('vwKpiComments').textContent,'—');         // nothing known: blank, never 0
-      assert.equal(el('vwKpiLinksNote').textContent,'1 link chưa có số liệu');
-      assert.ok(!el('previewHeader').innerHTML.includes('Spare'));  // a column blank on every row is left out
-      assert.match(el('previewBody').innerHTML,/<td class="vw-num"><\/td>/);  // unknown views stay blank in the table
-      assert.match(el('previewBody').innerHTML,/>@a<span class="vw-link-detail"> · video 1<\/span><\/a>/);
+      renderPreviewTable({rows, columns:['STT','LƯỢT XEM','TIM','Link','TÊN KÊNH','Spare'], linkColumn:'Link'});
+      const header=el('previewHeader').innerHTML, body=el('previewBody').innerHTML;
+      assert.equal(el('vwRowCount').textContent,'2');            // the sheet's "Tổng" row is not a link
+      assert.ok(!header.includes('Spare'));                      // a column blank on every row is left out
+      // Index column first, then link, channel and metrics, in sentence case.
+      assert.deepEqual([...header.matchAll(/>([^<>]+)<\/th>/g)].map(m=>m[1]), ['Stt','Link','Tên kênh','Lượt xem','Tim']);
+      assert.ok(body.includes(`<td class="vw-num">${(1200).toLocaleString('vi-VN')}</td>`));
+      assert.ok(body.includes('<td class="vw-num">0</td>'));     // a confirmed 0 is shown
+      assert.match(body,/<td class="vw-num"><\/td>/);           // unknown views stay blank, never 0
+      assert.match(body,/>@a<span class="vw-link-detail"> · video 1<\/span><\/a>/);
     """)

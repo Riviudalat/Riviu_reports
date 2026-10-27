@@ -1305,17 +1305,17 @@ body.viewer-page {
 .viewer-page .server-banner { margin: 12px auto 0; }
 .vw-app { width: min(1440px, 100%); margin: 0 auto; padding: 0 24px 32px; }
 
-/* Header: one white band across the screen. */
+/* Header: one white band across the screen; the brand block is the admin page's (logo over "Reports"). */
 .vw-header {
-    display: flex; align-items: center; gap: 20px; min-height: 64px;
+    display: flex; align-items: center; gap: 24px; min-height: 76px;
     background: var(--vw-surface);
     box-shadow: 0 0 0 100vmax var(--vw-surface);
     clip-path: inset(0 -100vmax 0 -100vmax);
     border-bottom: 1px solid var(--vw-line);
 }
-.vw-brand { display: flex; align-items: center; gap: 14px; min-width: 0; }
-.vw-logo { display: block; height: 34px; width: auto; }
-.vw-title { margin: 0; padding-left: 14px; border-left: 1px solid var(--vw-line-strong); font-size: 17px; font-weight: 600; line-height: 1.2; letter-spacing: -0.01em; color: var(--vw-ink); white-space: nowrap; }
+.vw-brand { display: flex; align-items: center; min-width: 0; padding-left: 12px; border-left: 4px solid var(--vw-accent); }
+.vw-brand-title { display: flex; flex-direction: column; align-items: flex-start; gap: 1px; margin: 0; font-size: 18px; font-weight: 800; line-height: 1.1; color: #1f2937; white-space: nowrap; }
+.vw-logo { display: block; height: 30px; width: auto; }
 .vw-platforms.platform-bar { min-height: 0; padding: 3px; gap: 2px; border: 0; border-radius: 9px; background: #eef0f3; }
 .vw-platforms .platform-option { min-width: 104px; height: 32px; border-radius: 7px; color: var(--vw-ink-2); font-size: 13.5px; font-weight: 600; transition: background-color .15s, color .15s; }
 .vw-platforms .platform-option:hover:not(.active):not(:disabled) { background: rgba(255, 255, 255, 0.6); color: var(--vw-ink); }
@@ -1331,7 +1331,7 @@ body.viewer-page {
 .vw-admin-link { margin-left: 4px; border: 1px solid var(--vw-line-strong); color: var(--vw-ink); }
 .viewer-page :is(button, a, select, input):focus-visible { outline: none; box-shadow: var(--vw-focus); }
 
-/* Which report: the file as the page's subject, its sheet and scan time, and the pickers. */
+/* Which report: the platform's file as plain text, its sheet and scan time; the sheet picker and export. */
 .vw-context { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; padding: 24px 0 18px; }
 .vw-context-copy { min-width: 0; }
 .vw-report-title { margin: 0; font-size: 24px; font-weight: 600; line-height: 1.25; letter-spacing: -0.015em; color: var(--vw-ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1342,6 +1342,7 @@ body.viewer-page {
 .vw-live-state::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--vw-accent); }
 .vw-live-state[hidden] { display: none; }
 .vw-pickers { display: flex; align-items: flex-end; gap: 12px; flex: 0 0 auto; }
+.vw-pickers[hidden] { display: none; }
 .vw-field, .vw-sheet-row { display: flex; flex-direction: column; gap: 5px; min-width: 0; }
 .vw-sheet-row[hidden] { display: none; }
 .vw-sheet-row.platform-source-row { padding: 0; border: 0; }
@@ -1356,26 +1357,8 @@ body.viewer-page {
 }
 .vw-select:hover:not(:disabled) { border-color: #b9bfc9; }
 .vw-select:disabled { opacity: .6; cursor: not-allowed; }
-.vw-field-file .vw-select { width: 320px; }
-.vw-sheet-row .vw-select { width: 168px; }
+.vw-sheet-row .vw-select { width: 220px; }
 
-/* KPI strip: one container split by rules, values as type. */
-.vw-kpis { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); background: var(--vw-surface); border: 1px solid var(--vw-line); border-radius: 12px; }
-.vw-kpi { padding: 16px 20px 18px; min-width: 0; border-left: 1px solid var(--vw-line); }
-.vw-kpi:first-child { border-left: 0; }
-.vw-kpi-label { font-size: 13px; font-weight: 500; color: var(--vw-ink-2); }
-.vw-kpi-value { margin-top: 6px; font-size: 24px; font-weight: 600; line-height: 1.15; letter-spacing: -0.01em; color: var(--vw-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.vw-kpi-lead .vw-kpi-value { font-size: 30px; }
-.vw-kpi-lead .vw-kpi-label { color: var(--vw-ink); }
-.vw-kpi-note { margin-top: 4px; font-size: 12.5px; color: var(--vw-ink-3); }
-.vw-kpi-note:empty { display: none; }
-
-/* Partners beside the link table. */
-.vw-main { display: grid; grid-template-columns: minmax(300px, 360px) minmax(0, 1fr); gap: 16px; margin-top: 16px; align-items: start; }
-.vw-panel { display: flex; flex-direction: column; min-width: 0; background: var(--vw-surface); border: 1px solid var(--vw-line); border-radius: 12px; overflow: hidden; }
-.vw-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; }
-.vw-panel-title { margin: 0; font-size: 16px; font-weight: 600; color: var(--vw-ink); white-space: nowrap; }
-.vw-count { margin-left: 4px; font-weight: 500; color: var(--vw-ink-3); }
 .vw-btn {
     display: inline-flex; align-items: center; justify-content: center; gap: 6px; height: 36px; padding: 0 14px;
     border: 1px solid var(--vw-line-strong); border-radius: 8px; background: var(--vw-surface);
@@ -1387,34 +1370,25 @@ body.viewer-page {
 .vw-btn:disabled { opacity: .5; cursor: not-allowed; }
 .vw-btn-primary { border-color: var(--vw-accent); background: var(--vw-accent); color: #fff; font-weight: 600; }
 .vw-btn-primary:hover:not(:disabled) { border-color: var(--vw-accent-hover); background: var(--vw-accent-hover); }
-.vw-btn-small { height: 30px; padding: 0 10px; font-size: 13px; }
-.vw-btn-small .material-icons-outlined { font-size: 16px; }
-.vw-partner .vw-btn-small:hover:not(:disabled) { border-color: var(--vw-accent); background: #fff7f1; color: var(--vw-accent-ink); }
+.vw-export { height: 38px; padding: 0 18px; }
 .vw-search { position: relative; display: flex; align-items: center; }
 .vw-search .material-icons-outlined { position: absolute; left: 10px; font-size: 18px; color: var(--vw-ink-3); pointer-events: none; }
 .vw-input { width: 100%; height: 36px; padding: 0 12px 0 34px; border: 1px solid var(--vw-line-strong); border-radius: 8px; background: var(--vw-surface); color: var(--vw-ink); font: 400 14px 'Inter', sans-serif; }
 .vw-input::placeholder { color: var(--vw-ink-3); }
 .vw-input:hover { border-color: #b9bfc9; }
-.vw-partners .vw-search { margin: 0 16px 8px; }
-.vw-partner-list { list-style: none; margin: 0; padding: 0; max-height: max(360px, calc(100vh - 330px)); overflow: auto; border-top: 1px solid var(--vw-line); }
-.vw-partner { display: flex; align-items: center; gap: 12px; padding: 10px 16px; border-bottom: 1px solid var(--vw-row-line); }
-.vw-partner:last-child { border-bottom: 0; }
-.vw-partner:hover { background: #fafbfc; }
-.vw-partner-copy { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1 1 auto; }
-.vw-partner-name { font-size: 14px; font-weight: 500; color: var(--vw-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.vw-partner-meta { font-size: 12.5px; color: var(--vw-ink-2); }
-.vw-partner-meta.vw-muted { color: var(--vw-ink-3); }
-.vw-empty { padding: 28px 16px; color: var(--vw-ink-3); font-size: 13.5px; text-align: center; }
-.vw-panel-foot { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 12px 16px 14px; border-top: 1px solid var(--vw-line); background: #fafbfc; font-size: 12.5px; color: var(--vw-ink-2); }
-.vw-text-btn { padding: 0; border: 0; background: none; color: var(--vw-accent-ink); font: 500 13px 'Inter', sans-serif; cursor: pointer; }
-.vw-text-btn:hover { text-decoration: underline; }
 
-/* The link table: sticky header, sentence-case headers, right-aligned figures. */
+/* The sheet as a table, full width: the link list, or the partner summary for a "Tổng kết" tab. */
+.vw-panel { display: flex; flex-direction: column; min-width: 0; background: var(--vw-surface); border: 1px solid var(--vw-line); border-radius: 12px; overflow: hidden; }
+.vw-panel-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 16px; }
+.vw-panel-title { margin: 0; font-size: 16px; font-weight: 600; color: var(--vw-ink); white-space: nowrap; }
+.vw-count { margin-left: 4px; font-weight: 500; color: var(--vw-ink-3); }
 .vw-data-tools { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.vw-data-tools .vw-search { width: 280px; }
+.vw-data-tools .vw-search { width: 300px; }
+.vw-data[data-view="summary"] .vw-table-search { display: none; }
+.vw-data[data-view="empty"] .vw-data-tools { display: none; }
 .vw-table-wrap.table-wrap { max-height: max(420px, calc(100vh - 250px)); overflow: auto; border-top: 1px solid var(--vw-line); }
 .vw-table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13.5px; }
-.vw-table th {
+.vw-data :is(.vw-table, .summary-table) th {
     position: sticky; top: 0; z-index: 2;
     padding: 10px 12px; background: var(--vw-surface);
     border-bottom: 1px solid var(--vw-line-strong);
@@ -1422,36 +1396,38 @@ body.viewer-page {
     text-transform: none; letter-spacing: 0; white-space: nowrap;
     max-width: 220px; overflow: hidden; text-overflow: ellipsis;
 }
-.vw-table td { padding: 9px 12px; border-bottom: 1px solid var(--vw-row-line); font-size: 13.5px; color: var(--vw-ink); max-width: 240px; }
+.vw-data :is(.vw-table, .summary-table) td { padding: 9px 12px; border-bottom: 1px solid var(--vw-row-line); font-size: 13.5px; color: var(--vw-ink); max-width: 240px; }
+.vw-data :is(.vw-table, .summary-table) tbody tr,
+.vw-data :is(.vw-table, .summary-table) tbody tr:nth-child(even) { background: none; }
+.vw-data :is(.vw-table, .summary-table) tbody tr:hover td { background: #fafbfc; }
 .vw-table td.vw-link-cell { max-width: 300px; }
-.vw-table tbody tr, .vw-table tbody tr:nth-child(even) { background: none; }
-.vw-table tbody tr:hover td { background: #fafbfc; }
 .vw-table .vw-num { text-align: right; font-variant-numeric: tabular-nums; }
 .vw-table td.vw-num { font-weight: 500; }
-.vw-table th:first-child, .vw-table td:first-child { padding-left: 16px; }
-.vw-table th:last-child, .vw-table td:last-child { padding-right: 16px; }
+.vw-data :is(.vw-table, .summary-table) :is(th, td):first-child { padding-left: 16px; }
+.vw-data :is(.vw-table, .summary-table) :is(th, td):last-child { padding-right: 16px; }
 .vw-link-cell a { color: var(--vw-accent-ink); text-decoration: none; }
 .vw-link-cell a:hover { text-decoration: underline; }
 .vw-table td.vw-table-empty { padding: 48px 16px; text-align: center; color: var(--vw-ink-3); max-width: none; white-space: normal; }
+.vw-summary.summary-dashboard { padding: 0; border-top: 1px solid var(--vw-line); }
+.vw-summary .summary-head { display: none; }
+.vw-summary .summary-table-wrap { max-height: max(420px, calc(100vh - 250px)); border: 0; border-radius: 0; }
+.vw-summary .summary-table th { text-align: right; }
+.vw-summary .summary-table th:nth-child(2), .vw-summary .summary-table th:last-child { text-align: left; }
+.vw-summary .summary-table .partner-cell { min-width: 220px; font-weight: 500; color: var(--vw-ink); }
+.vw-summary .summary-table .total-link-cell { font-weight: 600; color: var(--vw-ink); background: none; }
+.vw-summary .summary-empty { margin: 16px; border: 0; background: #fafbfc; font-weight: 500; color: var(--vw-ink-3); }
 .vw-scan-state { display: none !important; }
 
-@media (max-width: 1180px) {
-    .vw-kpis { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .vw-kpi:nth-child(4) { border-left: 0; }
-    .vw-kpi:nth-child(n + 4) { border-top: 1px solid var(--vw-line); }
-    .vw-context { flex-direction: column; align-items: stretch; }
-    .vw-pickers { flex-wrap: wrap; }
-}
 @media (max-width: 980px) {
-    .vw-main { grid-template-columns: minmax(0, 1fr); }
-    .vw-partner-list { max-height: 420px; }
+    .vw-context { flex-direction: column; align-items: stretch; }
+    .vw-pickers { justify-content: space-between; }
 }
 @media (max-width: 760px) {
     .vw-app { padding: 0 16px 24px; }
     .vw-header { flex-wrap: wrap; gap: 0 12px; padding: 10px 0 12px; }
-    .vw-brand { flex: 1 1 auto; }
-    .vw-logo { height: 28px; }
-    .vw-title { padding-left: 12px; font-size: 15px; }
+    .vw-brand { flex: 1 1 auto; padding-left: 10px; }
+    .vw-brand-title { font-size: 15px; }
+    .vw-logo { height: 24px; }
     .vw-header-links { order: 2; margin-left: 0; }
     .vw-header-links .vw-link:not(.vw-admin-link) { display: none; }
     .vw-platforms.platform-bar { order: 3; flex: 1 0 100%; margin-top: 10px; }
@@ -1459,19 +1435,12 @@ body.viewer-page {
     .vw-context { padding: 18px 0 14px; gap: 14px; }
     .vw-report-title { font-size: 19px; white-space: normal; overflow-wrap: anywhere; }
     .vw-report-meta { font-size: 13px; }
-    .vw-pickers { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 0.7fr); gap: 10px; }
-    .vw-field-file .vw-select, .vw-sheet-row .vw-select { width: 100%; }
-    .vw-kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-    .vw-kpi { padding: 12px 14px 14px; border-top: 1px solid var(--vw-line); }
-    .vw-kpi:nth-child(-n + 2) { border-top: 0; }
-    .vw-kpi:nth-child(odd) { border-left: 0; }
-    .vw-kpi:nth-child(4) { border-left: 1px solid var(--vw-line); }
-    .vw-kpi-value { font-size: 20px; }
-    .vw-kpi-lead .vw-kpi-value { font-size: 24px; }
+    .vw-pickers { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; }
+    .vw-sheet-row .vw-select { width: 100%; }
     .vw-panel-head { flex-wrap: wrap; }
     .vw-data-tools { flex: 1 1 100%; }
     .vw-data-tools .vw-search { flex: 1 1 auto; width: auto; }
-    .vw-table-wrap.table-wrap { max-height: 70vh; }
+    .vw-table-wrap.table-wrap, .vw-summary .summary-table-wrap { max-height: 70vh; }
     .vw-link-detail { display: none; }
     .vw-table td.vw-link-cell { max-width: 170px; }
 }

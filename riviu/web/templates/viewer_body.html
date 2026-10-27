@@ -1,10 +1,10 @@
-{#- The read-only viewer (server mode `/`): a report page, not the scan workspace. app.js fills it
-    (renderViewer* functions); the same file/sheet state, previews and export flow as the admin page. -#}
+{#- The read-only viewer (server mode `/`): the platform's current report file as a table.
+    app.js fills it (renderViewer* functions) from the same source state and previews as the admin
+    page; "Xuất báo cáo" opens the shared report dialog (#reportModal). -#}
 <div class="vw-app">
     <header class="vw-header">
         <div class="vw-brand">
-            <img class="vw-logo" src="/logo.png" alt="Riviu" width="92" height="40">
-            <h1 class="vw-title">Báo cáo chiến dịch</h1>
+            <h1 class="vw-brand-title"><img class="vw-logo" src="/logo.png" alt="Riviu"><span>Reports</span></h1>
         </div>
         <!-- Platform buttons are rendered from PLATFORMS in static/app.js -->
         <div class="platform-bar vw-platforms" id="platformBar" role="group" aria-label="Nền tảng báo cáo"></div>
@@ -17,83 +17,55 @@
         </nav>
     </header>
 
+    {#- One report file per platform: the one its source preferences name (set by the admin or the
+        scheduled sync). Staff only choose the sheet inside it. -#}
     <section class="vw-context" aria-labelledby="vwReportTitle">
         <div class="vw-context-copy">
-            <h2 class="vw-report-title" id="vwReportTitle">Chưa chọn file báo cáo</h2>
+            <h2 class="vw-report-title" id="vwReportTitle">Đang tải…</h2>
             <p class="vw-report-meta">
-                <span id="vwReportSheet">Chọn file và sheet để xem số liệu.</span>
+                <span id="vwReportSheet"></span>
                 <span id="vwReportUpdated"></span>
                 <span class="vw-live-state" id="vwScanState" role="status" hidden>Đang cập nhật số liệu…</span>
             </p>
         </div>
-        <div class="vw-pickers">
-            <div class="vw-field vw-field-file">
-                <label class="vw-field-label" for="excelFileSelect">File báo cáo</label>
-                <select id="excelFileSelect" class="vw-select" onchange="selectFile(this.value)"></select>
-            </div>
+        <div class="vw-pickers" id="vwPickers">
             <!-- One sheet select per PLATFORMS entry, rendered by renderPlatformSourceRows(); only the active platform's shows -->
             <div class="vw-field vw-field-sheet" id="platformSourceRows"></div>
+            <button class="vw-btn vw-btn-primary vw-export" id="vwExportButton" type="button" onclick="openReportModal()" disabled>
+                <span class="material-icons-outlined" aria-hidden="true">download</span><span>Xuất báo cáo</span>
+            </button>
         </div>
     </section>
 
-    <section class="vw-kpis" id="vwKpis" aria-label="Tổng quan sheet">
-        <div class="vw-kpi"><div class="vw-kpi-label">Số link</div><div class="vw-kpi-value" id="vwKpiLinks">—</div><div class="vw-kpi-note" id="vwKpiLinksNote"></div></div>
-        <div class="vw-kpi vw-kpi-lead"><div class="vw-kpi-label">Tổng lượt xem</div><div class="vw-kpi-value" id="vwKpiViews">—</div><div class="vw-kpi-note" id="vwKpiViewsNote"></div></div>
-        <div class="vw-kpi"><div class="vw-kpi-label">Tim</div><div class="vw-kpi-value" id="vwKpiLikes">—</div></div>
-        <div class="vw-kpi"><div class="vw-kpi-label">Bình luận</div><div class="vw-kpi-value" id="vwKpiComments">—</div></div>
-        <div class="vw-kpi"><div class="vw-kpi-label" id="vwKpiSavedLabel">Lượt lưu</div><div class="vw-kpi-value" id="vwKpiSaved">—</div></div>
-        <div class="vw-kpi"><div class="vw-kpi-label">Chia sẻ</div><div class="vw-kpi-value" id="vwKpiShares">—</div></div>
-    </section>
-
-    <div class="vw-main">
-        <section class="vw-panel vw-partners" aria-labelledby="vwPartnersTitle">
-            <div class="vw-panel-head">
-                <h2 class="vw-panel-title" id="vwPartnersTitle">Đối tác <span class="vw-count" id="vwPartnerCount"></span></h2>
-                <button class="vw-btn vw-btn-primary" id="vwExportAll" type="button" onclick="exportViewerPartners()" disabled>
-                    <span class="material-icons-outlined" aria-hidden="true">download</span><span id="vwExportAllLabel">Xuất tất cả</span>
+    <section class="vw-panel vw-data" id="vwDataPanel" data-view="links" aria-labelledby="vwDataTitle">
+        <div class="vw-panel-head">
+            <h2 class="vw-panel-title" id="vwDataTitle">Danh sách link <span class="vw-count" id="vwRowCount"></span></h2>
+            <div class="vw-data-tools">
+                <div class="vw-search vw-table-search">
+                    <span class="material-icons-outlined" aria-hidden="true">search</span>
+                    <input class="vw-input" id="vwTableSearch" type="search" placeholder="Tìm kênh, link, đối tác…" aria-label="Lọc danh sách link" oninput="renderViewerTableRows()">
+                </div>
+                <button class="vw-btn" type="button" onclick="loadPreview()" title="Tải lại số liệu mới nhất">
+                    <span class="material-icons-outlined" aria-hidden="true">refresh</span><span>Làm mới</span>
                 </button>
             </div>
-            <div class="vw-search">
-                <span class="material-icons-outlined" aria-hidden="true">search</span>
-                <input class="vw-input" id="vwPartnerSearch" type="search" placeholder="Tìm đối tác" aria-label="Tìm đối tác" oninput="renderViewerPartners()">
-            </div>
-            <ul class="vw-partner-list" id="vwPartnerList" aria-live="polite">
-                <li class="vw-empty">Đang tải danh sách đối tác…</li>
-            </ul>
-            <div class="vw-panel-foot">
-                <span id="vwPartnerRule">Báo cáo bỏ qua link chưa có số liệu hoặc dưới 100 lượt xem.</span>
-                <button class="vw-text-btn" type="button" onclick="openReportModal()">Chọn nhiều đối tác…</button>
-            </div>
-        </section>
+        </div>
+        <div class="summary-dashboard vw-summary" id="summaryDashboard"></div>
+        <div class="table-wrap vw-table-wrap">
+            <table id="previewTable" class="vw-table">
+                <thead id="previewHeader"></thead>
+                <tbody id="previewBody"><tr><td colspan="10" class="vw-table-empty">Đang tải dữ liệu…</td></tr></tbody>
+            </table>
+        </div>
+    </section>
 
-        <section class="vw-panel vw-data" aria-labelledby="vwDataTitle">
-            <div class="vw-panel-head">
-                <h2 class="vw-panel-title" id="vwDataTitle">Danh sách link <span class="vw-count" id="vwRowCount"></span></h2>
-                <div class="vw-data-tools">
-                    <div class="vw-search">
-                        <span class="material-icons-outlined" aria-hidden="true">search</span>
-                        <input class="vw-input" id="vwTableSearch" type="search" placeholder="Tìm kênh, link, đối tác…" aria-label="Lọc danh sách link" oninput="renderViewerTableRows()">
-                    </div>
-                    <button class="vw-btn" type="button" onclick="loadPreview()" title="Tải lại số liệu mới nhất">
-                        <span class="material-icons-outlined" aria-hidden="true">refresh</span><span>Làm mới</span>
-                    </button>
-                </div>
-            </div>
-            <div class="table-wrap vw-table-wrap">
-                <table id="previewTable" class="vw-table">
-                    <thead id="previewHeader"></thead>
-                    <tbody id="previewBody"><tr><td colspan="10" class="vw-table-empty">Đang tải dữ liệu…</td></tr></tbody>
-                </table>
-            </div>
-        </section>
-    </div>
-
-    {#- Scan state the shared script keeps in step with the server (progress, live results, logs);
-        the viewer does not show it. -#}
+    {#- State the shared script keeps in step with the server (file list, progress, live results,
+        logs); the viewer does not show it. -#}
     <div class="vw-scan-state" hidden>
+        <select id="excelFileSelect"></select>
         <select id="scanSheetSelect"></select>
         <span id="compactSourceFile"></span><span id="compactSourceSheet"></span>
-        <div id="sheetTabs"></div><div id="summaryDashboard"></div>
+        <div id="sheetTabs"></div>
         <span id="totalLinks">0</span><span id="processedLinks">0</span><span id="successLinks">0</span>
         <span id="hiddenCountBadge">0</span><span id="failedCountBadge">0</span><span id="duplicateCountBadge">0</span><span id="logCountBadge">0</span>
         <div id="progressBar"></div><span id="progressText"></span><span id="progressStatus"></span>
