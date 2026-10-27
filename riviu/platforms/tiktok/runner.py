@@ -49,6 +49,16 @@ WORKER_JOIN_TIMEOUT_SECONDS = 20.0
 STATUS_BROADCAST_INTERVAL_SECONDS = 0.25
 DIRECT_MAX_WORKERS = 10
 MAX_WORKERS_PER_PROXY = 10
+# An autosave rewrites the whole workbook: about 10-25 s for a synced report with
+# several month sheets (220,000 cells), during which no result is recorded. After
+# a save that took S seconds the next autosave waits at least
+# AUTOSAVE_PAUSE_PER_SAVE_SECOND * S seconds, so saving takes at most about a fifth
+# of the run. A small workbook (S well under a second) still saves every
+# save_every results; the final and the stop/cancel saves are never deferred.
+AUTOSAVE_PAUSE_PER_SAVE_SECOND = 4
+# Clock of the autosave pause; tests replace it (patching time.monotonic would
+# also move asyncio's own clock).
+_autosave_clock = time.monotonic
 
 
 def selected_partner_label(partners):
@@ -164,6 +174,7 @@ class _TikTokScan:
         self.hidden_count = 0
         self.pending_save_count = 0
         self.save_skip_until_processed = 0
+        self.next_autosave_at = None
         self.last_status_broadcast = 0.0
         self.completed_sequences = set()
 
@@ -275,7 +286,12 @@ class _TikTokScan:
         if self.processed >= self.total:
             # The final save follows at once; a second full write here only doubles the wait.
             return
+        if self.next_autosave_at is not None and _autosave_clock() < self.next_autosave_at:
+            return
+        save_started = _autosave_clock()
         saved, _reason = await workbook_io.save_workbook(self.workbook, self.file_path, self.manager)
+        save_finished = _autosave_clock()
+        self.next_autosave_at = save_finished + AUTOSAVE_PAUSE_PER_SAVE_SECOND * (save_finished - save_started)
         if saved:
             self.pending_save_count = 0
             if self.manager:
