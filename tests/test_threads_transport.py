@@ -319,6 +319,65 @@ def test_proxy_assignment_is_run_local_round_robin(tmp_path, monkeypatch):
     assert [routes[URL + str(i)] for i in range(4)] == configs * 2
 
 
+def rate_limit_workbook(tmp_path, count):
+    """Rows that already hold an earlier scan's numbers and status."""
+    path = tmp_path / "threads.xlsx"
+    book = openpyxl.Workbook()
+    book.active.title = "Data"
+    book.active.append(["Link", "TIM", threads.THREADS_SCAN_STATUS_HEADER])
+    for index in range(count):
+        book.active.append([URL + str(index), 7, "Success"])
+    book.save(path)
+    book.close()
+    return path
+
+
+def saved_rows(path, count):
+    saved = openpyxl.load_workbook(path)
+    try:
+        return [(saved.active.cell(row, 2).value, saved.active.cell(row, 3).value) for row in range(2, count + 2)]
+    finally:
+        saved.close()
+
+
+def test_rate_limit_stops_new_requests_and_keeps_unscanned_rows(tmp_path, monkeypatch):
+    # Server IP scans: after Threads answers 429 every further request is 429 too, and
+    # the old flow kept firing them and stamped every remaining row "Error: HTTP 429".
+    path = rate_limit_workbook(tmp_path, 4)
+    calls = []
+    answers = {URL + "0": metrics(views=150, likes=9, comments=0, reposts=0), URL + "1": threads.failure("HTTP 429", "rate_limit")}
+    monkeypatch.setattr(threads, "async_playwright", NoBrowser)
+    monkeypatch.setattr(threads, "fetch_threads_http", lambda url: calls.append(url) or answers.get(url, metrics(views=1, likes=1, comments=0, reposts=0)))
+    events = Events()
+    history_dir = tmp_path / "state"
+    asyncio.run(threads.run_threads_scraper(path, events, mode="hybrid", worker_count=1, base_dir=str(history_dir)))
+
+    assert calls == [URL + "0", URL + "1"]
+    assert saved_rows(path, 4) == [(9, "Success"), (7, "Error: HTTP 429"), (7, "Success"), (7, "Success")]
+    assert [entry["url"] for entry in events.data] == [URL + "0", URL + "1"]
+    assert any("HTTP 429" in line and "bỏ qua 2/4 link" in line for line in events.logs)
+    history = json.loads((history_dir / "data" / "threads_scan_history.json").read_text(encoding="utf-8"))["history"]
+    assert history[0]["rateLimitSkippedUrls"] == 2
+
+
+def test_rate_limit_on_one_proxy_never_moves_its_urls_to_another(tmp_path, monkeypatch):
+    path = rate_limit_workbook(tmp_path, 4)
+    configs = [proxy_utils.normalize_proxy_config({"host": host, "port": 8080}) for host in ("a.example", "b.example")]
+    calls = []
+    monkeypatch.setattr(threads, "resolve_threads_proxies", lambda *_args: configs)
+    monkeypatch.setattr(threads, "async_playwright", NoBrowser)
+
+    def request(url, proxy_config):
+        calls.append((url, proxy_config["host"]))
+        return threads.failure("HTTP 429", "rate_limit") if proxy_config is configs[0] else metrics(views=150, likes=9, comments=0, reposts=0)
+
+    monkeypatch.setattr(threads, "fetch_threads_http", request)
+    asyncio.run(threads.run_threads_scraper(path, mode="request", worker_count=1, use_proxy=True))
+    # URL 2 belongs to the blocked proxy a: it is skipped, not retried through b.
+    assert calls == [(URL + "0", "a.example"), (URL + "1", "b.example"), (URL + "3", "b.example")]
+    assert saved_rows(path, 4) == [(7, "Error: HTTP 429"), (9, "Success"), (7, "Success"), (9, "Success")]
+
+
 def test_retry_rate_limit_never_starts_browser(tmp_path, monkeypatch):
     path = workbook(tmp_path)
     values = iter([metrics(views=15), threads.failure("HTTP 429", "rate_limit")])
