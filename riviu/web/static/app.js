@@ -3002,14 +3002,14 @@ function normalizeReportPartners(raw) {
     }).filter(item => item.name);
 }
 
-function partnerShowsNoLinkStatus(item) {
-    if (item.linkCount !== null && item.linkCount !== undefined) {
-        return item.linkCount <= 0;
-    }
-    if (item.rawLinkCount !== null && item.rawLinkCount !== undefined) {
-        return item.rawLinkCount <= 0;
-    }
-    return false;
+// Partners always come with links from their partner columns; linkCount counts only the
+// rows that a report would export (metrics read and above the min-views filter).
+function partnerLinkStatusText(item) {
+    const rawLinkCount = Number(item.rawLinkCount) || 0;
+    const linkCount = Number(item.linkCount) || 0;
+    if (rawLinkCount <= 0) return linkCount > 0 ? '' : 'Chưa có link';
+    if (linkCount > 0) return '';
+    return `${rawLinkCount} link · chưa có số liệu hoặc dưới ngưỡng view`;
 }
 
 function partnerNamesFromSelection() {
@@ -3226,7 +3226,7 @@ function renderPartnerList() {
         <label class="partner-item">
             <input class="partner-checkbox" type="checkbox" data-index="${item.index}" ${selectedPartners.has(item.name) ? 'checked' : ''}>
             <span class="partner-name">${escapeHtml(item.name)}</span>
-            ${partnerShowsNoLinkStatus(item) ? '<span class="partner-link-status">Chưa có link</span>' : ''}
+            ${partnerLinkStatusText(item) ? `<span class="partner-link-status">${escapeHtml(partnerLinkStatusText(item))}</span>` : ''}
         </label>
     `).join('');
     renderSelectedPartnerList();

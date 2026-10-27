@@ -153,6 +153,15 @@ def test_partner_refresh_uses_the_modal_sheet():
     """)
 
 
+def test_partner_with_links_but_no_exportable_rows_is_not_labelled_without_links():
+    # A freshly synced sheet has every partner's links but no metrics yet (linkCount 0).
+    run_js("""
+      assert.equal(partnerLinkStatusText({name:'A', linkCount:0, rawLinkCount:7}), '7 link · chưa có số liệu hoặc dưới ngưỡng view');
+      assert.equal(partnerLinkStatusText({name:'B', linkCount:0, rawLinkCount:0}), 'Chưa có link');
+      assert.equal(partnerLinkStatusText({name:'C', linkCount:5, rawLinkCount:7}), '');
+    """)
+
+
 def test_generated_result_tabs_are_not_scan_sources():
     run_js("""
       assert.equal(JSON.stringify(filterDataSheets(['T9','Data','25-09-2026-14-30',
