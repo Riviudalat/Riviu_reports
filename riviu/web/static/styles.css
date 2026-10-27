@@ -1241,6 +1241,31 @@ body[data-workspace-tab="success"] #dataFeed tr[data-result-status]:not([data-re
 .google-sa-error { margin: 0; font-size: 12px; color: #b91c1c; overflow-wrap: anywhere; }
 .google-sa-error[hidden] { display: none; }
 
-/* Server mode: the public viewer's admin link. */
+/* Server mode: the public viewer's admin link and the admin's "Lịch tự động" dialog. */
 a.compact-top-action { text-decoration: none; }
 body[data-role="viewer"] .scan-toolbar { display: none !important; }
+.schedule-modal { width: min(860px, 100%); }
+.schedule-platforms { display: grid; gap: 12px; }
+.schedule-platform { display: grid; gap: 10px; padding: 12px; border: 1px solid #e5e7eb; border-radius: 10px; background: #fff; }
+.schedule-platform-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; font-weight: 700; }
+.schedule-meta { font-size: 12px; font-weight: 500; color: #4b5563; }
+.schedule-slots { display: flex; flex-wrap: wrap; gap: 8px; }
+.schedule-slot { display: inline-flex; align-items: center; gap: 6px; padding: 4px 6px 4px 8px; border: 1px solid #e5e7eb; border-radius: 8px; background: #f9fafb; }
+.schedule-slot .schedule-slot-time { width: 110px; padding: 6px 8px; }
+.schedule-empty { font-size: 13px; color: #9ca3af; }
+.schedule-check { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: #1f2937; cursor: pointer; }
+.schedule-options { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; }
+.schedule-options .scan-setting select { width: auto; }
+.schedule-platform > .btn { justify-self: start; }
+.schedule-runs-head { margin: 14px 0 6px; font-size: 13px; font-weight: 700; color: #334155; }
+.schedule-runs-wrap { max-height: 240px; overflow: auto; }
+.schedule-runs { width: 100%; font-size: 13px; }
+.schedule-run-slot { font-size: 11px; color: #6b7280; }
+.schedule-run-counts { color: #6b7280; }
+.schedule-runs tr[data-run-status="failed"] .schedule-run-status { color: #b91c1c; font-weight: 700; }
+.schedule-runs tr[data-run-status="completed"] .schedule-run-status { color: #15803d; font-weight: 700; }
+.schedule-runs tr[data-run-status="skipped"] .schedule-run-status,
+.schedule-runs tr[data-run-status="stopped"] .schedule-run-status { color: #b45309; font-weight: 700; }
+@media (max-width: 640px) {
+    .schedule-platform-head { align-items: flex-start; flex-direction: column; }
+}

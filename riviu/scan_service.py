@@ -185,6 +185,16 @@ async def run_scraper_safely(target_path, options, run_context=None):
         await manager.broadcast_status({**manager.last_status, "error": max(1, manager.last_status.get("error", 0)), "done": True, "phase": "failed", "message": message})
 
 
+def start_scan_task(target_path, options):
+    """Begin the run context and start the one scan task (the `/ws` start action and the scheduler)."""
+    manager = scan_state.manager
+    run_context = manager.begin_run(options["platform"], options["file_id"], options["sheet_name"])
+    task = asyncio.create_task(run_scraper_safely(target_path, options, run_context=run_context))
+    scan_state.SCRAPE_TASK = task
+    task.add_done_callback(lambda task, run_id=run_context["runId"]: finalize_unstarted_run(task, run_id))
+    return task, run_context
+
+
 def finalize_unstarted_run(task, run_id):
     # Cancellation may arrive before the coroutine executes even its first line.
     manager = scan_state.manager

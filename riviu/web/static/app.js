@@ -3410,6 +3410,199 @@ async function exportPartnerReport() {
     }
 }
 
+// ---- Scheduled automatic runs ("Lịch tự động", server mode admin only) ----------
+// The server (riviu/scheduler.py) owns the timing and the runs; this dialog only edits
+// /schedule and shows its next/last runs and the run log. Times are Asia/Ho_Chi_Minh.
+const SCHEDULE_WORKER_CHOICES = [1, 3, 5, 8, 10, 20, 25, 30, 50];
+// Same order and words as the toolbar's "Chế độ" select.
+const SCHEDULE_MODE_LABELS = Object.freeze({ request: 'Request', hybrid: 'Hybrid (Request + trình duyệt)', browser: 'Trình duyệt' });
+const SCHEDULE_STATUS_LABELS = Object.freeze({ completed: 'Hoàn tất', failed: 'Lỗi', skipped: 'Bỏ qua', stopped: 'Dừng sớm', cancelled: 'Đã hủy' });
+let scheduleDraft = null;
+let scheduleOverview = null;
+let scheduleSaving = false;
+
+function formatScheduleTime(iso) {
+    // The server sends local (+07:00) ISO times; show them as written, whatever the browser's zone.
+    const text = String(iso || '');
+    return text.length >= 16 ? `${text.slice(8, 10)}/${text.slice(5, 7)} ${text.slice(11, 16)}` : '—';
+}
+
+function setScheduleStatus(message, level = '') {
+    const status = document.getElementById('scheduleStatus');
+    if (!status) return;
+    status.className = `proxy-test-result${level ? ` ${level}` : ''}`;
+    status.textContent = message;
+}
+
+async function openScheduleModal() {
+    const modal = document.getElementById('scheduleModal');
+    if (!modal || IS_VIEWER) return;
+    closeCompactDrawers();
+    setModalOpen(modal, true);
+    document.body.style.overflow = 'hidden';
+    setScheduleStatus('');
+    await loadSchedule();
+}
+
+function closeScheduleModal() {
+    const modal = document.getElementById('scheduleModal');
+    if (!modal) return;
+    setModalOpen(modal, false);
+    document.body.style.overflow = '';
+}
+
+async function loadSchedule() {
+    try {
+        const response = await fetch('/schedule', { cache: 'no-store' });
+        const data = await response.json();
+        if (!response.ok || data.error) throw new Error(data.error || 'Không tải được lịch tự động.');
+        scheduleOverview = data;
+        scheduleDraft = JSON.parse(JSON.stringify(data.schedule));
+        renderSchedule();
+    } catch (error) {
+        setScheduleStatus(error.message || 'Không tải được lịch tự động.', 'error');
+    }
+}
+
+function scheduleRunCounts(run) {
+    return run?.counts && Number.isFinite(run.counts.total)
+        ? `${formatNumber(run.counts.success ?? 0)}/${formatNumber(run.counts.total)} link`
+        : '';
+}
+
+function scheduleRunSummary(run) {
+    if (!run) return 'Chưa chạy';
+    const counts = scheduleRunCounts(run);
+    return `${formatScheduleTime(run.startedAt)} · ${SCHEDULE_STATUS_LABELS[run.status] || run.status}${counts ? ` · ${counts}` : ''}`;
+}
+
+function scheduleSlotHtml(platform, label, slot, index) {
+    return `<div class="schedule-slot" data-slot-index="${index}">`
+        + `<input type="time" class="text-input schedule-slot-time" value="${escapeHtml(slot.time)}" aria-label="Giờ chạy ${label} ${index + 1}" required>`
+        + `<label class="schedule-check"><input type="checkbox" class="schedule-slot-enabled"${slot.enabled ? ' checked' : ''}> Bật</label>`
+        + `<button type="button" class="icon-btn" onclick="removeScheduleSlot('${platform}', ${index})" title="Xóa giờ này" aria-label="Xóa giờ ${escapeHtml(slot.time)}"><span class="material-icons-outlined">delete</span></button>`
+        + `</div>`;
+}
+
+function schedulePlatformHtml(key) {
+    const config = PLATFORMS[key];
+    const item = scheduleDraft.platforms[key] || { slots: [], options: {} };
+    const info = scheduleOverview?.platforms?.[key] || {};
+    const platform = escapeHtml(key), label = escapeHtml(config.label);
+    const options = item.options || {};
+    const slots = item.slots.length
+        ? item.slots.map((slot, index) => scheduleSlotHtml(platform, label, slot, index)).join('')
+        : '<div class="schedule-empty">Chưa có khung giờ nào.</div>';
+    const workerOptions = SCHEDULE_WORKER_CHOICES.map(value => `<option value="${value}"${Number(options.workers) === value ? ' selected' : ''}>${value}</option>`).join('');
+    const modeOptions = Object.entries(SCHEDULE_MODE_LABELS).map(([value, text]) => `<option value="${escapeHtml(value)}"${options.scrapeMode === value ? ' selected' : ''}>${escapeHtml(text)}</option>`).join('');
+    const cookieLabel = config.cookieSession ? 'Cookie Threads' : (config.accountCookie ? 'Cookie TikTok' : '');
+    return `<section class="schedule-platform" data-schedule-platform="${platform}">`
+        + `<div class="schedule-platform-head"><span class="platform-source-name"><img class="platform-brand-icon" src="${escapeHtml(config.icon)}" alt="" aria-hidden="true">${label}</span>`
+        + `<span class="schedule-meta">Lần tới: <b>${escapeHtml(info.nextRun ? formatScheduleTime(info.nextRun) : '—')}</b> · Lần trước: ${escapeHtml(scheduleRunSummary(info.lastRun))}</span></div>`
+        + `<div class="schedule-slots">${slots}</div>`
+        + `<button type="button" class="btn btn-outline btn-compact" onclick="addScheduleSlot('${platform}')"><span class="material-icons-outlined">add</span> Thêm giờ</button>`
+        + `<div class="schedule-options">`
+        + `<label class="scan-setting"><span>Luồng</span><select class="schedule-opt-workers">${workerOptions}</select></label>`
+        + `<label class="scan-setting"><span>Chế độ</span><select class="schedule-opt-mode">${modeOptions}</select></label>`
+        + `<label class="schedule-check"><input type="checkbox" class="schedule-opt-proxy"${options.useProxy ? ' checked' : ''}> Proxy (danh sách đã lưu)</label>`
+        + (cookieLabel ? `<label class="schedule-check"><input type="checkbox" class="schedule-opt-session"${options.useSession ? ' checked' : ''}> ${escapeHtml(cookieLabel)}</label>` : '')
+        + `</div></section>`;
+}
+
+function scheduleRunRowHtml(run) {
+    const counts = scheduleRunCounts(run);
+    return `<tr data-run-status="${escapeHtml(run.status)}"><td>${escapeHtml(formatScheduleTime(run.startedAt))}<div class="schedule-run-slot">khung ${escapeHtml(run.slot || '')}</div></td>`
+        + `<td>${escapeHtml(PLATFORMS[run.platform]?.label || run.platform || '')}</td>`
+        + `<td class="schedule-run-status">${escapeHtml(SCHEDULE_STATUS_LABELS[run.status] || run.status || '')}</td>`
+        + `<td>${escapeHtml(run.message || '')}${counts ? ` <span class="schedule-run-counts">(${escapeHtml(counts)})</span>` : ''}</td></tr>`;
+}
+
+function renderSchedule() {
+    const container = document.getElementById('schedulePlatforms');
+    if (!container || !scheduleDraft) return;
+    container.innerHTML = PLATFORM_KEYS.map(schedulePlatformHtml).join('');
+    const runsBody = document.getElementById('scheduleRunsBody');
+    const runs = scheduleOverview?.runs || [];
+    if (runsBody) {
+        runsBody.innerHTML = runs.length
+            ? runs.slice(0, 20).map(scheduleRunRowHtml).join('')
+            : '<tr><td colspan="4" class="workspace-empty">Chưa có lượt chạy nào</td></tr>';
+    }
+    const subtitle = document.getElementById('scheduleModalSubtitle');
+    if (subtitle && scheduleOverview?.timezone) {
+        subtitle.textContent = `Đến giờ (${scheduleOverview.timezone}), server nạp lại Google Sheet của nền tảng rồi quét file mới. Không tự tạo sheet trên Google.`;
+    }
+}
+
+// Read the inputs back into the draft before re-rendering or saving.
+function collectScheduleForm() {
+    if (!scheduleDraft) return null;
+    for (const section of document.querySelectorAll('.schedule-platform')) {
+        const key = section.dataset.schedulePlatform;
+        if (!isPlatform(key)) continue;
+        const slots = [...section.querySelectorAll('.schedule-slot')].map(row => ({
+            time: row.querySelector('.schedule-slot-time')?.value || '',
+            enabled: Boolean(row.querySelector('.schedule-slot-enabled')?.checked),
+        }));
+        const options = {
+            workers: Number(section.querySelector('.schedule-opt-workers')?.value || DEFAULT_WORKER_COUNT),
+            scrapeMode: section.querySelector('.schedule-opt-mode')?.value || PLATFORMS[key].defaultScrapeMode,
+            useProxy: Boolean(section.querySelector('.schedule-opt-proxy')?.checked),
+            useSession: Boolean(section.querySelector('.schedule-opt-session')?.checked),
+        };
+        scheduleDraft.platforms[key] = { slots, options };
+    }
+    return scheduleDraft;
+}
+
+function addScheduleSlot(platform) {
+    if (!isPlatform(platform) || !collectScheduleForm()) return;
+    const slots = scheduleDraft.platforms[platform].slots;
+    const used = new Set(slots.map(slot => slot.time));
+    const time = ['08:00', '12:00', '17:00', '21:00'].find(value => !used.has(value)) || '00:00';
+    slots.push({ time, enabled: true });
+    renderSchedule();
+}
+
+function removeScheduleSlot(platform, index) {
+    if (!isPlatform(platform) || !collectScheduleForm()) return;
+    scheduleDraft.platforms[platform].slots.splice(index, 1);
+    renderSchedule();
+}
+
+function scheduleDraftError(draft) {
+    for (const key of PLATFORM_KEYS) {
+        const times = draft.platforms[key].slots.map(slot => slot.time);
+        if (times.some(time => !/^([01]\d|2[0-3]):[0-5]\d$/.test(time))) return 'Giờ phải có dạng HH:MM.';
+        if (new Set(times).size !== times.length) return `Trùng khung giờ ở ${PLATFORMS[key].label}.`;
+    }
+    return '';
+}
+
+async function saveSchedule() {
+    if (IS_VIEWER || scheduleSaving || !collectScheduleForm()) return;
+    const invalid = scheduleDraftError(scheduleDraft);
+    if (invalid) { setScheduleStatus(invalid, 'error'); return; }
+    scheduleSaving = true;
+    const button = document.getElementById('scheduleSaveBtn');
+    if (button) button.disabled = true;
+    try {
+        const response = await postJson('/schedule', scheduleDraft);
+        const data = await response.json();
+        if (!response.ok || !data.success) throw new Error(data.error || 'Không lưu được lịch tự động.');
+        scheduleOverview = data;
+        scheduleDraft = JSON.parse(JSON.stringify(data.schedule));
+        renderSchedule();
+        setScheduleStatus('Đã lưu lịch tự động.', 'ok');
+        notify('Đã lưu lịch tự động.', 'success');
+    } catch (error) {
+        setScheduleStatus(error.message || 'Không lưu được lịch tự động.', 'error');
+    } finally {
+        scheduleSaving = false;
+        if (button) button.disabled = false;
+    }
+}
+
 // ---- Event wiring and startup -----------------------------------------------
 const area = document.getElementById('uploadArea');
 area?.addEventListener('dragover', (event) => { event.preventDefault(); area.classList.add('dragover'); });
@@ -3475,6 +3668,9 @@ document.getElementById('historyModal').addEventListener('click', (event) => {
 document.getElementById('proxyModal')?.addEventListener('click', (event) => {
     if (event.target.id === 'proxyModal') closeProxyModal();
 });
+document.getElementById('scheduleModal')?.addEventListener('click', (event) => {
+    if (event.target.id === 'scheduleModal') closeScheduleModal();
+});
 
 document.getElementById('threadsCookieModal')?.addEventListener('click', (event) => {
     if (event.target.id === 'threadsCookieModal') closeThreadsCookieModal();
@@ -3522,6 +3718,7 @@ document.addEventListener('keydown', (event) => {
     if (document.getElementById('threadsCookieModal')?.classList.contains('active')) { closeThreadsCookieModal(); return; }
     if (document.getElementById('tiktokCookieModal')?.classList.contains('active')) { closeTikTokCookieModal(); return; }
     if (document.getElementById('guideModal')?.classList.contains('active')) { closeGuideModal(); return; }
+    if (document.getElementById('scheduleModal')?.classList.contains('active')) { closeScheduleModal(); return; }
     if (document.getElementById('reportModal').classList.contains('active')) {
         closeReportModal();
     } else if (document.getElementById('historyModal').classList.contains('active')) {

@@ -4,7 +4,6 @@ Server mode: the socket also serves the public viewer, read-only. Starlette's HT
 middleware never sees websockets, so the admin check for start/cancel lives here.
 """
 
-import asyncio
 import json
 
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
@@ -71,10 +70,7 @@ async def websocket_endpoint(websocket: WebSocket):
                 except (SourceRequestError, ValueError) as error:
                     await reject_start(str(error))
                     continue
-                run_context = manager.begin_run(options["platform"], options["file_id"], options["sheet_name"])
-                task = asyncio.create_task(scan_service.run_scraper_safely(target_path, options, run_context=run_context))
-                scan_state.SCRAPE_TASK = task
-                task.add_done_callback(lambda task, run_id=run_context["runId"]: scan_service.finalize_unstarted_run(task, run_id))
+                scan_service.start_scan_task(target_path, options)
                 await manager.broadcast_status(manager.last_status)
             elif action == "cancel":
                 task = scan_state.SCRAPE_TASK

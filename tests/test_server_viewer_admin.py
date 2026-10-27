@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 from starlette.routing import Route
 
 from riviu import app as backend
-from riviu import scan_service, scan_state, server_mode
+from riviu import scan_service, scan_state, scheduler, server_mode
 from riviu.api import scan as scan_api
 from riviu.api import security
 from riviu.api import sources as sources_api
@@ -65,7 +65,7 @@ def test_every_route_outside_the_viewer_allowlist_needs_the_admin_login(server, 
         checked += 1
         assert response.status_code == 401, (method, path, response.status_code)
         assert response.json() == {"error": "Cần đăng nhập"}
-    assert checked >= 25  # upload, select, Google, proxy, cookies, download, /admin...
+    assert checked >= 25  # upload, select, Google, proxy, cookies, download, schedule, /admin...
     assert {(method, path) for method, path, _ in anonymous} == {
         ("GET", "/"), ("GET", "/api/version"), ("GET", "/list-files"), ("GET", "/preview-excel"),
         ("GET", "/summary-dashboard"), ("GET", "/source-preferences"), ("GET", "/report-partners"),
@@ -114,7 +114,7 @@ ADMIN_ONLY_IDS = (
     "startBtn", "cancelBtn", "scanSettingsButton", "workerCountSelect", "proxyUseCheckbox", "proxyModal",
     "threadsCookieModal", "tiktokCookieModal", "threadsSessionUse", "tiktokSessionUse", "uploadArea", "fileInput",
     "googleServiceAccountBtn", "googleOauthBtn", "googleLoginBtn", "googlePasteModal", "refreshPartnerBtn",
-    "logoutButton",
+    "logoutButton", "scheduleButton", "scheduleModal",
 )
 SHARED_IDS = ("platformBar", "sourceDrawerButton", "excelFileSelect", "reportModal", "exportReportBtn", "historyModal", "guideButton", "previewTable")
 
@@ -139,7 +139,7 @@ def test_admin_page_has_every_control_and_no_admin_link(server):
     page = server.get("/admin")
     assert page.status_code == 200 and 'data-role="admin"' in page.text
     assert set(ADMIN_ONLY_IDS) | set(SHARED_IDS) <= ids(page.text)
-    assert "adminLink" not in page.text
+    assert "adminLink" not in page.text and "Lịch tự động" in page.text
     # `/` stays the viewer for a logged-in admin too.
     assert 'data-role="viewer"' in server.get("/").text
 
@@ -165,9 +165,10 @@ def test_admin_route_does_not_exist_outside_server_mode(tmp_path, monkeypatch):
     with TestClient(backend.app, base_url="http://127.0.0.1:1231") as client:
         page = client.get("/")
         assert page.status_code == 200 and 'data-role="admin"' in page.text and 'id="startBtn"' in page.text
-        assert "adminLink" not in page.text
+        assert "adminLink" not in page.text and "scheduleButton" not in page.text
         assert client.get("/admin").status_code == 404
-
+        assert client.get("/schedule").status_code == 404
+    assert scheduler._LOOP_TASK is None  # no scheduled runs outside server mode
 
 
 # ---- /ws ---------------------------------------------------------------------------------

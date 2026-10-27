@@ -100,10 +100,12 @@ def source_operation():
 
 @contextmanager
 def scan_starting():
-    """Count a start that is still loading its Threads session as a running scan."""
+    """Count a start that is still loading its Threads session (or a scheduled run that is still
+    syncing its sheet) as a running scan. Re-entrant: an inner use keeps an outer hold."""
     global SCAN_STARTING
+    previous = SCAN_STARTING
     SCAN_STARTING = True
     try:
         yield
     finally:
-        SCAN_STARTING = False
+        SCAN_STARTING = previous
