@@ -961,7 +961,12 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
     slots = _RouteSlots(workers)
     # Hybrid fallbacks never take every slot while HTTP work is queued.
     fallback_slots = asyncio.Semaphore(max(1, min(BROWSER_FALLBACK_LIMIT, workers - 1)))
-    processed = success = hidden = errors = 0
+    # Routes (proxy index, or the one direct/cookie route) that Threads answered with
+    # HTTP 429. Their remaining URLs are not requested: more requests only keep the
+    # route blocked and stamp every row "Error: HTTP 429". URLs never move to another route.
+    rate_limited_routes = set()
+    announced_routes = set()
+    processed = success = hidden = errors = rate_limit_skipped = 0
     dirty = False
     last_saved = _checkpoint_clock()
     # Column indexes of this run's freshly loaded workbook. Only the result loop
@@ -988,20 +993,35 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
             dirty = False
             last_saved = _checkpoint_clock()
 
+        def route_of(index):
+            return 0 if session_cookies is not None or not proxies else index % len(proxies)
+
+        def note_rate_limit(route, result):
+            if result.get("error_kind") == "rate_limit":
+                rate_limited_routes.add(route)
+            return result
+
         async def check(index, item):
             # A cookie session keeps one route for the whole run; anonymous runs round-robin.
             # HTTP, its retry and any browser fallback of a URL use the same route.
-            config = proxies[0 if session_cookies is not None else index % len(proxies)] if proxies else None
+            route = route_of(index)
+            config = proxies[route] if proxies else None
             if mode == "browser":
                 async with slots.hold():
-                    return item, await _browser_check(item["url"], config, session_cookies, get_browser), "Browser"
+                    if route in rate_limited_routes:
+                        return item, None, "Browser"
+                    return item, note_rate_limit(route, await _browser_check(item["url"], config, session_cookies, get_browser)), "Browser"
             async with slots.hold():
-                request_result = await _request_check(item["url"], config, session_cookies)
+                if route in rate_limited_routes:
+                    return item, None, "Request"
+                request_result = note_rate_limit(route, await _request_check(item["url"], config, session_cookies))
             if mode == "request" or not needs_browser_fallback(request_result):
                 return item, request_result, "Request"
             # The HTTP slot is released first: a slow page never holds it.
             async with fallback_slots, slots.hold(fallback=True):
-                browser_result = await _browser_check(item["url"], config, session_cookies, get_browser)
+                if route in rate_limited_routes:
+                    return item, request_result, "Request"
+                browser_result = note_rate_limit(route, await _browser_check(item["url"], config, session_cookies, get_browser))
             return item, merge_results(request_result, browser_result), "Hybrid"
 
         tasks = [asyncio.create_task(check(index, item)) for index, item in enumerate(items)]
@@ -1020,10 +1040,20 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                     else:
                         await asyncio.wait({waiting}, timeout=due_in)
                 item, result, source = waiting.result()
+                if result is None:
+                    # Not requested: its route is rate limited. The row keeps its values and status.
+                    rate_limit_skipped += 1
+                    continue
                 if session_cookies is not None and result.get("error_kind") in {"auth_invalid", "auth_checkpoint", "auth_unknown"}:
                     if diagnostics is not None:
                         diagnostics["authState"] = result["error_kind"].removeprefix("auth_")
                     raise threads_session.SessionError(result["error_kind"].removeprefix("auth_"))
+                if websocket_manager and rate_limited_routes - announced_routes:
+                    announced_routes.update(rate_limited_routes)
+                    await websocket_manager.broadcast_log(
+                        "Threads trả HTTP 429 (giới hạn tần suất): ngừng gửi yêu cầu mới qua "
+                        + ("proxy này" if len(proxies) > 1 and session_cookies is None else "kết nối này")
+                        + "; các link chưa quét giữ nguyên số cũ. Chờ ít phút rồi quét lại với ít luồng hơn.")
                 processed += 1
                 status = result_status(result)
                 if status == "Success":
@@ -1049,6 +1079,12 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                         "mode": "partner" if selected_partners else "full", "done": False,
                         "rate": round(processed / max(time.monotonic() - started, 0.1) * 60, 1),
                     })
+            if diagnostics is not None:
+                diagnostics["rateLimitSkippedUrls"] = rate_limit_skipped
+            if rate_limit_skipped and websocket_manager:
+                await websocket_manager.broadcast_log(
+                    f"Threads: bỏ qua {rate_limit_skipped}/{total} link chưa quét vì Threads giới hạn tần suất (HTTP 429); "
+                    "số và trạng thái cũ của các dòng này được giữ nguyên.")
             # Every page load is done: Chromium closes while the workbook is finalized.
             closing = asyncio.ensure_future(close_browser_bounded(browser))
             if sheet_name:
