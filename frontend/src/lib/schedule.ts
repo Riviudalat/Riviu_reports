@@ -1,10 +1,16 @@
-// "Lịch tự động" (server mode, riviu/scheduler.py): daily HH:MM slots per platform and the
-// scan options of those runs. GET/POST /schedule answer the overview below.
+// "Hẹn giờ tự động" (server mode, riviu/scheduler.py): daily HH:MM slots per platform, the
+// Riviu Data months each slot scans, and the scan options of those runs. GET/POST /schedule answer the overview below.
 import { PLATFORM_KEYS, PLATFORMS, type PlatformKey, type ScrapeMode } from './platforms';
+
+/** A slot's Riviu Data month: "latest" (the newest month, followed as months are added) or "YYYY-MM". */
+export const LATEST_MONTH = 'latest';
+export const MONTH_PATTERN = /^\d{4}-(?:0[1-9]|1[0-2])$/;
 
 export interface ScheduleSlot {
   time: string;
   enabled: boolean;
+  /** The months this slot scans, one after another (Riviu Data storage; ignored on workbooks). */
+  months: string[];
 }
 
 export interface ScheduleOptions {
@@ -71,7 +77,7 @@ export function normalizeOverview(raw: unknown): ScheduleOverview {
       slots: slots
         .map(slot => slot as Record<string, unknown>)
         .filter(slot => typeof slot.time === 'string' && SLOT_PATTERN.test(slot.time))
-        .map(slot => ({ time: String(slot.time), enabled: slot.enabled !== false })),
+        .map(slot => ({ time: String(slot.time), enabled: slot.enabled !== false, months: normalizeMonths(slot.months) })),
       options: { ...defaultOptions(key), ...((item.options || {}) as Partial<ScheduleOptions>) },
     };
   }
@@ -85,12 +91,27 @@ export function normalizeOverview(raw: unknown): ScheduleOverview {
   };
 }
 
+/** "latest" first, then the chosen months newest first, without repeats; at least the newest month. */
+export function normalizeMonths(raw: unknown): string[] {
+  const values = Array.isArray(raw) ? raw.filter((value): value is string => typeof value === 'string' && (value === LATEST_MONTH || MONTH_PATTERN.test(value))) : [];
+  const unique = [...new Set(values)];
+  if (!unique.length) return [LATEST_MONTH];
+  return unique.sort((a, b) => (a === LATEST_MONTH ? -1 : b === LATEST_MONTH ? 1 : b.localeCompare(a)));
+}
+
+/** "latest" -> "Tháng mới nhất", "2026-09" -> "Tháng 9/2026". */
+export function slotMonthLabel(value: string): string {
+  if (value === LATEST_MONTH) return 'Tháng mới nhất';
+  const [year, month] = value.split('-');
+  return `Tháng ${Number(month)}/${year}`;
+}
+
 /** Add a slot (sorted, no duplicates); returns an error message instead when it cannot. */
 export function addSlot(slots: readonly ScheduleSlot[], time: string): ScheduleSlot[] | string {
   if (!SLOT_PATTERN.test(time)) return 'Giờ phải có dạng HH:MM (00:00–23:59).';
   if (slots.some(slot => slot.time === time)) return `Đã có khung giờ ${time}.`;
   if (slots.length >= MAX_SLOTS) return `Mỗi nền tảng có tối đa ${MAX_SLOTS} khung giờ.`;
-  return [...slots, { time, enabled: true }].sort((a, b) => a.time.localeCompare(b.time));
+  return [...slots, { time, enabled: true, months: [LATEST_MONTH] }].sort((a, b) => a.time.localeCompare(b.time));
 }
 
 /** "2026-10-28T21:00:00+07:00" -> "21:00 · 28/10" in the schedule's own clock (no browser TZ shift). */

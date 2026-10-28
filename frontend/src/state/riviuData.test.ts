@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Viewer } from '@/lib/auth';
-import { appStore, handleSocketMessage, resetAppState, setSocketForTests, skipRetryWait, updateScanSettings } from './app';
+import { appStore, cancelScraping, handleSocketMessage, platformScanBusy, resetAppState, setSocketForTests, skipRetryWait, updateScanSettings } from './app';
 import {
   buildRdScanRequest, installRiviuDataHooks, loadMonths, loadRows, resetRiviuDataModule, selectRdPlatform, startRdScan,
 } from './riviuData';
@@ -121,12 +121,17 @@ describe('socket flow on Riviu Data', () => {
     handleSocketMessage({ type: 'status', ...ctx, data: { phase: 'running', total: 2, processed: 1 } });
     expect(appStore.get().scan.phase).toBe('running');
     await selectRdPlatform('threads');
+    // Each platform keeps its own scan: TikTok's run is parked while Threads is shown.
+    expect(appStore.get().scan.phase).toBe('idle');
+    expect(appStore.get().parkedScans.tiktok?.phase).toBe('running');
     const before = rowsCalls().length;
     handleSocketMessage({ type: 'status', ...ctx, data: { phase: 'completed', done: true, total: 2, processed: 2 } });
-    expect(appStore.get().scan.phase).toBe('completed');
+    expect(appStore.get().parkedScans.tiktok?.phase).toBe('completed');
     // The finished run's months are refreshed; the shown platform's table only when it is that run's.
     await vi.waitFor(() => expect(calls.filter(call => call.url === '/riviu-data/months?platform=tiktok').length).toBeGreaterThanOrEqual(2));
     expect(rowsCalls().length).toBe(before);
+    await selectRdPlatform('tiktok');
+    expect(appStore.get().scan.phase).toBe('completed');
   });
 
   it('reloads the shown table when the run finishes', async () => {
@@ -144,26 +149,33 @@ describe('socket flow on Riviu Data', () => {
     await vi.waitFor(() => expect(rowsCalls().length).toBe(before + 1));
     skipRetryWait();
     skipRetryWait();
-    expect(sent).toEqual([{ action: 'skip_retry' }]);
+    expect(sent).toEqual([{ action: 'skip_retry', platform: 'tiktok' }]);
     expect(appStore.get().scan.retrySkipRequested).toBe(true);
     handleSocketMessage({ type: 'status', ...ctx, data: { phase: 'completed', done: true, total: 2, processed: 2 } });
     expect(appStore.get().scan.retryWait).toBeNull();
   });
 
-  it('an admin page follows a new run to its platform and month once', async () => {
+  it('tracks a run of the other platform side by side without leaving the shown one', async () => {
     await loadMonths('threads');
+    handleSocketMessage({ type: 'status', ...ctx, data: { phase: 'running', total: 2, processed: 1 } });
     handleSocketMessage({ type: 'status', runId: 'run-th', platform: 'threads', fileId: 'riviu-data', sheetName: '2026-10', data: { phase: 'running', total: 1 } });
-    expect(appStore.get().activePlatform).toBe('threads');
-    // The admin may browse elsewhere while it runs; later events of that run do not pull them back.
-    await selectRdPlatform('tiktok');
-    handleSocketMessage({ type: 'status', runId: 'run-th', platform: 'threads', fileId: 'riviu-data', sheetName: '2026-10', data: { phase: 'running', total: 1, processed: 1 } });
-    expect(appStore.get().activePlatform).toBe('tiktok');
+    handleSocketMessage({ type: 'data', runId: 'run-th', platform: 'threads', fileId: 'riviu-data', sheetName: '2026-10', row: { id: 1, url: 'https://www.threads.com/@a/post/1', status: 'Success' } });
+    const state = appStore.get();
+    expect(state.activePlatform).toBe('tiktok');
+    expect(state.scan).toMatchObject({ phase: 'running', runContext: { runId: 'run-1' } });
+    expect(platformScanBusy(state, 'threads')).toBe(true);
+    expect(state.parkedScans.threads?.rows).toHaveLength(1);
+    await selectRdPlatform('threads');
+    expect(appStore.get().scan.runContext?.runId).toBe('run-th');
+    expect(appStore.get().parkedScans.tiktok?.runContext?.runId).toBe('run-1');
+    cancelScraping();
+    expect(sent.at(-1)).toEqual({ action: 'cancel', platform: 'threads' });
   });
 
   it('a public viewer keeps its own view and cannot skip the retry', async () => {
     resetAppState({ storage: 'postgres', viewer: ANON });
     resetRiviuDataModule();
-    handleSocketMessage({ type: 'status', runId: 'run-th', platform: 'threads', fileId: 'riviu-data', sheetName: '2026-10', data: { phase: 'running', retryPass: true, retryWaitSeconds: 60, total: 1 } });
+    handleSocketMessage({ type: 'status', runId: 'run-tk', platform: 'tiktok', fileId: 'riviu-data', sheetName: '2026-10', data: { phase: 'running', retryPass: true, retryWaitSeconds: 60, total: 1 } });
     expect(appStore.get().activePlatform).toBe('tiktok');
     expect(appStore.get().scan.retryWait).not.toBeNull();
     skipRetryWait();

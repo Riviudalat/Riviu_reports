@@ -419,6 +419,10 @@ def test_internal_scan_refuses_while_a_scan_runs(internal_api):
     response = _post(client, {"platform": "threads", "thang": "2026-10", "trigger": "timer"})
     assert response.status_code == 409 and state["conn"].closed
     state["conn"] = FakeConn()
-    scan_state.manager.running = True  # a scan started from the UI in this process
+    scan_state.lane("threads").manager.running = True  # a Threads scan started from the UI in this process
     assert _post(client, {"platform": "threads", "trigger": "timer"}).status_code == 409
     assert state["scans"] == []
+    scan_state.lane("threads").manager.running = False
+    scan_state.lane("tiktok").manager.running = True  # the other platform's lane does not block Threads
+    assert _post(client, {"platform": "threads", "trigger": "timer"}).status_code == 200
+    assert state["scans"] == ["2026-10"]

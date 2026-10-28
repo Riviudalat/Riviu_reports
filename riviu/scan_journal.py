@@ -75,13 +75,17 @@ _TIKTOK_HTTP_CODE = re.compile(r"\bhttp\s+(\d{3})\b", re.IGNORECASE)
 logger = logging.getLogger("riviu.scan_journal")
 
 
-def journal_path(base_dir):
+def journal_path(base_dir, lane=None):
+    """The journal file: one per run on workbook storage, one per platform lane on Riviu Data."""
+    if lane:
+        stem, ext = os.path.splitext(JOURNAL_FILENAME)
+        return os.path.join(base_dir, "data", f"{stem}.{lane}{ext}")
     return os.path.join(base_dir, "data", JOURNAL_FILENAME)
 
 
-def load_journal(base_dir):
+def load_journal(base_dir, lane=None):
     try:
-        with open(journal_path(base_dir), encoding="utf-8") as stream:
+        with open(journal_path(base_dir, lane), encoding="utf-8") as stream:
             data = json.load(stream)
     except FileNotFoundError:
         return None
@@ -93,9 +97,9 @@ def load_journal(base_dir):
     return data
 
 
-def clear_journal(base_dir):
+def clear_journal(base_dir, lane=None):
     try:
-        os.remove(journal_path(base_dir))
+        os.remove(journal_path(base_dir, lane))
     except FileNotFoundError:
         pass
 
@@ -157,9 +161,9 @@ class RunJournal:
         self._write_lock = asyncio.Lock()
 
     @classmethod
-    def begin(cls, base_dir, options, payload, *, proxy_hash=None, salt=""):
+    def begin(cls, base_dir, options, payload, *, proxy_hash=None, salt="", lane=None):
         data = {
-            "version": JOURNAL_VERSION, "journalId": secrets.token_hex(8),
+            "version": JOURNAL_VERSION, "journalId": secrets.token_hex(8), **({"lane": lane} if lane else {}),
             "platform": options["platform"], "fileId": options["file_id"], "sheetName": options["sheet_name"],
             "startedAt": format_display_datetime(), "scheduled": bool(options.get("scheduled")),
             "payload": {key: payload[key] for key in PAYLOAD_KEYS if key in payload},
@@ -172,6 +176,10 @@ class RunJournal:
     @property
     def platform(self):
         return self.data["platform"]
+
+    @property
+    def lane(self):
+        return self.data.get("lane") or None
 
     @property
     def resume_attempts(self):
@@ -229,14 +237,15 @@ class RunJournal:
         async with self._write_lock:
             payload = self.snapshot()
             try:
-                os.makedirs(os.path.dirname(journal_path(self.base_dir)), exist_ok=True)
-                await asyncio.to_thread(write_json_atomic, journal_path(self.base_dir), payload)
+                path = journal_path(self.base_dir, self.lane)
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                await asyncio.to_thread(write_json_atomic, path, payload)
             except Exception as error:
                 logger.warning("Không ghi được nhật ký phiên quét: %s", error)
 
     async def clear(self):
         async with self._write_lock:
             try:
-                await asyncio.to_thread(clear_journal, self.base_dir)
+                await asyncio.to_thread(clear_journal, self.base_dir, self.lane)
             except Exception as error:
                 logger.warning("Không xóa được nhật ký phiên quét: %s", error)

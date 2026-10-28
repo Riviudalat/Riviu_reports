@@ -191,7 +191,7 @@ def scan_options(**overrides):
 
 
 async def push_scan_results(target_path, file_id, scan_sheet, platform):
-    manager = scan_state.manager
+    manager = scan_state.lane(platform).manager
     spreadsheet_id = google_sheet_source_for_file(context.EXCEL_DIR, file_id).get("spreadsheetId", "")
     if not spreadsheet_id:
         await manager.broadcast_log("BỎ QUA đẩy Google: file hiện tại chưa gắn với Google Sheet gốc.")
@@ -245,7 +245,8 @@ async def begin_journal(options):
             except Exception:
                 proxy_hash = None  # no fingerprint: a resume is refused rather than guessing the route
         journal = scan_journal.RunJournal.begin(
-            context.EXCEL_DIR, options, journal_payload(options), proxy_hash=proxy_hash, salt=salt or "")
+            context.EXCEL_DIR, options, journal_payload(options), proxy_hash=proxy_hash, salt=salt or "",
+            lane=options["platform"] if scan_state.lanes_enabled() else None)
     await journal.save()
     return journal
 
@@ -290,7 +291,7 @@ async def handle_stall(journal):
         raise RuntimeError(
             f"Phiên quét không có kết quả mới trong {minutes} phút và đã tự tiếp tục {scan_journal.MAX_RESUME_ATTEMPTS} lần; "
             "dừng hẳn. Kết quả đã quét vẫn được lưu.")
-    await scan_state.manager.broadcast_log(
+    await scan_state.lane(journal.platform).manager.broadcast_log(
         f"CẢNH BÁO: Phiên quét không có kết quả mới trong {minutes} phút. Đã dừng lượt bị treo (kết quả đã lưu) và tự tiếp tục "
         f"với các link còn lại (lần {attempts}/{scan_journal.MAX_RESUME_ATTEMPTS}).", level="WARN")
 
@@ -352,8 +353,8 @@ async def run_scan_passes(target_path, events, options, journal, runner=None):
     its fixed route; without a usable session they are not retried and the run reports them
     (`loginRequired`, `notice`), and a run that already used the session never retries them.
     """
-    manager = scan_state.manager
     platform = options["platform"]
+    manager = scan_state.lane(platform).manager
     runner = runner or SCAN_RUNNERS[platform]
     combined = False  # counts come from the journal once a resume or a retry pass happened
     prior = None
@@ -410,7 +411,7 @@ async def run_scan_passes(target_path, events, options, journal, runner=None):
             "retryPass": True, "retryWaitSeconds": cooldown, "retryAt": round(time.time() + cooldown, 3),
             "retryCount": count,
         })
-        if not await wait_retry_cooldown(cooldown):
+        if not await wait_retry_cooldown(cooldown, platform):
             # The admin chose "Bỏ qua quét lại": the run ends now, as completed with the main-pass results.
             journal.mark(retrySkipped=True)
             await journal.save()
@@ -464,11 +465,12 @@ async def run_scan_passes(target_path, events, options, journal, runner=None):
     return terminal
 
 
-async def wait_retry_cooldown(seconds):
+async def wait_retry_cooldown(seconds, platform=None):
     """Sleep the cooldown before the retry pass. Returns False when the admin skipped the retry
     pass meanwhile (`skip_retry_wait`), True when the cooldown ran out."""
     skip = asyncio.Event()
-    scan_state.RETRY_SKIP = skip
+    lane = scan_state.lane(platform)
+    lane.retry_skip = skip
     sleeper = asyncio.ensure_future(_cooldown_sleep(seconds))
     skipped = asyncio.ensure_future(skip.wait())
     try:
@@ -476,33 +478,45 @@ async def wait_retry_cooldown(seconds):
     finally:
         for waiter in (sleeper, skipped):
             waiter.cancel()
-        if scan_state.RETRY_SKIP is skip:
-            scan_state.RETRY_SKIP = None
+        if lane.retry_skip is skip:
+            lane.retry_skip = None
     return not skip.is_set()
 
 
-def skip_retry_wait():
+def _target_lanes(platform):
+    """The lane a command names; with no platform, the single lane or every platform lane."""
+    if platform is not None or not scan_state.lanes_enabled():
+        return [scan_state.lane(platform)]
+    return list(scan_state.LANES.values())
+
+
+def skip_retry_wait(platform=None):
     """End the cooldown of the running scan without a retry pass. The run then finishes as
     completed with the main-pass results (unlike a cancel, which is final and keeps nothing pending)."""
-    skip = scan_state.RETRY_SKIP
-    if skip is None or skip.is_set():
-        return False
-    skip.set()
-    return True
+    skipped = False
+    for lane in _target_lanes(platform):
+        skip = lane.retry_skip
+        if skip is not None and not skip.is_set():
+            skip.set()
+            skipped = True
+    return skipped
 
 
-def user_cancel_scan():
+def user_cancel_scan(platform=None):
     """Cancel the running scan for the user: its journal is dropped and it is never resumed."""
-    task = scan_state.SCRAPE_TASK
-    if not task or task.done():
-        return False
-    run_id = scan_state.manager.context.get("runId")
-    if run_id:
-        scan_state.USER_CANCELLED_RUNS.add(run_id)
-    # Repeated cancel must not interrupt the pending save/cleanup.
-    if not task.cancelling():
-        task.cancel()
-    return True
+    cancelled = False
+    for lane in _target_lanes(platform):
+        task = lane.task
+        if not task or task.done():
+            continue
+        run_id = lane.manager.context.get("runId")
+        if run_id:
+            scan_state.USER_CANCELLED_RUNS.add(run_id)
+        # Repeated cancel must not interrupt the pending save/cleanup.
+        if not task.cancelling():
+            task.cancel()
+        cancelled = True
+    return cancelled
 
 
 def store_scan(options):
@@ -556,7 +570,7 @@ class StoreRun:
         session = await self.store.open_scan(self.thang, selected_partners=partners, run_id=self.run_id, events=events)
         try:
             if session.locked_count and not self.totals["lockedRows"]:
-                await scan_state.manager.broadcast_log(f"Bỏ qua {session.locked_count} dòng đã khoá chỉ số.")
+                await scan_state.lane(self.platform).manager.broadcast_log(f"Bỏ qua {session.locked_count} dòng đã khoá chỉ số.")
             self.totals["lockedRows"] = session.locked_count
             await SCAN_RUNNERS[self.platform](target_path, events, {**options, "store_session": session})
         finally:
@@ -593,13 +607,14 @@ class StoreRun:
 async def run_store_passes(options, events, journal):
     """The passes of a Riviu Data scan under its lock and scan_run row; returns the terminal status."""
     run = StoreRun(options)
+    manager = scan_state.lane(run.platform).manager
     await run.open()
     phase, terminal, error = store_postgres.PHASE_FAILED, None, ""
     try:
         terminal = await run_scan_passes(options["file_label"], events, options, journal, runner=run.runner)
         phase = store_postgres.PHASE_STOPPED if terminal.get("stopReason") else store_postgres.PHASE_DONE
         if run.totals["skipped"]:
-            await scan_state.manager.broadcast_log(
+            await manager.broadcast_log(
                 f"Bỏ qua {run.totals['skipped']} dòng đã bị sửa, xoá hoặc khoá trong lúc quét (giữ nguyên).", level="WARN")
         return terminal
     except asyncio.CancelledError:
@@ -610,7 +625,7 @@ async def run_store_passes(options, events, journal):
         raise
     finally:
         # Shielded: a cancelled scan still records its end and releases the advisory lock.
-        closing = asyncio.ensure_future(run.close(phase, terminal or scan_state.manager.last_status, error))
+        closing = asyncio.ensure_future(run.close(phase, terminal or manager.last_status, error))
         try:
             await asyncio.shield(closing)
         except asyncio.CancelledError:
@@ -622,8 +637,8 @@ async def run_store_passes(options, events, journal):
 
 async def run_scraper_safely(target_path, options, run_context=None):
     """Run one scan transaction; `options` holds the validated start payload (see websocket start)."""
-    manager = scan_state.manager
     platform = options["platform"]
+    manager = scan_state.lane(platform).manager
     events = RunEvents(manager)
     journal = None
     run_id = (run_context or {}).get("runId")
@@ -685,18 +700,19 @@ async def run_scraper_safely(target_path, options, run_context=None):
 
 
 def start_scan_task(target_path, options):
-    """Begin the run context and start the one scan task (the `/ws` start action and the scheduler)."""
-    manager = scan_state.manager
-    run_context = manager.begin_run(options["platform"], options["file_id"], options["sheet_name"])
+    """Begin the run context and start the platform's scan task (the `/ws` start action and the scheduler)."""
+    lane = scan_state.lane(options["platform"])
+    run_context = lane.manager.begin_run(options["platform"], options["file_id"], options["sheet_name"])
     task = asyncio.create_task(run_scraper_safely(target_path, options, run_context=run_context))
-    scan_state.SCRAPE_TASK = task
-    task.add_done_callback(lambda task, run_id=run_context["runId"]: finalize_unstarted_run(task, run_id))
+    lane.task = task
+    task.add_done_callback(
+        lambda task, run_id=run_context["runId"], platform=options["platform"]: finalize_unstarted_run(task, run_id, platform))
     return task, run_context
 
 
-def finalize_unstarted_run(task, run_id):
+def finalize_unstarted_run(task, run_id, platform=None):
     # Cancellation may arrive before the coroutine executes even its first line.
-    manager = scan_state.manager
+    manager = scan_state.lane(platform).manager
     if manager.context.get("runId") != run_id or not manager.running:
         return
     phase = "cancelled" if task.cancelled() else "failed"
@@ -785,7 +801,7 @@ async def prepare_scan_start(payload):
         generation = payload.get("threads_session_generation")
         if not isinstance(generation, str) or not generation:
             raise ValueError("Tải lại trạng thái cookie Threads trước khi quét.")
-        with scan_state.scan_starting():
+        with scan_state.scan_starting(platform):
             try:
                 options["threads_cookies"] = await context.complete_blocking(context.threads_session_manager().snapshot, generation)
                 options["threads_proxies"] = resolve_threads_proxies(context.EXCEL_DIR, proxy_text, scrape_mode) if use_proxy else []
@@ -801,7 +817,7 @@ async def prepare_scan_start(payload):
             except Exception as error:
                 raise ValueError("Không nạp được phiên Threads đã lưu.") from error
     if platform == "tiktok" and payload.get("use_tiktok_session") is True:
-        with scan_state.scan_starting():
+        with scan_state.scan_starting(platform):
             session = context.tiktok_session_manager()
             try:
                 options["tiktok_cookies"] = await context.complete_blocking(session.snapshot)
@@ -815,7 +831,7 @@ async def prepare_scan_start(payload):
         if check.get("state") in UNUSABLE_COOKIE_STATES:
             raise ValueError(cookie_problem_message("tiktok", check.get("message", "")))
         if check.get("state") != "valid":
-            await scan_state.manager.broadcast_log(
+            await scan_state.lane(platform).manager.broadcast_log(
                 "Chưa xác minh được cookie TikTok lúc bắt đầu (lỗi kết nối); vẫn quét với cookie đã lưu.", level="WARN")
     return target_path, options
 
@@ -823,20 +839,21 @@ async def prepare_scan_start(payload):
 RESUME_TASK = None
 
 
-async def resume_interrupted_scan():
+async def resume_interrupted_scan(lane_key=None):
     """Server start: continue a scan the previous process left unfinished (its journal remains).
 
     Only the rows not yet saved in that run are scanned, through the normal prepare/start path
     (cookie check included). Never after a user cancel or a Threads HTTP 429 stop (no journal or
     `stopReason`), at most `MAX_RESUME_ATTEMPTS` times, and never on another proxy route.
+    `lane_key`: the platform lane's journal (Riviu Data storage); None reads the single journal.
     """
     manager = scan_state.manager
-    if scan_state.source_mutation_blocked():
+    if scan_state.start_blocked(lane_key) if lane_key else scan_state.source_mutation_blocked():
         return None
     # Held from before the first await until the task exists: a scheduled slot is skipped meanwhile.
-    with scan_state.scan_starting():
+    with scan_state.scan_starting(lane_key):
         base_dir = context.EXCEL_DIR
-        data = await asyncio.to_thread(scan_journal.load_journal, base_dir)
+        data = await asyncio.to_thread(scan_journal.load_journal, base_dir, lane_key)
         if data is None:
             return None
         platform = data.get("platform")
@@ -846,7 +863,7 @@ async def resume_interrupted_scan():
         async def give_up(reason, level="WARN"):
             logger.warning("Không tự tiếp tục phiên quét %s: %s", label, reason)
             await manager.broadcast_log(f"Không tự tiếp tục phiên quét {label} bị gián đoạn: {reason}", level=level)
-            await asyncio.to_thread(scan_journal.clear_journal, base_dir)
+            await asyncio.to_thread(scan_journal.clear_journal, base_dir, lane_key)
             return None
 
         if data.get("stopReason"):
@@ -855,7 +872,7 @@ async def resume_interrupted_scan():
             return await give_up(f"đã tự tiếp tục {scan_journal.MAX_RESUME_ATTEMPTS} lần.")
         # Counted before starting, so a crash during the resumed run still uses up this attempt.
         data["resumeAttempts"] = attempts + 1
-        await asyncio.to_thread(scan_journal.write_json_atomic, scan_journal.journal_path(base_dir), data)
+        await asyncio.to_thread(scan_journal.write_json_atomic, scan_journal.journal_path(base_dir, lane_key), data)
         payload = {**data["payload"], "action": "start", "proxy_text": ""}
         try:
             if payload.get("use_threads_session"):
@@ -879,6 +896,7 @@ async def resume_interrupted_scan():
         if options["scheduled"]:
             options["push_to_google"] = False  # a scheduled run never pushes, resumed or not
         task, _run_context = start_scan_task(target_path, options)
+        manager = scan_state.lane(options["platform"]).manager
         await manager.broadcast_log(
             f"Tự tiếp tục phiên quét {label} bị gián đoạn (sheet \"{options['sheet_name']}\", lần {attempts + 1}/"
             f"{scan_journal.MAX_RESUME_ATTEMPTS}): chỉ quét các link chưa lưu.", level="WARN")
@@ -886,10 +904,19 @@ async def resume_interrupted_scan():
         return task
 
 
+async def resume_all_interrupted():
+    """The single journal, then (Riviu Data storage) each platform lane's, side by side."""
+    tasks = [task for task in [await resume_interrupted_scan()] if task is not None]
+    if scan_state.lanes_enabled():
+        resumed = await asyncio.gather(*(resume_interrupted_scan(platform) for platform in SCAN_RUNNERS))
+        tasks.extend(task for task in resumed if task is not None)
+    return tasks
+
+
 def schedule_resume():
-    """Start resume_interrupted_scan in the background (server mode lifespan)."""
+    """Start the resumes in the background (server mode lifespan)."""
     global RESUME_TASK
-    RESUME_TASK = asyncio.create_task(resume_interrupted_scan())
+    RESUME_TASK = asyncio.create_task(resume_all_interrupted())
     return RESUME_TASK
 
 

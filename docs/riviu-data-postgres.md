@@ -172,7 +172,18 @@ workbook file and sheet:
   `thu_cong`, or `timer` for the scheduler; `started_by` `riviu-reports:<username>` or
   `riviu-reports:lich`) for the whole run. Each pass (main, retry) opens a fresh store session, so the
   retry pass reads current rows and the scan journal resumes by `(month, id, url)`. There is no result tab
-  and no Google push. The scheduler does not download a Google Sheet; it scans the default month.
+  and no Google push. The scheduler does not download a Google Sheet; each slot scans its `months`
+  (`"latest"` = the default month, plus any `YYYY-MM`), one after another.
+- `ngayAir` and `nguoiAir` (Riviu Data's `nguoi_air`, read as `to_jsonb(v) ->> 'nguoi_air'` so the
+  query also ran before migration 0013) come from the post; the web app shows the Người đăng column
+  once any row has a value.
+- **One scan lane per platform** (`scan_state.lane`): TikTok and Threads scan side by side, each with
+  its own run channel (every `/ws` event carries its `platform`), task, start hold, retry skip and
+  journal (`data/scan_journal.<platform>.json`, resumed per lane at startup). `/ws` `cancel` and
+  `skip_retry` name their `platform`; `/internal/scan` answers 409 only while that platform's lane is
+  busy. A source or cookie change still waits for every lane (`scan_state.source_mutation_blocked`).
+  The web app keeps the scan of the platform not shown in `parkedScans` and swaps it in on a switch.
+  Workbook storage keeps the single scan (`SCRAPE_TASK`) and runs scheduled platforms one after the other.
 - `POST /internal/scan` keeps its own path (`riviu/internal_scan.py`, options from the environment). Both
   paths share the advisory lock and the in-process scan gate, so they never overlap.
 - `deploy/server/compose.v2.yaml` runs this next to V1 (own checkout, data dir `/srv/riviu-v2/data`, env

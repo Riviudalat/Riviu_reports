@@ -17,3 +17,11 @@ def _classic_page_without_web_app_build(monkeypatch, tmp_path_factory):
     from riviu.api import pages
 
     monkeypatch.setattr(pages, "WEB_APP_INDEX", str(tmp_path_factory.mktemp("no-web-app") / "index.html"))
+
+
+@pytest.fixture(autouse=True)
+def _fresh_scan_lanes(monkeypatch):
+    """Riviu Data storage keeps one scan lane per platform for the process; every test starts with none."""
+    from riviu import scan_state
+
+    monkeypatch.setattr(scan_state, "LANES", {})

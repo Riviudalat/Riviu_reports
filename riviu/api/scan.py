@@ -13,6 +13,7 @@ from riviu import server_context as context
 from riviu.api import security
 from riviu.platforms.tiktok import read_scrape_history
 from riviu.source_files import SourceRequestError
+from riviu.workbook.platforms import PLATFORMS
 
 
 router = APIRouter()
@@ -57,14 +58,17 @@ async def websocket_endpoint(websocket: WebSocket):
                 continue
 
             action = payload.get("action")
+            # Riviu Data storage runs one scan per platform; a command names its platform.
+            platform = payload.get("platform") if payload.get("platform") in PLATFORMS else None
             # Checked per command (not once at connect), so a logout or password change applies at once.
             if action in SCAN_COMMANDS and security.request_role(websocket) != "admin":
                 # Only to this socket: a viewer must not stop or start anything, nor spam others.
                 await websocket.send_json({"type": "log", "message": VIEWER_REFUSED, "level": "WARN"})
                 continue
             if action == "start":
-                if scan_state.source_mutation_blocked():
-                    await websocket.send_json({"type": "session", "data": manager.snapshot(), **manager.context})
+                lane = scan_state.lane(platform or "tiktok")
+                if scan_state.start_blocked(platform or "tiktok"):
+                    await websocket.send_json(lane.manager.session_message())
                     await websocket.send_json({"type": "log", "message": "Đang xử lý dữ liệu hoặc cập nhật ứng dụng. Vui lòng chờ hoàn tất."})
                     continue
                 # Who started it, for Riviu Data's scan_run; never taken from the client.
@@ -76,17 +80,19 @@ async def websocket_endpoint(websocket: WebSocket):
                     await reject_start(str(error))
                     continue
                 scan_service.start_scan_task(target_path, options)
-                await manager.broadcast_status(manager.last_status)
+                lane = scan_state.lane(options["platform"])
+                await lane.manager.broadcast_status(lane.manager.last_status)
             elif action == "cancel":
                 # A user cancel is final: the run is not resumed later (scan_service.user_cancel_scan).
-                if scan_service.user_cancel_scan():
-                    await manager.broadcast_log("Đang hủy phiên quét hiện tại...")
+                channel = scan_state.lane(platform).manager
+                if scan_service.user_cancel_scan(platform):
+                    await channel.broadcast_log("Đang hủy phiên quét hiện tại...")
                 else:
-                    await manager.broadcast_log("Không có phiên quét nào đang chạy.")
+                    await channel.broadcast_log("Không có phiên quét nào đang chạy.")
             elif action == "skip_retry":
                 # Ends the cooldown without a retry pass; the run completes with the main-pass results.
-                if scan_service.skip_retry_wait():
-                    await manager.broadcast_log("Bỏ qua quét lại: kết thúc phiên quét với kết quả lượt chính...")
+                if scan_service.skip_retry_wait(platform):
+                    await scan_state.lane(platform).manager.broadcast_log("Bỏ qua quét lại: kết thúc phiên quét với kết quả lượt chính...")
                 else:
                     await websocket.send_json({"type": "log", "message": "Phiên quét không còn chờ quét lại.", "level": "WARN"})
     except WebSocketDisconnect:

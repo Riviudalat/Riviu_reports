@@ -5,10 +5,10 @@ import { errorMessage } from '@/lib/api';
 import type { Viewer } from '@/lib/auth';
 import { fetchMonths, fetchRows, type MonthEntry } from '@/lib/riviuData';
 import { PLATFORM_KEYS, SCRAPE_MODE_LABELS, isPlatform, platformConfig, type PlatformKey } from '@/lib/platforms';
-import { clearLive, scanIsBusy, type RunContext } from '@/lib/scan';
+import { clearLive, type RunContext } from '@/lib/scan';
 import {
   addLog, appStore, canAdmin, connectWS, loadScanSettings, notify, openModal, refreshCookieStatus, refreshProxyStatus, sendScanCommand,
-  storageHooks, uiIsBusy, type AppState, type ModalName, type RdState,
+  storageHooks, swapShownScan, uiIsBusy, type AppState, type ModalName, type RdState,
 } from './app';
 
 const get = () => appStore.get();
@@ -88,7 +88,9 @@ export async function refreshView(): Promise<void> {
 
 export async function selectRdPlatform(platform: PlatformKey): Promise<void> {
   if (!isPlatform(platform) || platform === get().activePlatform) return;
-  set(state => ({ activePlatform: platform, workspaceTab: 'sheet', scan: scanIsBusy(state.scan.phase) ? state.scan : { ...clearLive(state.scan), phase: state.scan.phase } }));
+  // Each platform keeps its own scan (they run side by side): park the shown one, show this one's.
+  swapShownScan(platform);
+  set({ workspaceTab: 'sheet' });
   savePlatform(platform);
   if (get().rd.months[platform] === null) await loadMonths(platform);
   await loadRows();

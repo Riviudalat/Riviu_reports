@@ -71,7 +71,9 @@ Chỉ chạy ở chế độ server (task asyncio khởi động cùng app). Qu�
   `prepare_scan_start` / `start_scan_task`, nên trang đang mở thấy tiến độ trực tiếp; (3) **không** tạo sheet trên Google.
 - Từ lúc nạp tới khi phiên quét bắt đầu, lịch giữ `scan_state.scan_starting()`: quét tay và thao tác nguồn phải chờ.
 - Bỏ qua (và ghi lại) khi đang có phiên quét hoặc thao tác nguồn, hay khi nền tảng chưa có link. Nạp lỗi
-  (ví dụ cần đăng nhập Google) thì ghi lỗi và không quét. Hai nền tảng cùng giờ chạy lần lượt, không bao giờ song song.
+  (ví dụ cần đăng nhập Google) thì ghi lỗi và không quét. Với workbook, hai nền tảng cùng giờ chạy lần lượt; với Riviu Data
+  (`RIVIU_STORAGE=postgres`) mỗi nền tảng một làn quét riêng nên TikTok và Threads chạy song song, và mỗi khung giờ quét
+  lần lượt các tháng đã chọn (`months`: `"latest"` = tháng mới nhất, cùng các tháng `YYYY-MM`), xem `docs/riviu-data-postgres.md`.
 - Vòng lặp thức dậy mỗi phút. Giờ bị lỡ khi server tắt (hoặc vòng lặp kẹt quá 3 phút) bị bỏ qua, không chạy bù.
 - Quy tắc Threads giữ nguyên (giãn nhịp, cách ly tuyến proxy nhận HTTP 429, dừng và ghi là "Dừng sớm" khi mọi tuyến đều 429, không xoay proxy né 403/geoblock).
 - Tùy chọn **Quét lại link lỗi** (`retryFailed`, mặc định bật) chạy một lượt quét lại các link lỗi tạm thời sau khi chờ; xem `docs/threads-scanning.md`.

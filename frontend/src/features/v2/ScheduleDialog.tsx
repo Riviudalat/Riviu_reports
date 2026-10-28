@@ -1,14 +1,17 @@
 import { useEffect, useId, useState } from 'react';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
-import { CalendarClockIcon, Loader2Icon, PlusIcon, RefreshCwIcon, SaveIcon, Trash2Icon } from 'lucide-react';
+import { Popover as PopoverPrimitive } from 'radix-ui';
+import { CalendarClockIcon, CalendarRangeIcon, Loader2Icon, PlusIcon, RefreshCwIcon, SaveIcon, Trash2Icon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
-import { Badge, Input, NativeSelect, Switch } from '@/components/ui/misc';
+import { Badge, Checkbox, Input, NativeSelect, Switch } from '@/components/ui/misc';
 import { PlatformIcon } from '@/components/common';
 import { errorMessage, getJson, postJson } from '@/lib/api';
 import { PLATFORMS, PLATFORM_KEYS, WORKER_OPTIONS, isPlatform, type PlatformKey, type ScrapeMode } from '@/lib/platforms';
+import { fetchMonths } from '@/lib/riviuData';
 import {
-  addSlot, formatScheduleTime, normalizeOverview, RUN_STATUS, runCountsText, type Schedule, type ScheduleOptions, type ScheduleOverview,
+  addSlot, formatScheduleTime, LATEST_MONTH, MONTH_PATTERN, normalizeMonths, normalizeOverview, RUN_STATUS, runCountsText, slotMonthLabel,
+  type Schedule, type ScheduleOptions, type ScheduleOverview, type ScheduleSlot,
 } from '@/lib/schedule';
 import { cn } from '@/lib/utils';
 import { closeModal, notify, useApp } from '@/state/app';
@@ -82,7 +85,7 @@ function ScheduleBody() {
       <DialogHeader>
         <DialogTitle><CalendarClockIcon className="size-4 text-primary" /> Hẹn giờ tự động</DialogTitle>
         <DialogDescription>
-          Mỗi ngày đến giờ đã đặt, máy chủ tự quét tháng mới nhất của nền tảng. Giờ theo {overview?.timezone || 'Asia/Ho_Chi_Minh (UTC+7)'}.
+          Mỗi ngày đến giờ đã đặt, máy chủ tự quét các tháng đã chọn của từng khung giờ. TikTok và Threads chạy cùng lúc. Giờ theo {overview?.timezone || 'Asia/Ho_Chi_Minh (UTC+7)'}.
         </DialogDescription>
       </DialogHeader>
       <DialogBody className="flex flex-col gap-5">
@@ -112,10 +115,12 @@ function ScheduleBody() {
               <h3 className="text-sm font-semibold">Khung giờ</h3>
               {current.slots.length === 0 && <p className="rounded-lg border border-dashed px-3 py-4 text-center text-sm text-muted-foreground">Chưa có khung giờ nào cho {PLATFORMS[platform].label}.</p>}
               {current.slots.length > 0 && (
-                <ul className="grid gap-2 sm:grid-cols-2" data-testid="slot-list">
+                <ul className="flex flex-col gap-2" data-testid="slot-list">
                   {current.slots.map(slot => (
-                    <li key={slot.time} className={cn('flex items-center gap-3 rounded-lg border px-3 py-2', !slot.enabled && 'bg-muted/40')}>
-                      <span className={cn('text-base font-semibold tabular-nums', !slot.enabled && 'text-muted-foreground line-through')}>{slot.time}</span>
+                    <li key={slot.time} className={cn('flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border px-3 py-2', !slot.enabled && 'bg-muted/40')}>
+                      <span className={cn('w-14 text-base font-semibold tabular-nums', !slot.enabled && 'text-muted-foreground line-through')}>{slot.time}</span>
+                      <SlotMonths platform={platform} slot={slot}
+                        onChange={months => updatePlatform({ slots: current.slots.map(item => (item.time === slot.time ? { ...item, months } : item)) })} />
                       <span className="ml-auto flex items-center gap-1.5">
                         <Switch checked={slot.enabled} aria-label={`Bật khung giờ ${slot.time}`}
                           onCheckedChange={value => updatePlatform({ slots: current.slots.map(item => (item.time === slot.time ? { ...item, enabled: value } : item)) })} />
@@ -182,6 +187,54 @@ function ScheduleBody() {
   );
 }
 
+/** The months a slot scans: chips, and a picker with "Tháng mới nhất" plus the platform's months. */
+function SlotMonths({ platform, slot, onChange }: { platform: PlatformKey; slot: ScheduleSlot; onChange: (months: string[]) => void }) {
+  const months = useQuery({ queryKey: ['rd-months', platform], queryFn: () => fetchMonths(platform), staleTime: 60_000 });
+  const choices = [LATEST_MONTH, ...(months.data?.months ?? []).map(month => month.thang).filter(thang => MONTH_PATTERN.test(thang))];
+  const toggle = (value: string, checked: boolean) => {
+    const next = checked ? [...slot.months, value] : slot.months.filter(item => item !== value);
+    if (next.length) onChange(normalizeMonths(next));
+  };
+  return (
+    <span className="flex min-w-0 flex-1 flex-wrap items-center gap-1.5" data-testid={`slot-months-${slot.time}`}>
+      {slot.months.map(value => (
+        <span key={value} className={cn('rounded-md px-1.5 py-0.5 text-xs font-medium', value === LATEST_MONTH ? 'bg-primary/12 text-primary' : 'bg-muted text-foreground/80')}>
+          {slotMonthLabel(value)}
+        </span>
+      ))}
+      <PopoverPrimitive.Root>
+        <PopoverPrimitive.Trigger asChild>
+          <Button variant="ghost" size="sm" className="h-7 px-2 text-xs" aria-label={`Chọn tháng cho ${slot.time}`}>
+            <CalendarRangeIcon /> Chọn tháng
+          </Button>
+        </PopoverPrimitive.Trigger>
+        <PopoverPrimitive.Portal>
+          <PopoverPrimitive.Content align="start" sideOffset={6} className="z-50 w-64 rounded-lg border bg-popover p-1 text-popover-foreground shadow-lg">
+            <p className="px-2 pb-1 pt-1.5 text-xs text-muted-foreground">Quét lần lượt các tháng đã chọn lúc {slot.time}.</p>
+            <ul className="max-h-72 overflow-y-auto" aria-label={`Tháng quét lúc ${slot.time}`}>
+              {months.isPending && <li className="px-2 py-2 text-xs text-muted-foreground">Đang tải danh sách tháng…</li>}
+              {choices.map(value => {
+                const checked = slot.months.includes(value);
+                const id = `month-${slot.time}-${value}`;
+                const count = months.data?.months.find(month => month.thang === value)?.rows;
+                return (
+                  <li key={value}>
+                    <label htmlFor={id} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 text-sm hover:bg-accent">
+                      <Checkbox id={id} checked={checked} disabled={checked && slot.months.length === 1} onCheckedChange={value2 => toggle(value, value2 === true)} />
+                      <span className="flex-1">{slotMonthLabel(value)}{value === LATEST_MONTH && <span className="block text-[11px] text-muted-foreground">Tự chuyển khi có tháng mới</span>}</span>
+                      {count !== undefined && <span className="text-xs tabular-nums text-muted-foreground">{count} link</span>}
+                    </label>
+                  </li>
+                );
+              })}
+            </ul>
+          </PopoverPrimitive.Content>
+        </PopoverPrimitive.Portal>
+      </PopoverPrimitive.Root>
+    </span>
+  );
+}
+
 function OptionSwitch({ label, hint, checked, onChange, className }: { label: string; hint?: string; checked: boolean; onChange: (value: boolean) => void; className?: string }) {
   const id = useId();
   return (
@@ -211,6 +264,7 @@ function RunList({ runs }: { runs: ScheduleOverview['runs'] }) {
               <Badge variant={status.tone}>{status.label}</Badge>
             </span>
             <span className="min-w-0 flex-1 text-muted-foreground">
+              {run.sheet && MONTH_PATTERN.test(run.sheet) && <b className="mr-1 font-medium text-foreground">{slotMonthLabel(run.sheet)}:</b>}
               {run.message}
               {counts && <span className="mt-0.5 block text-xs text-foreground/80 tabular-nums">{counts}</span>}
             </span>

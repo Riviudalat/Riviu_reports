@@ -10,14 +10,16 @@ scan options to use. At a slot the server, for that platform:
    pages follow it live over `/ws` like a manual scan,
 3. never pushes to Google: "Tạo sheet" stays a manual admin action.
 
-With `RIVIU_STORAGE=postgres` step 1 is skipped: the scan covers the newest month of the
-platform's posts in Riviu Data (`scan_service.resolve_store_month`).
+With `RIVIU_STORAGE=postgres` step 1 is skipped: each slot scans its `months` of the platform's
+posts in Riviu Data one after another ("latest" is the newest month,
+`scan_service.resolve_store_month`), and the platforms run side by side, each in its own scan
+lane (`scan_state.lane`). On workbook storage the platforms run one after the other.
 
 Option `retryFailed` (default on) adds the scan's retry pass over transient failures; a scheduled
 run interrupted by a restart is resumed at startup (riviu/scan_journal.py) and still never pushes.
 
-A slot is skipped (and logged) when a scan or a source operation is already running, and a failed
-sync records the error and skips the scan. From the sync until the scan task exists the run holds
+A slot is skipped (and logged) when a scan of that platform (any scan, on workbook storage) or a
+source operation is already running, and a failed sync records the error and skips the scan. From the sync until the scan task exists the run holds
 `scan_state.scan_starting()`, so a manual start or source change cannot slip in between.
 
 The loop wakes once a minute. Slots missed while the server was down (or the loop was stalled for
@@ -34,6 +36,7 @@ import logging
 import os
 import re
 import secrets
+import threading
 from datetime import datetime, timedelta, timezone
 
 from riviu import scan_service, scan_settings, scan_state
@@ -58,6 +61,10 @@ MAX_BODY_BYTES = 16384
 # current minute's slots; the minutes in between are skipped, never replayed.
 CATCH_UP_LIMIT = timedelta(minutes=3)
 SLOT_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
+# Riviu Data months a slot scans: "latest" (the newest month, followed as months are added) or "YYYY-MM".
+LATEST_MONTH = "latest"
+MONTH_PATTERN = re.compile(r"^\d{4}-(?:0[1-9]|1[0-2])$")
+MAX_SLOT_MONTHS = 24
 SCRAPE_MODES = scan_settings.SCRAPE_MODES
 WORKER_CHOICES = scan_settings.WORKER_CHOICES
 
@@ -115,6 +122,28 @@ def _normalize_options(platform, raw):
     return {"workers": workers, "scrapeMode": mode, **flags}
 
 
+def _normalize_months(raw):
+    if raw is None:
+        return [LATEST_MONTH]
+    if not isinstance(raw, list) or len(raw) > MAX_SLOT_MONTHS:
+        raise _invalid(f"Mỗi khung giờ quét tối đa {MAX_SLOT_MONTHS} tháng.")
+    months = []
+    for value in raw:
+        if not isinstance(value, str) or not (value == LATEST_MONTH or MONTH_PATTERN.match(value)):
+            raise _invalid("Tháng của khung giờ phải là \"latest\" hoặc dạng YYYY-MM.")
+        if value not in months:
+            months.append(value)
+    if not months:
+        raise _invalid("Mỗi khung giờ cần ít nhất một tháng để quét.")
+    # The newest month first, then the chosen months newest first.
+    return sorted(months, key=lambda value: (value != LATEST_MONTH, "" if value == LATEST_MONTH else _desc(value)))
+
+
+def _desc(month):
+    year, number = month.split("-")
+    return f"{9999 - int(year):04d}-{99 - int(number):02d}"
+
+
 def _normalize_slots(raw):
     if raw is None:
         return []
@@ -133,12 +162,12 @@ def _normalize_slots(raw):
         if time_text in seen:
             raise _invalid(f"Trùng khung giờ {time_text}.")
         seen.add(time_text)
-        slots.append({"time": time_text, "enabled": enabled})
+        slots.append({"time": time_text, "enabled": enabled, "months": _normalize_months(item.get("months"))})
     return sorted(slots, key=lambda slot: slot["time"])
 
 
 def normalize_schedule(payload):
-    """`{"version": 1, "platforms": {platform: {"slots": [{"time": "HH:MM", "enabled": bool}],
+    """`{"version": 1, "platforms": {platform: {"slots": [{"time": "HH:MM", "enabled": bool, "months": ["latest" | "YYYY-MM"]}],
     "options": {"workers", "scrapeMode", "useProxy", "useSession", "retryFailed"}}}}`; raises ValueError."""
     if not isinstance(payload, dict) or not isinstance(payload.get("platforms", {}), dict):
         raise _invalid()
@@ -187,11 +216,16 @@ def load_runs(base_dir=None):
         return []
 
 
+# Platforms record their runs side by side (Riviu Data storage): one read-modify-write at a time.
+_RUNS_LOCK = threading.Lock()
+
+
 def record_run(entry, base_dir=None):
-    runs = [entry] + [run for run in load_runs(base_dir) if run.get("id") != entry.get("id")]
-    path = runs_path(base_dir)
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    write_json_atomic(path, {"runs": runs[:RUN_LOG_LIMIT]})
+    with _RUNS_LOCK:
+        runs = [entry] + [run for run in load_runs(base_dir) if run.get("id") != entry.get("id")]
+        path = runs_path(base_dir)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        write_json_atomic(path, {"runs": runs[:RUN_LOG_LIMIT]})
     return entry
 
 
@@ -231,6 +265,14 @@ def due_slots(schedule, previous, now):
             if slot["enabled"] and slot["time"] in by_time:
                 due.append((platform, slot["time"], by_time[slot["time"]]))
     return sorted(due, key=lambda item: (item[2], list(PLATFORMS).index(item[0])))
+
+
+def slot_months(schedule, platform, time_text):
+    """The months the platform's slot at `time_text` scans (the newest month if the slot is gone)."""
+    for slot in schedule["platforms"].get(platform, {}).get("slots", []):
+        if slot["time"] == time_text:
+            return list(slot.get("months") or [LATEST_MONTH])
+    return [LATEST_MONTH]
 
 
 def next_run_at(schedule, platform, now):
@@ -334,7 +376,8 @@ class Scheduler:
         self.clock = clock
         self.sleep = sleep
         self._sync = sync
-        self.runner = None
+        # Running batch of slots per lane: one key per platform on Riviu Data storage, None otherwise.
+        self.runners = {}
         self.previous_tick = None
 
     async def sync(self, url, platform):
@@ -344,8 +387,15 @@ class Scheduler:
 
         return await sync_google_sheet_source(url, platform, activate=False)
 
-    def running(self):
-        return bool(self.runner and not self.runner.done())
+    @property
+    def runner(self):
+        """The most recently started batch (any lane)."""
+        return next(reversed(self.runners.values()), None)
+
+    def running(self, key=None):
+        """A batch of `key`'s lane (of any lane when None) is still running."""
+        tasks = list(self.runners.values()) if key is None else [self.runners.get(key)]
+        return any(task is not None and not task.done() for task in tasks)
 
     async def tick(self):
         now = self.clock()
@@ -353,12 +403,14 @@ class Scheduler:
         self.previous_tick = now
         if not due:
             return None
-        if self.running():
-            for platform, slot, scheduled in due:
-                await self.record(platform, slot, scheduled, "skipped", "Lượt tự động trước vẫn đang chạy.")
-            return None
-        self.runner = asyncio.create_task(self.run_jobs(due))
-        return self.runner
+        started = None
+        for key, jobs in _lane_groups(due).items():
+            if self.running(key):
+                for platform, slot, scheduled in jobs:
+                    await self.record(platform, slot, scheduled, "skipped", "Lượt tự động trước vẫn đang chạy.")
+                continue
+            self.runners[key] = started = asyncio.create_task(self.run_jobs(jobs))
+        return started
 
     async def run_forever(self):
         while True:
@@ -371,15 +423,40 @@ class Scheduler:
             await self.sleep(seconds_until_next_minute(self.clock()))
 
     async def run_jobs(self, jobs):
-        # Sequential: a second platform due at the same minute starts after the first scan ends.
+        """Each lane's slots one after another; on Riviu Data storage the lanes (platforms) run side
+        by side, on workbook storage a second platform due at the same minute waits for the first."""
+        groups = _lane_groups(jobs)
+        await asyncio.gather(*(self._run_sequence(group) for group in groups.values()))
+
+    async def _run_sequence(self, jobs):
         for platform, slot, scheduled in jobs:
             try:
-                await self.run_job(platform, slot, scheduled)
+                if store_config.ACTIVE.postgres:
+                    await self.run_months(platform, slot, scheduled)
+                else:
+                    await self.run_job(platform, slot, scheduled)
             except asyncio.CancelledError:
                 raise
             except Exception as error:
                 logger.exception("Lịch tự động %s %s lỗi", platform, slot)
                 await self.record(platform, slot, scheduled, "failed", f"Lỗi kỹ thuật: {error}")
+
+    async def run_months(self, platform, slot, scheduled):
+        """The slot's Riviu Data months, newest first; "latest" is resolved now and never scanned twice."""
+        months = slot_months(await asyncio.to_thread(load_schedule), platform, slot)
+        done = set()
+        for month in months:
+            try:
+                thang = await scan_service.resolve_store_month(platform, "" if month == LATEST_MONTH else month)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                await self.record(platform, slot, scheduled, "failed", f"Không xác định được tháng để quét: {error}")
+                continue
+            if thang in done:
+                continue
+            done.add(thang)
+            await self.run_job(platform, slot, scheduled, thang=thang)
 
     async def record(self, platform, slot, scheduled, status, message, started=None, **extra):
         entry = {
@@ -393,22 +470,22 @@ class Scheduler:
             logger.exception("Lịch tự động: không ghi được nhật ký chạy")
         level = LOG_LEVELS.get(status, "")
         label = PLATFORMS[platform].label
-        await scan_state.manager.broadcast_log(f"Lịch tự động {label} {slot}: {message}", level=level)
+        await scan_state.lane(platform).manager.broadcast_log(f"Lịch tự động {label} {slot}: {message}", level=level)
         return entry
 
-    async def run_job(self, platform, slot, scheduled=None):
+    async def run_job(self, platform, slot, scheduled=None, thang=None):
         started = self.clock()
         scheduled = scheduled or started
-        if scan_state.source_mutation_blocked():
+        if scan_state.start_blocked(platform):
             return await self.record(platform, slot, scheduled, "skipped", "Bỏ qua: đang có phiên quét hoặc thao tác dữ liệu khác.", started)
         label = PLATFORMS[platform].label
         # Taken right after the check (no await in between) and held until the scan task exists:
         # a manual start or source change in the meantime is refused as busy.
-        with scan_state.scan_starting():
+        with scan_state.scan_starting(platform):
             options = (await asyncio.to_thread(load_schedule))["platforms"][platform]["options"]
             if store_config.ACTIVE.postgres:
-                # Riviu Data holds the post list: nothing to download; the newest month is scanned.
-                file_id, sheet = scan_service.RIVIU_DATA_FILE_ID, ""
+                # Riviu Data holds the post list: nothing to download; `thang` (default the newest month).
+                file_id, sheet = scan_service.RIVIU_DATA_FILE_ID, thang or ""
             else:
                 preferences, source, url = await asyncio.to_thread(platform_source, platform)
                 if not url:
@@ -441,7 +518,7 @@ class Scheduler:
             await scan_state.manager.broadcast_status(scan_state.manager.last_status)
         # Wait without letting a scheduler shutdown cancel the scan itself.
         await asyncio.wait({task})
-        manager = scan_state.manager
+        manager = scan_state.lane(platform).manager
         status = manager.last_status if manager.context.get("runId") == run_context["runId"] else {}
         result, counts = _result_from_status(status, task)
         messages = {
@@ -456,6 +533,14 @@ class Scheduler:
             platform, slot, scheduled, result, messages[result], started,
             fileId=file_id, sheet=scan_options["sheet_name"], counts=counts,
         )
+
+
+def _lane_groups(jobs):
+    """Due slots per scan lane, in order: by platform on Riviu Data storage, all together otherwise."""
+    groups = {}
+    for job in jobs:
+        groups.setdefault(job[0] if store_config.ACTIVE.postgres else None, []).append(job)
+    return groups
 
 
 SCHEDULER = Scheduler()

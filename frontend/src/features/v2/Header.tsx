@@ -9,7 +9,7 @@ import { ThemeToggle } from '@/components/theme';
 import { PlatformIcon } from '@/components/common';
 import { PLATFORMS, PLATFORM_KEYS } from '@/lib/platforms';
 import { cn } from '@/lib/utils';
-import { canAdmin, openModal, useApp } from '@/state/app';
+import { canAdmin, openModal, platformScanBusy, useApp } from '@/state/app';
 import { selectRdPlatform } from '@/state/riviuData';
 
 export function Brand() {
@@ -18,6 +18,17 @@ export function Brand() {
       <img src={`${import.meta.env.BASE_URL}logo.png`} alt="Riviu" className="h-7 w-auto sm:h-8" />
       <span className="text-base font-extrabold tracking-tight text-foreground sm:text-lg">Reports</span>
     </a>
+  );
+}
+
+function BusyDot({ platform }: { platform: (typeof PLATFORM_KEYS)[number] }) {
+  const busy = useApp(state => platformScanBusy(state, platform));
+  if (!busy) return null;
+  return (
+    <span className="relative flex size-2 shrink-0" title={`Đang quét ${PLATFORMS[platform].label}`} data-testid={`scan-dot-${platform}`}>
+      <span className="absolute inline-flex size-full animate-ping rounded-full bg-primary opacity-60" />
+      <span className="relative inline-flex size-2 rounded-full bg-primary" />
+    </span>
   );
 }
 
@@ -40,6 +51,7 @@ export function PlatformSwitch({ className }: { className?: string }) {
           >
             <PlatformIcon platform={key} />
             {PLATFORMS[key].label}
+            <BusyDot platform={key} />
           </button>
         );
       })}

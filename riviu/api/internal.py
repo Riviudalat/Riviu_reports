@@ -8,7 +8,7 @@ POST /internal/scan
     202  any other trigger: accepted, the scan runs in the background
     401  missing or unknown bearer token     403  token without scan:run, or a browser request
     404  scan_run_id unknown / finished, or the Postgres backend is off
-    409  a scan of that platform (advisory lock) or any scan in this process is running
+    409  a scan of that platform is running (advisory lock, or its lane in this process)
     422  invalid body       500 timer scan failed (phase loi)     503 timer scan cancelled
 
 The middleware lets these paths through without a session cookie; the bearer token is the

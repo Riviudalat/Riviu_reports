@@ -203,7 +203,7 @@ describe('admin page (/admin)', () => {
     act(() => handleSocketMessage({ type: 'status', ...ctx, data: { phase: 'running', retryPass: true, retryWaitSeconds: 300, total: 2, processed: 2, success: 1, retryCount: 1 } }));
     expect(screen.getByTestId('progress-text')).toHaveTextContent(/Chờ quét lại 1 link lỗi lúc \d\d:\d\d \(còn [45]:\d\d\)/);
     await userEvent.click(screen.getByTestId('skip-retry'));
-    expect(sent.at(-1)).toEqual({ action: 'skip_retry' });
+    expect(sent.at(-1)).toEqual({ action: 'skip_retry', platform: 'tiktok' });
     expect(screen.getByTestId('skip-retry')).toBeDisabled();
     act(() => handleSocketMessage({ type: 'status', ...ctx, data: { phase: 'completed', done: true, total: 2, processed: 2, success: 1, error: 1 } }));
     expect(screen.queryByTestId('skip-retry')).not.toBeInTheDocument();
@@ -220,10 +220,15 @@ describe('admin page (/admin)', () => {
     expect(within(dialog).getByTestId('save-schedule')).toBeDisabled();
     fireEvent.change(within(dialog).getByLabelText('Giờ mới'), { target: { value: '08:30' } });
     await userEvent.click(within(dialog).getByRole('button', { name: /Thêm giờ/ }));
+    // The 21:00 slot also scans October 2026, besides the newest month.
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Chọn tháng cho 21:00' }));
+    await userEvent.click(await screen.findByRole('checkbox', { name: /Tháng 10\/2026/ }));
+    expect(within(dialog).getByTestId('slot-months-21:00')).toHaveTextContent('Tháng mới nhấtTháng 10/2026');
+    await userEvent.keyboard('{Escape}');
     await userEvent.click(within(dialog).getByTestId('save-schedule'));
     await vi.waitFor(() => expect(calls.some(call => call.url === '/schedule' && call.init?.method === 'POST')).toBe(true));
     const body = JSON.parse(String(calls.find(call => call.init?.method === 'POST' && call.url === '/schedule')?.init?.body));
-    expect(body.platforms.tiktok.slots).toEqual([{ time: '08:30', enabled: true }, { time: '21:00', enabled: true }]);
+    expect(body.platforms.tiktok.slots).toEqual([{ time: '08:30', enabled: true, months: ['latest'] }, { time: '21:00', enabled: true, months: ['latest', '2026-10'] }]);
     expect(body.platforms.threads.options.scrapeMode).toBe('hybrid');
   });
 });

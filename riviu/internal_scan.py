@@ -29,7 +29,7 @@ TRIGGERS = ("timer", "thu_cong")
 
 
 class ScanBusy(Exception):
-    """Another scan of this platform (or any scan in this process) is running."""
+    """Another scan of this platform is running (or a source change holds every platform)."""
 
 
 class ScanRequestError(ValueError):
@@ -106,10 +106,11 @@ SCANNERS = {"tiktok": scan_tiktok, "threads": scan_threads}
 
 async def start_scan(request: ScanRequest, *, wait: bool):
     """Claim the platform, then run (wait=True: until done, returning the summary) or return at once."""
-    if scan_state.source_mutation_blocked():
-        raise ScanBusy("Máy quét đang bận (đang có phiên quét hoặc thao tác dữ liệu khác).")
-    # SCAN_STARTING is set before the first await, so no other start slips in meanwhile.
-    with scan_state.scan_starting():
+    if scan_state.start_blocked(request.platform):
+        raise ScanBusy("Máy quét đang bận (đang có phiên quét nền tảng này hoặc thao tác dữ liệu khác).")
+    # The lane's start hold is set before the first await, so no other start slips in meanwhile.
+    lane = scan_state.lane(request.platform)
+    with scan_state.scan_starting(request.platform):
         store = make_store(request.platform)
         month_start, _ = parse_thang(request.thang)
         lock_conn = await store.connect()
@@ -127,9 +128,9 @@ async def start_scan(request: ScanRequest, *, wait: bool):
         except BaseException:
             await lock_conn.close()
             raise
-        run_context = scan_state.manager.begin_run(request.platform, f"riviu-data:{request.platform}", request.thang)
+        run_context = lane.manager.begin_run(request.platform, f"riviu-data:{request.platform}", request.thang)
         task = asyncio.create_task(_run_scan(store, lock_conn, request, run_id))
-        scan_state.SCRAPE_TASK = task
+        lane.task = task
     log.info("scan %s/%s started: run %s (%s, %s)", request.platform, request.thang, run_id, request.trigger, run_context["runId"])
     if not wait:
         return {"scan_run_id": run_id, "platform": request.platform, "thang": request.thang, "phase": postgres.PHASE_RUNNING}
@@ -145,7 +146,7 @@ async def start_scan(request: ScanRequest, *, wait: bool):
 async def _run_scan(store, lock_conn, request, run_id):
     from riviu.scan_service import RunEvents
 
-    manager = scan_state.manager
+    manager = scan_state.lane(request.platform).manager
     events = RunEvents(manager)
     session = None
     phase, stop_reason, error_message = postgres.PHASE_FAILED, None, None

@@ -5,13 +5,13 @@ import { Button } from '@/components/ui/button';
 import { Input, Skeleton } from '@/components/ui/misc';
 import { Picker, type PickerOption } from '@/components/ui/picker';
 import { formatNumber, formatResultNumber } from '@/lib/format';
-import { platformConfig, type PlatformKey } from '@/lib/platforms';
+import { PLATFORM_KEYS, platformConfig, type PlatformKey } from '@/lib/platforms';
 import {
   columnTotals, filterRows, lastUpdateText, linkKind, metricColumns, scanStatusView, shortLink, shortUpdate, type LinkKind, type RdRow, type ScanStatusTone,
 } from '@/lib/riviuData';
 import { scanIsBusy, viewerScanText } from '@/lib/scan';
 import { cn } from '@/lib/utils';
-import { notify, openModal, useApp } from '@/state/app';
+import { notify, openModal, platformScanBusy, useApp } from '@/state/app';
 import { monthsOf, refreshView, selectThang } from '@/state/riviuData';
 
 // ---- Report context: the month picker, its freshness and export ------------------------
@@ -20,11 +20,10 @@ import { monthsOf, refreshView, selectThang } from '@/state/riviuData';
 export function ScanStatePill() {
   const busy = useApp(state => scanIsBusy(state.scan.phase));
   const wait = useApp(state => state.scan.retryWait);
-  const runPlatform = useApp(state => state.scan.runContext?.platform);
-  const active = useApp(state => state.activePlatform);
-  if (!busy) return null;
-  const other = runPlatform && runPlatform !== active && (runPlatform === 'tiktok' || runPlatform === 'threads') ? platformConfig(runPlatform).label : '';
-  const text = wait ? viewerScanText(wait) : other ? `Đang cập nhật số liệu ${other}…` : viewerScanText(null);
+  // The other platform scans in its own lane: say so while the shown one is idle.
+  const otherBusy = useApp(state => PLATFORM_KEYS.find(key => key !== state.activePlatform && platformScanBusy(state, key)));
+  if (!busy && !otherBusy) return null;
+  const text = busy ? viewerScanText(wait) : `Đang cập nhật số liệu ${platformConfig(otherBusy!).label}…`;
   return (
     <span role="status" data-testid="scan-state" className="inline-flex max-w-full items-center gap-2 rounded-full bg-accent px-2.5 py-0.5 text-xs font-medium text-accent-foreground">
       <span className="relative flex size-2 shrink-0">

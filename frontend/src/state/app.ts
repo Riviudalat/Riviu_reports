@@ -142,7 +142,13 @@ export interface AppState {
   proxyCount: number;
   proxyText: string;
   workspaceTab: WorkspaceTab;
+  /** The scan of the shown platform (every scan on workbook storage). */
   scan: ScanState;
+  /**
+   * Riviu Data storage scans TikTok and Threads side by side: the scan of each platform not shown
+   * right now, kept up to date from the socket and swapped in when the admin switches platform.
+   */
+  parkedScans: Partial<Record<PlatformKey, ScanState>>;
   logs: LogEntry[];
   connection: '' | 'reconnecting' | 'lost';
   preview: PreviewView;
@@ -185,6 +191,7 @@ function initialState(): AppState {
     proxyText: '',
     workspaceTab: 'sheet',
     scan: initialScanState(),
+    parkedScans: {},
     logs: [],
     connection: '',
     preview: { kind: 'loading' },
@@ -973,7 +980,62 @@ export function handleSessionSnapshot(session: SessionSnapshot) {
   if (session.running) set({ workspaceTab: 'live' });
 }
 
+/** The platform lane a socket event belongs to when it is not the shown platform (Riviu Data storage). */
+function parkedLaneOf(message: SocketMessage, state: AppState = get()): PlatformKey | null {
+  if (state.storage !== 'postgres') return null;
+  const platform = message.type === 'session' ? (message.data as SessionSnapshot | undefined)?.platform ?? message.platform : message.platform;
+  return platform && isPlatform(platform) && platform !== state.activePlatform ? platform : null;
+}
+
+/** The same reducers as the shown scan, applied to another platform's parked scan. */
+function handleParkedMessage(platform: PlatformKey, message: SocketMessage) {
+  const label = PLATFORMS[platform].label;
+  let scan = get().parkedScans[platform] ?? initialScanState();
+  if (message.type === 'session') {
+    scan = applySessionSnapshot(scan, (message.data || {}) as SessionSnapshot, { activePlatform: platform, currentFileId: RIVIU_DATA_FILE_ID }).state;
+  } else {
+    if (shouldApplyRunContext(message)) scan = applyRunContextPure(scan, message).state;
+    if (message.type === 'log') {
+      addLog(`[${label}] ${message.message || ''}`, { level: message.level || '', details: message.details || null });
+    } else if (message.type === 'status') {
+      const { state: next, finished } = applyStatus(scan, (message.data || {}) as ProgressData);
+      scan = next;
+      if (finished) {
+        addLog(`[${label}] ${terminalLogLine(finished.phase as ScanState['phase'], finished.stopReason)}`);
+        storageHooks.numbersSaved?.(scan.runContext, true);
+      }
+    } else if (message.type === 'data' && message.row) {
+      scan = appendResult(scan, message.row, message, platform);
+    } else if (message.type === 'duplicates') {
+      scan = setDuplicates(scan, message.data);
+    }
+  }
+  set(state => ({ parkedScans: { ...state.parkedScans, [platform]: scan } }));
+}
+
+/** Show `platform`'s scan and park the one shown so far (Riviu Data storage). */
+export function swapShownScan(platform: PlatformKey) {
+  set(state => {
+    if (platform === state.activePlatform) return {};
+    const parkedScans = { ...state.parkedScans, [state.activePlatform]: state.scan };
+    const scan = parkedScans[platform] ?? initialScanState();
+    delete parkedScans[platform];
+    return { activePlatform: platform, scan, parkedScans };
+  });
+}
+
+/** A platform's scan is busy, whether it is shown or parked. */
+export function platformScanBusy(state: AppState, platform: PlatformKey): boolean {
+  const scan = platform === state.activePlatform ? state.scan : state.parkedScans[platform];
+  return Boolean(scan && scanIsBusy(scan.phase));
+}
+
 export function handleSocketMessage(message: SocketMessage) {
+  const parked = parkedLaneOf(message);
+  if (parked) {
+    handleParkedMessage(parked, message);
+    return;
+  }
   if (message.type === 'session') {
     handleSessionSnapshot((message.data || {}) as SessionSnapshot);
     return;
@@ -1141,7 +1203,7 @@ export function sendScanCommand(payload: Record<string, unknown>): boolean {
 export function skipRetryWait() {
   const scan = get().scan;
   if (!canAdmin() || !scan.retryWait || scan.retrySkipRequested) return;
-  if (!sendScanCommand({ action: 'skip_retry' })) return;
+  if (!sendScanCommand({ action: 'skip_retry', platform: get().activePlatform })) return;
   set(s => ({ scan: { ...s.scan, retrySkipRequested: true } }));
   addLog('Đã gửi lệnh bỏ qua quét lại.');
 }
@@ -1149,7 +1211,7 @@ export function skipRetryWait() {
 export function cancelScraping() {
   if (!canAdmin()) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) { notify('Lỗi: Chưa kết nối được server.', 'error'); return; }
-  ws.send(JSON.stringify({ action: 'cancel' }));
+  ws.send(JSON.stringify({ action: 'cancel', platform: get().activePlatform }));
   set(s => ({ scan: { ...s.scan, phase: 'cancelling' } }));
   addLog('Đã gửi lệnh hủy quét.');
 }

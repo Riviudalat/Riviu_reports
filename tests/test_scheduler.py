@@ -43,10 +43,13 @@ def config(**platforms):
 
 def test_schedule_normalizes_sorts_and_fills_defaults():
     schedule = scheduler.normalize_schedule({"platforms": {
-        "tiktok": {"slots": [{"time": "17:30", "enabled": False}, {"time": "08:00"}], "options": {"workers": 20, "scrapeMode": "hybrid", "useProxy": True, "useSession": False, "retryFailed": False}},
+        "tiktok": {"slots": [{"time": "17:30", "enabled": False, "months": ["2025-09", "latest", "2026-09", "2025-09"]}, {"time": "08:00"}],
+                   "options": {"workers": 20, "scrapeMode": "hybrid", "useProxy": True, "useSession": False, "retryFailed": False}},
     }})
     assert schedule == {"version": 1, "platforms": {
-        "tiktok": {"slots": [{"time": "08:00", "enabled": True}, {"time": "17:30", "enabled": False}],
+        # Months: the newest month by default; "latest" first, then newest first, without repeats.
+        "tiktok": {"slots": [{"time": "08:00", "enabled": True, "months": ["latest"]},
+                             {"time": "17:30", "enabled": False, "months": ["latest", "2026-09", "2025-09"]}],
                    "options": {"workers": 20, "scrapeMode": "hybrid", "useProxy": True, "useSession": False, "retryFailed": False}},
         "threads": {"slots": [], "options": {"workers": 10, "scrapeMode": "hybrid", "useProxy": False, "useSession": False, "retryFailed": True}},
     }}
@@ -58,6 +61,9 @@ def test_schedule_normalizes_sorts_and_fills_defaults():
     ({"tiktok": {"slots": [{"time": "08:00 "}]}}, "HH:MM"),
     ({"tiktok": {"slots": [{"time": "08:00"}, {"time": "08:00", "enabled": False}]}}, "Trùng"),
     ({"tiktok": {"slots": [{"time": "08:00", "enabled": "yes"}]}}, "không hợp lệ"),
+    ({"tiktok": {"slots": [{"time": "08:00", "months": []}]}}, "ít nhất một tháng"),
+    ({"tiktok": {"slots": [{"time": "08:00", "months": ["2026-13"]}]}}, "YYYY-MM"),
+    ({"tiktok": {"slots": [{"time": "08:00", "months": "latest"}]}}, "tối đa"),
     ({"tiktok": {"slots": [{"time": f"{hour:02d}:00"} for hour in range(24)] + [{"time": "00:30"}]}}, "tối đa"),
     ({"tiktok": {"options": {"workers": 7}}}, "luồng"),
     ({"tiktok": {"options": {"workers": True}}}, "luồng"),
@@ -377,3 +383,45 @@ def test_schedule_api_is_admin_only_and_validates(server):
 def test_scheduler_loop_runs_only_in_server_mode(tmp_path, monkeypatch, server):
     # The `server` fixture's client started the app lifespan in server mode.
     assert scheduler._LOOP_TASK is not None and not scheduler._LOOP_TASK.done()
+
+
+def test_riviu_data_slots_scan_their_months_with_the_platforms_side_by_side(tmp_path, monkeypatch):
+    from riviu.store import config as store_config
+
+    monkeypatch.setattr(backend, "EXCEL_DIR", str(tmp_path))
+    monkeypatch.setattr(store_config, "ACTIVE", store_config.StoreConfig(backend="postgres", database_url="postgresql://riviu_scanner@fake/db"))
+    scheduler.save_schedule({"platforms": {
+        "tiktok": {"slots": [{"time": "08:15", "months": ["2026-09", "latest", "2026-10"]}]},
+        "threads": {"slots": [{"time": "08:15"}]},
+    }}, str(tmp_path))
+    events = []
+
+    async def newest(platform, value):
+        return value or "2026-10"
+
+    async def prepare(payload):
+        return None, scan_service.scan_options(platform=payload["platform"], file_id=payload["file_id"], sheet_name=payload["sheet_name"])
+
+    async def runner(target_path, options, run_context=None):
+        platform = options["platform"]
+        events.append(("start", platform, options["sheet_name"], scan_state.scan_running("tiktok"), scan_state.scan_running("threads")))
+        await asyncio.sleep(0.02)
+        events.append(("end", platform, options["sheet_name"]))
+        await scan_state.lane(platform).manager.broadcast_status({"done": True, "phase": "completed"})
+
+    monkeypatch.setattr(scan_service, "resolve_store_month", newest)
+    monkeypatch.setattr(scan_service, "prepare_scan_start", prepare)
+    monkeypatch.setattr(scan_service, "run_scraper_safely", runner)
+
+    asyncio.run(scheduler.Scheduler().run_jobs([("tiktok", "08:15", at(8, 15)), ("threads", "08:15", at(8, 15))]))
+
+    starts = [event[1:3] for event in events if event[0] == "start"]
+    # TikTok: the newest month once (latest = 2026-10), then 2026-09; Threads: its newest month.
+    assert [month for platform, month in starts if platform == "tiktok"] == ["2026-10", "2026-09"]
+    assert [month for platform, month in starts if platform == "threads"] == ["2026-10"]
+    # Both platforms started before either ended, each in its own lane.
+    assert {event[1] for event in events[:2] if event[0] == "start"} == {"tiktok", "threads"}
+    assert events[1][3:] == (True, True)
+    runs = scheduler.load_runs()
+    assert sorted((run["platform"], run["sheet"], run["status"]) for run in runs) == [
+        ("threads", "2026-10", "completed"), ("tiktok", "2026-09", "completed"), ("tiktok", "2026-10", "completed")]
