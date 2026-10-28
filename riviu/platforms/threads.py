@@ -90,7 +90,7 @@ THREADS_HTTP_JITTER = 0.4
 _pacer_clock = time.monotonic
 _pacer_sleep = asyncio.sleep
 # Suggested wait before scanning again after Threads answers HTTP 429.
-THREADS_RATE_LIMIT_WAIT_MINUTES = 15
+THREADS_RATE_LIMIT_WAIT_MINUTES = 10
 RATE_LIMIT_STOP_REASON = "rate_limit"
 
 
