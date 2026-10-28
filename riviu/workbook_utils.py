@@ -119,12 +119,16 @@ from riviu.workbook.partners import (  # noqa: F401
 )
 from riviu.workbook.naming import (  # noqa: F401
     data_sheet_name_for_summary_title,
+    default_data_sheet,
     find_data_sheet_names_in_workbook,
     hidden_sheet_names_in_workbook,
     is_result_sheet_name,
     is_result_sheet_timestamp_name,
     is_summary_sheet_name,
+    keep_or_newest_month_sheet,
     month_label_for_sheet_name,
+    month_sheet_key,
+    newest_month_sheet,
     resolve_summary_sheet,
     result_sheet_display_name,
     RESULT_SHEET_TIMESTAMP_RE,

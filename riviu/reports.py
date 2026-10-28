@@ -23,6 +23,7 @@ from openpyxl.utils.units import pixels_to_EMU
 
 from riviu import paths
 from riviu.workbook_utils import (
+    default_data_sheet,
     LAST_UPDATE_COLUMN,
     SINGLE_LINK_FILL_COLOR,
     VIDEO_LINK_FILL_COLOR,
@@ -394,7 +395,7 @@ def build_export_payload(target_path, selected_partners, apply_min_views, min_vi
 def _build_export_payload(snapshot, selected_partners, apply_min_views, min_views, requested_sheet_name="", platform="tiktok"):
     spec = get_platform(platform)
     data_sheets = find_data_sheet_names(snapshot)
-    report_sheet = clean_text(requested_sheet_name) or (data_sheets[0] if data_sheets else "")
+    report_sheet = clean_text(requested_sheet_name) or default_data_sheet(data_sheets)
     if report_sheet and report_sheet not in data_sheets:
         raise ValueError(f"Sheet {report_sheet} không tồn tại trong file.")
     available_partners = {

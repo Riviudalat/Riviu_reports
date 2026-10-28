@@ -2,6 +2,7 @@
 import asyncio
 import io
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,7 @@ from starlette.websockets import WebSocketDisconnect
 from riviu import app as backend
 from riviu import scan_service, server_context, source_files
 from riviu.api import google as google_api, security, sources as sources_api
+from riviu.workbook import naming
 from riviu.workbook_utils import (
     PLATFORMS,
     google_sheet_source_for_file,
@@ -241,6 +243,35 @@ def test_sync_activate_false_publishes_registered_source_without_activation(clie
     assert selection() == before and "sheet=New Data" in logs[0]
     activated = client.post("/sync-google-sheet", json={"url": data["url"]}).json()
     assert activated["success"] and selection() == (activated["file"], "New Data", "New Data")
+
+
+def test_sync_and_listing_open_the_newest_month_sheet_not_the_first_tab(client, source_backend, monkeypatch):
+    # Owner report: after "Nạp sheet" the TikTok source stayed on "Tháng 6", the Google Sheet's first tab.
+    monkeypatch.setattr(naming, "_today", lambda: date(2026, 10, 28))
+    tabs = ["Tháng 6", "Tháng 7", "Tháng 10", "Tổng kết tháng 10", "Tháng 9", "T10 12-10-2026-10-31"]
+
+    def download(base, url, sid, destination):
+        book = Workbook()
+        book.remove(book.active)
+        for title in tabs:
+            book.create_sheet(title).append(["Link", "Tên Kênh", "Đối tác", "LƯỢT XEM"])
+        book.save(destination)
+
+    monkeypatch.setattr(google_api, "fetch_google_spreadsheet_title", lambda _: "Months")
+    monkeypatch.setattr(google_api, "sync_download_google_sheet", download)
+    synced = client.post("/sync-google-sheet", json={"url": "https://docs.google.com/spreadsheets/d/M/edit", "platform": "tiktok", "activate": False}).json()
+    assert synced["currentSheet"] == synced["scanSheet"] == synced["defaultSheet"] == "Tháng 10"
+    listing = client.get("/list-files", params={"file_id": synced["file_id"], "platform": "tiktok"}).json()
+    assert listing["currentSheet"] == listing["defaultSheet"] == "Tháng 10"
+    selected = client.post("/select-file", json={"filename": synced["file_id"], "platform": "tiktok"}).json()
+    assert selected["sheet"] == selected["scanSheet"] == "Tháng 10"
+
+
+def test_scan_settings_round_trip_outside_server_mode(client):
+    # Desktop/source mode uses the same endpoint behind the local session cookie.
+    body = {"platforms": {"tiktok": {"workers": 3, "scrapeMode": "hybrid", "useProxy": True, "useSession": False}}}
+    assert client.post("/scan-settings", json=body).json()["success"]
+    assert client.get("/scan-settings").json()["platforms"]["tiktok"] == body["platforms"]["tiktok"]
 
 
 def test_upload_multipart_activate_false_preserves_current(client, source_backend):

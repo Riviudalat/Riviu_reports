@@ -37,6 +37,7 @@ from riviu.source_files import (
     validate_workbook,
 )
 from riviu.workbook_utils import (
+    default_data_sheet,
     build_workbook_rows,
     clean_text,
     download_google_sheet,
@@ -126,7 +127,8 @@ async def sync_google_sheet_source(source_url, platform, *, activate):
             context.google_io(sync_download_google_sheet, base_dir, source_url, spreadsheet_id, staged_path)
             preview = validate_workbook(staged_path)
             data_sheets = find_data_sheet_names(staged_path)
-            preview["currentSheet"] = data_sheets[0] if data_sheets else ""
+            # The newest month sheet ("Tháng 10"), not the Google Sheet's first tab.
+            preview["currentSheet"] = default_data_sheet(data_sheets)
             preview["dataSheets"] = data_sheets
             target_path = publish_new_workbook(staged_path, desired_path)
         finally:
@@ -151,6 +153,7 @@ async def sync_google_sheet_source(source_url, platform, *, activate):
         "dataSheets": preview.get("dataSheets", []),
         "currentSheet": selected_sheet,
         "scanSheet": selected_sheet,
+        "defaultSheet": selected_sheet,
         "spreadsheetId": spreadsheet_id,
         "platform": platform,
         "activate": activate,

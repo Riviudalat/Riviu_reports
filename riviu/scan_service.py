@@ -32,7 +32,14 @@ from riviu.source_files import (
     source_sheet_default,
     validate_platform,
 )
-from riviu.workbook_utils import PLATFORMS, build_workbook_rows, clean_text, find_data_sheet_names, google_sheet_source_for_file
+from riviu.workbook_utils import (
+    PLATFORMS,
+    build_workbook_rows,
+    clean_text,
+    default_data_sheet,
+    find_data_sheet_names,
+    google_sheet_source_for_file,
+)
 
 
 logger = logging.getLogger("riviu.scan_service")
@@ -498,7 +505,7 @@ async def run_scraper_safely(target_path, options, run_context=None):
         if run_context is None:
             run_id = manager.begin_run(platform, file_id, options["sheet_name"])["runId"]
         sheets = await asyncio.to_thread(find_data_sheet_names, target_path)
-        scan_sheet = clean_text(options["sheet_name"]) or (sheets[0] if sheets else "")
+        scan_sheet = clean_text(options["sheet_name"]) or default_data_sheet(sheets)
         if not scan_sheet or scan_sheet not in sheets:
             raise ValueError("Sheet không tồn tại trong file đã chọn")
         options = {**options, "sheet_name": scan_sheet, "file_label": file_display_label(file_id)}
@@ -575,7 +582,7 @@ async def prepare_scan_start(payload):
     if not sheets:
         raise ValueError("File đã chọn không có sheet dữ liệu để quét")
     legacy_sheet = source_sheet_default(file_id, scan=True) if "file_id" not in payload else ""
-    sheet_name = clean_text(payload.get("sheet_name", "")) or (legacy_sheet if legacy_sheet in sheets else sheets[0])
+    sheet_name = clean_text(payload.get("sheet_name", "")) or (legacy_sheet if legacy_sheet in sheets else default_data_sheet(sheets))
     if sheet_name not in sheets:
         raise ValueError("Sheet không tồn tại")
     scrape_mode = clean_text(payload.get("scrape_mode", "")).lower()

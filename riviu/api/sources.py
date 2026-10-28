@@ -32,6 +32,7 @@ from riviu.workbook_utils import (
     PLATFORMS,
     clean_text,
     data_sheet_name_for_summary_title,
+    default_data_sheet,
     find_data_sheet_listing,
     find_data_sheet_names,
     google_sheet_source_for_file,
@@ -68,7 +69,8 @@ async def list_files(request: Request = None, file_id: str | None = None, platfo
         sheets, hidden_sheets = await asyncio.to_thread(find_data_sheet_listing, target_path) if target_path else ([], [])
     except Exception:
         sheets, hidden_sheets = [], []
-    selected_sheet = context.CURRENT_SELECTED_SHEET if file_id is None else (sheets[0] if sheets else "")
+    default_sheet = default_data_sheet(sheets)
+    selected_sheet = context.CURRENT_SELECTED_SHEET if file_id is None else default_sheet
     scan_sheet = (context.CURRENT_SCAN_SHEET or selected_sheet) if file_id is None else selected_sheet
     state = {
         "files": entries,
@@ -79,6 +81,8 @@ async def list_files(request: Request = None, file_id: str | None = None, platfo
         "sheets": sheets,
         "hiddenSheets": hidden_sheets,
         "scanSheet": scan_sheet,
+        # What the page falls back to when a saved sheet is gone: the newest month sheet.
+        "defaultSheet": default_sheet,
         "googleSheetUrl": target_sheet_url,
         "platform": platform,
     }
@@ -110,8 +114,8 @@ async def select_file(data: dict):
     with scan_state.source_operation():
         names = await asyncio.to_thread(find_data_sheet_names, target_path)
         all_names = await asyncio.to_thread(workbook_sheet_names, target_path)
-        selected_sheet = clean_text(data.get("display_sheet", data.get("sheet_name", ""))) or (names[0] if names else "")
-        scan_sheet = clean_text(data.get("scan_sheet", "")) or (selected_sheet if selected_sheet in names else (names[0] if names else ""))
+        selected_sheet = clean_text(data.get("display_sheet", data.get("sheet_name", ""))) or default_data_sheet(names)
+        scan_sheet = clean_text(data.get("scan_sheet", "")) or (selected_sheet if selected_sheet in names else default_data_sheet(names))
         if (selected_sheet and selected_sheet not in all_names) or (scan_sheet and scan_sheet not in names):
             return JSONResponse({"error": "Sheet không tồn tại"}, status_code=400)
         source_files.select_source(file_id, selected_sheet, scan_sheet)
@@ -219,7 +223,7 @@ async def upload_excel(
             return published, preview, sheets
         save_path, preview, sheets = await context.complete_blocking(validate_and_publish)
         file_id = source_files.file_id_for_path(save_path)
-        selected_sheet = sheets[0] if sheets else ""
+        selected_sheet = default_data_sheet(sheets)
         if activate:
             source_files.select_source(file_id, selected_sheet, selected_sheet)
         return {"success": True, "filename": file_id, "file_id": file_id, "sheet": selected_sheet, "scanSheet": selected_sheet, "sheets": sheets, "platform": platform, "activate": activate}

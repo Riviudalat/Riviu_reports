@@ -1,6 +1,9 @@
+from datetime import date
+
 import pandas as pd
 import pytest
 
+from riviu.workbook.naming import default_data_sheet, keep_or_newest_month_sheet, month_sheet_key, newest_month_sheet
 from riviu.workbook_utils import (
     dataframe_partner_columns,
     fetch_google_spreadsheet_title,
@@ -1140,3 +1143,68 @@ def test_inline_string_fast_path_reads_the_same_values_as_openpyxl(tmp_path, mon
         ("  Tiệm  cà phê ", "s"),
         ("", "s"),
     ]
+
+
+# ---- Newest month sheet (owner: "chọn sheet mới nhất", not the Google Sheet's first tab) ----
+
+OCTOBER_2026 = date(2026, 10, 28)
+# The live TikTok workbook's tab order: "Tháng 6" first, summary and result tabs mixed in.
+LIVE_TIKTOK_TABS = ["Tháng 6", "Tháng 7", "Tháng 5", "Tháng 10", "Tổng kết tháng 10", "Tháng 9", "Tháng 8",
+                    "T10 12-10-2026-10-31", "T9 12-10-2026-11-55", "T10 19-10-2026-23-49"]
+
+
+@pytest.mark.parametrize("name, key", [
+    ("Tháng 6", (2026, 6)), ("tháng 10", (2026, 10)), ("THÁNG 10", (2026, 10)), ("Thang 09", (2026, 9)),
+    ("Thg 7", (2026, 7)), ("  Tháng   8 ", (2026, 8)), ("Báo cáo tháng 3", (2026, 3)), ("Tháng 10 - seeding", (2026, 10)),
+    ("Tháng 10/2026", (2026, 10)), ("Tháng 10 2026", (2026, 10)), ("Tháng 12-2025", (2025, 12)), ("Tháng 1/27", (2027, 1)),
+    ("T10", (2026, 10)), ("t 9", (2026, 9)), ("T10/2025", (2025, 10)), ("T11 2025", (2025, 11)), ("T10 seeding", (2026, 10)),
+    # A month after the current one without a year is last year's.
+    ("Tháng 11", (2025, 11)), ("T12", (2025, 12)),
+    # A trailing day is not a year.
+    ("Tháng 10 12", (2026, 10)),
+    # Not month data sheets: summaries, generated result/push tabs, other names, impossible months.
+    ("Tổng kết tháng 10", None), ("Tổng kết Threads tháng 10", None), ("T10 12-10-2026-10-31", None),
+    ("12-10-2026-10-31", None), ("Report Seeding TikTok 10-2026", None), ("Tiktok", None), ("Sheet1", None),
+    ("Tháng 13", None), ("Tháng 0", None), ("Tháng", None), ("Tháng 10/1999", None), ("", None),
+])
+def test_month_sheet_key_reads_month_names_case_and_diacritic_insensitively(name, key):
+    assert month_sheet_key(name, OCTOBER_2026) == key
+
+
+def test_newest_month_sheet_picks_the_current_month_not_the_first_tab():
+    assert newest_month_sheet(LIVE_TIKTOK_TABS, OCTOBER_2026) == "Tháng 10"
+    assert default_data_sheet(LIVE_TIKTOK_TABS, OCTOBER_2026) == "Tháng 10"
+    # Explicit years beat the yearless guess; ties keep the first (visible-first) name.
+    assert newest_month_sheet(["Tháng 12/2025", "Tháng 2/2026", "Tháng 11/2025"], OCTOBER_2026) == "Tháng 2/2026"
+    assert newest_month_sheet(["Tháng 10", "tháng 10"], OCTOBER_2026) == "Tháng 10"
+    assert newest_month_sheet(["Data", "Other"], OCTOBER_2026) == ""
+
+
+def test_newest_month_sheet_rolls_over_from_december_to_january():
+    tabs = ["Tháng 11", "Tháng 12", "Tháng 1"]
+    assert newest_month_sheet(tabs, date(2027, 1, 2)) == "Tháng 1"
+    assert newest_month_sheet(["Tháng 11", "Tháng 12"], date(2027, 1, 2)) == "Tháng 12"
+    assert newest_month_sheet(tabs, date(2026, 12, 30)) == "Tháng 12"  # "Tháng 1" is last January
+
+
+def test_default_data_sheet_falls_back_to_the_first_data_sheet():
+    assert default_data_sheet(["Tổng kết", "Data", "Tháng"], OCTOBER_2026) == "Data"
+    assert default_data_sheet(["Tổng kết tháng 10", "T10 12-10-2026-10-31"], OCTOBER_2026) == ""
+    assert default_data_sheet([], OCTOBER_2026) == ""
+
+
+@pytest.mark.parametrize("saved, expected", [
+    ("Tháng 6", "Tháng 10"),          # an older month gives way to the newest
+    ("tháng 10", "tháng 10"),         # the same month is kept as the admin chose it
+    ("Seeding", "Tháng 10"),          # a non-month sheet gives way once month sheets exist
+    ("Tháng 4", "Tháng 10"),          # gone from the new workbook
+    ("", "Tháng 10"),
+])
+def test_keep_or_newest_month_sheet_after_a_resync(saved, expected):
+    tabs = ["Tháng 6", "Tháng 10", "tháng 10", "Seeding", "Tổng kết tháng 10"]
+    assert keep_or_newest_month_sheet(tabs, saved, OCTOBER_2026) == expected
+
+
+def test_keep_or_newest_month_sheet_keeps_the_saved_sheet_without_month_tabs():
+    assert keep_or_newest_month_sheet(["Data", "Other"], "Other", OCTOBER_2026) == "Other"
+    assert keep_or_newest_month_sheet(["Data", "Other"], "Gone", OCTOBER_2026) == "Data"

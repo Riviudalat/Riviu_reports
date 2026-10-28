@@ -12,6 +12,7 @@ from openpyxl import load_workbook
 
 from riviu import server_context as context
 from riviu.workbook_utils import (
+    default_data_sheet,
     LEGACY_GOOGLE_SHEET_FILE_ID,
     find_data_sheet_names,
     get_platform,
@@ -157,7 +158,7 @@ def default_sheet_for_file(file_id):
         return ""
     try:
         sheets = find_data_sheet_names(resolve_file_path(file_id))
-        return sheets[0] if sheets else ""
+        return default_data_sheet(sheets)
     except Exception:
         return ""
 

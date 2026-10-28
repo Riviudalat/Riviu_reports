@@ -17,7 +17,7 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from riviu import scan_service, scan_state, scheduler, server_context, server_mode
-from riviu.api import auth, export, google, pages, proxy, scan, schedule, security, sources, threads_session, tiktok_session
+from riviu.api import auth, export, google, pages, proxy, scan, scan_settings, schedule, security, sources, threads_session, tiktok_session
 from riviu.workbook_utils import ensure_data_dir
 
 # Public names kept importable from `riviu.app` (tests, older callers).
@@ -181,6 +181,7 @@ for _router in (
     tiktok_session.router,
     scan.router,
     schedule.router,
+    scan_settings.router,
 ):
     app.include_router(_router)
 

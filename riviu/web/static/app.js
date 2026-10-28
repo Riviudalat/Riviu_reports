@@ -77,11 +77,23 @@ function platformConfig(platform = activePlatform) {
     return PLATFORMS[platform] || PLATFORMS[activePlatform] || PLATFORMS[PLATFORM_KEYS[0]];
 }
 
+// defaultSheet: the server's pick when a saved sheet is missing (the newest month sheet, see
+// riviu/workbook/naming.py default_data_sheet); runtime only, never persisted.
 function emptyPlatformSource() {
-    return { fileId: '', label: '', displaySheet: '', scanSheet: '', pushSheet: '', sheets: [], hiddenSheets: [], url: '', dirty: false };
+    return { fileId: '', label: '', displaySheet: '', scanSheet: '', pushSheet: '', sheets: [], hiddenSheets: [], defaultSheet: '', url: '', dirty: false };
 }
 
-const platformScrapeModes = Object.fromEntries(PLATFORM_KEYS.map(key => [key, PLATFORMS[key].defaultScrapeMode]));
+const DEFAULT_WORKER_COUNT = 10;
+const SCAN_SETTING_WORKERS = [1, 3, 5, 8, 10, 20, 25, 30, 50];
+
+// The scan toolbar per platform (Luồng, Chế độ, Proxy xoay, the platform's cookie), saved on the
+// server (/scan-settings, riviu/scan_settings.py) so the shared admin login finds them again on
+// every machine. Flags only: never the proxy list or a cookie.
+function defaultScanSettings(platform) {
+    return { workers: DEFAULT_WORKER_COUNT, scrapeMode: PLATFORMS[platform].defaultScrapeMode, useProxy: false, useSession: false };
+}
+const platformScanSettings = Object.fromEntries(PLATFORM_KEYS.map(key => [key, defaultScanSettings(key)]));
+let scanSettingsSave = Promise.resolve();
 const platformSources = Object.fromEntries(PLATFORM_KEYS.map(key => [key, emptyPlatformSource()]));
 
 function activeSource() {
@@ -326,7 +338,7 @@ function renderPlatformSourceRows() {
 
 function applyPlatformUI(platform) {
     if (!isPlatform(platform)) return;
-    if (scrapeModeSelect) platformScrapeModes[activePlatform] = scrapeModeSelect.value;
+    if (platform !== activePlatform) captureScanSettings(activePlatform);
     activePlatform = platform;
     const config = platformConfig(platform);
     document.body.dataset.platform = platform;
@@ -334,7 +346,7 @@ function applyPlatformUI(platform) {
     if (sessionControls) sessionControls.hidden = !config.cookieSession;
     const tiktokControls = document.getElementById('tiktokSessionControls');
     if (tiktokControls) tiktokControls.hidden = !config.accountCookie;
-    if (scrapeModeSelect) scrapeModeSelect.value = platformScrapeModes[platform];
+    applyScanSettings(platform);
     document.querySelectorAll('.platform-option').forEach(button => {
         const selected = button.id === config.dom.button;
         button.classList.toggle('active', selected);
@@ -349,6 +361,92 @@ function applyPlatformUI(platform) {
     if (IS_VIEWER) {
         document.querySelectorAll('#platformSourceRows .platform-source-row').forEach(row => { row.hidden = row.dataset.sourcePlatform !== platform; });
     }
+}
+
+// ---- Scan settings per platform ---------------------------------------------
+function sessionToggle(platform) {
+    const config = platformConfig(platform);
+    const id = config.cookieSession ? 'threadsSessionUse' : (config.accountCookie ? 'tiktokSessionUse' : '');
+    return id ? document.getElementById(id) : null;
+}
+
+function sessionConfigured(platform) {
+    const config = platformConfig(platform);
+    return Boolean(config.cookieSession ? threadsCookieState.configured : (config.accountCookie && tiktokCookieState.configured));
+}
+
+function normalizedScanSettings(platform, raw) {
+    const settings = defaultScanSettings(platform);
+    if (!raw || typeof raw !== 'object') return settings;
+    if (SCAN_SETTING_WORKERS.includes(Number(raw.workers))) settings.workers = Number(raw.workers);
+    if (['request', 'hybrid', 'browser'].includes(raw.scrapeMode)) settings.scrapeMode = raw.scrapeMode;
+    settings.useProxy = raw.useProxy === true;
+    settings.useSession = raw.useSession === true;
+    return settings;
+}
+
+// The toolbar shows the active platform; read it back into that platform's slot.
+function captureScanSettings(platform = activePlatform) {
+    if (IS_VIEWER || !isPlatform(platform)) return;
+    const settings = platformScanSettings[platform];
+    if (workerCountSelect && SCAN_SETTING_WORKERS.includes(Number(workerCountSelect.value))) settings.workers = Number(workerCountSelect.value);
+    if (scrapeModeSelect?.value) settings.scrapeMode = scrapeModeSelect.value;
+    if (proxyUseCheckbox) settings.useProxy = proxyUseCheckbox.checked;
+    const toggle = sessionToggle(platform);
+    // A disabled toggle (no cookie saved yet) keeps the saved choice for when one is imported.
+    if (toggle && sessionConfigured(platform)) settings.useSession = toggle.checked;
+}
+
+function applyScanSettings(platform = activePlatform) {
+    if (IS_VIEWER || !isPlatform(platform)) return;
+    const settings = platformScanSettings[platform];
+    if (workerCountSelect) workerCountSelect.value = String(settings.workers);
+    if (scrapeModeSelect) scrapeModeSelect.value = settings.scrapeMode;
+    if (proxyUseCheckbox) proxyUseCheckbox.checked = settings.useProxy;
+    const toggle = sessionToggle(platform);
+    if (toggle) toggle.checked = settings.useSession && sessionConfigured(platform);
+    syncProxyCardActiveState();
+}
+
+async function loadScanSettings() {
+    if (IS_VIEWER) return;
+    try {
+        const response = await fetch('/scan-settings', { cache: 'no-store' });
+        const data = await response.json();
+        if (!response.ok || !data?.platforms) throw new Error(data?.error || 'Không tải được cấu hình quét.');
+        for (const platform of PLATFORM_KEYS) platformScanSettings[platform] = normalizedScanSettings(platform, data.platforms[platform]);
+    } catch (error) {
+        addLog(`Không tải được cấu hình quét đã lưu: ${error.message}`);
+    }
+    applyScanSettings(activePlatform);
+}
+
+function persistScanSettings() {
+    if (IS_VIEWER) return scanSettingsSave;
+    const body = { platforms: Object.fromEntries(PLATFORM_KEYS.map(key => [key, { ...platformScanSettings[key] }])) };
+    scanSettingsSave = scanSettingsSave.then(async () => {
+        try {
+            const response = await postJson('/scan-settings', body);
+            if (!response.ok) throw new Error((await response.json()).error || 'Không lưu được cấu hình quét.');
+        } catch (error) {
+            addLog(`Không lưu được cấu hình quét: ${error.message}`);
+        }
+    });
+    return scanSettingsSave;
+}
+
+function scanSettingChanged() {
+    captureScanSettings(activePlatform);
+    void persistScanSettings();
+}
+
+// A cookie imported (or replaced) in this page starts switched off, as before; the first status
+// of a page load restores the saved choice instead.
+function resetSessionSettingOnNewCookie(platform, previousGeneration, status, firstStatus) {
+    if (firstStatus || !status?.configured || previousGeneration === status.generation) return;
+    if (!platformScanSettings[platform].useSession) return;
+    platformScanSettings[platform].useSession = false;
+    void persistScanSettings();
 }
 
 const PROGRESS_COUNTER_IDS = ['processedLinks', 'successLinks', 'hiddenCountBadge', 'failedCountBadge'];
@@ -400,7 +498,8 @@ async function setPlatform(platform) {
     clearLiveResults({ emptyText: 'Chưa có kết quả mới' });
     resetProgressDisplay();
     if (isSummarySheetName(currentSheetName) && summarySheetPlatform(currentSheetName) !== platform) {
-        currentSheetName = dataSheetsVisibleFirst(window.lastWorkbookSheets || [])[0] || '';
+        const dataSheets = dataSheetsVisibleFirst(window.lastWorkbookSheets || []);
+        currentSheetName = (dataSheets.includes(activeSource().defaultSheet) ? activeSource().defaultSheet : dataSheets[0]) || '';
     }
     setWorkspaceTab('sheet');
     void loadPreview();
@@ -800,7 +899,7 @@ function appendSheetOptions(selectEl, sheets, selectedSheet, hiddenSheets) {
     }
 }
 
-function renderSheetSelect(selectEl, sheets, preferredSheet, onUpdate, hiddenSheets = activeSource().hiddenSheets) {
+function renderSheetSelect(selectEl, sheets, preferredSheet, onUpdate, hiddenSheets = activeSource().hiddenSheets, defaultSheet = activeSource().defaultSheet) {
     const viewerPlatform = IS_VIEWER && selectEl.dataset?.viewerSheets;
     const validSheets = viewerPlatform ? viewerSheetChoices(sheets, viewerPlatform, hiddenSheets) : dataSheetsVisibleFirst(sheets, hiddenSheets);
     selectEl.innerHTML = '';
@@ -812,9 +911,9 @@ function renderSheetSelect(selectEl, sheets, preferredSheet, onUpdate, hiddenShe
     }
     const currentValue = preferredSheet && validSheets.includes(preferredSheet)
         ? preferredSheet
-        : (validSheets.includes(selectEl.value) ? selectEl.value : validSheets[0]);
+        : (validSheets.includes(selectEl.value) ? selectEl.value : (validSheets.includes(defaultSheet) ? defaultSheet : validSheets[0]));
     appendSheetOptions(selectEl, validSheets, currentValue, hiddenSheets);
-    if (!validSheets.includes(selectEl.value)) selectEl.value = validSheets[0];
+    selectEl.value = currentValue;
     onUpdate(selectEl.value);
     selectEl.disabled = false;
 }
@@ -1398,7 +1497,7 @@ function renderSourceRows() {
     for (const platform of PLATFORM_KEYS) {
         const source = platformSources[platform], controls = sourceControls(platform);
         if (controls.url && controls.url.value !== source.url) controls.url.value = source.url;
-        if (controls.sheet) renderSheetSelect(controls.sheet, source.sheets, source.pushSheet || source.scanSheet, value => { source.pushSheet = value; }, source.hiddenSheets);
+        if (controls.sheet) renderSheetSelect(controls.sheet, source.sheets, source.pushSheet || source.scanSheet, value => { source.pushSheet = value; }, source.hiddenSheets, source.defaultSheet);
         if (controls.label) { controls.label.textContent = source.label || source.fileId || 'Chưa chọn file'; controls.label.title = source.label || source.fileId; }
     }
     setGooglePushState();
@@ -1427,6 +1526,7 @@ async function activateSource(platform) {
             if (response.ok && data.current === source.fileId && Array.isArray(data.sheets)) {
                 source.sheets = data.sheets;
                 source.hiddenSheets = data.hiddenSheets || [];
+                source.defaultSheet = data.defaultSheet || '';
                 source.label ||= data.currentLabel || '';
             }
         } catch {}
@@ -1435,7 +1535,7 @@ async function activateSource(platform) {
     const keep = sheet => (sheet && (!known.length || known.includes(sheet)) ? sheet : '');
     if (IS_VIEWER) {
         // No /select-file: the viewer's choice stays in this browser.
-        source.displaySheet = keep(source.displaySheet) || keep(source.scanSheet) || known[0] || '';
+        source.displaySheet = keep(source.displaySheet) || keep(source.scanSheet) || keep(source.defaultSheet) || known[0] || '';
         source.scanSheet = keep(source.scanSheet) || source.displaySheet;
         source.pushSheet = source.scanSheet;
         return;
@@ -1499,6 +1599,7 @@ async function initializeSources({ applyGoogleSheetUrl = false } = {}) {
             if (!response.ok || data.error || data.current !== saved.fileId) throw new Error(data.error || 'Không tải được workbook đã lưu.');
             saved.sheets = data.sheets || [];
             saved.hiddenSheets = data.hiddenSheets || [];
+            saved.defaultSheet = data.defaultSheet || '';
             saved.label = data.currentLabel || saved.fileId;
             // The workbook exists: a rejected selection must not forget the saved file.
             try { await activateSource(platform); }
@@ -1524,6 +1625,7 @@ function applyFileListState(data, { applyGoogleSheetUrl = false } = {}) {
     const sheets = data.sheets || [];
     source.sheets = sheets;
     source.hiddenSheets = data.hiddenSheets || [];
+    source.defaultSheet = data.defaultSheet || '';
     source.label = source.fileId ? (data.currentLabel || source.fileId) : '';
     if (!sheets.includes(source.displaySheet)) source.displaySheet = data.currentSheet || data.scanSheet || '';
     if (!sheets.includes(source.scanSheet)) source.scanSheet = data.scanSheet || data.currentSheet || '';
@@ -1627,7 +1729,8 @@ async function syncGoogleSheet(platform = activePlatform) {
 
         if (revision !== sourceRevision) return;
         const source = platformSources[platform];
-        Object.assign(source, { fileId: data.file, label: data.label || data.file, displaySheet: data.currentSheet || '', scanSheet: data.scanSheet || data.currentSheet || '', pushSheet: data.scanSheet || data.currentSheet || '', sheets: data.sheets || [], hiddenSheets: data.hiddenSheets || [], url, dirty: false });
+        // The server opens the newest month sheet ("Tháng 10"), not the Google Sheet's first tab.
+        Object.assign(source, { fileId: data.file, label: data.label || data.file, displaySheet: data.currentSheet || '', scanSheet: data.scanSheet || data.currentSheet || '', pushSheet: data.scanSheet || data.currentSheet || '', sheets: data.sheets || [], hiddenSheets: data.hiddenSheets || [], defaultSheet: data.defaultSheet || data.currentSheet || '', url, dirty: false });
         if (platform === activePlatform) {
             await activateSource(platform);
             restoreActiveSource();
@@ -2060,7 +2163,9 @@ function syncScanControls() {
     const viewerScanState = IS_VIEWER && document.getElementById('vwScanState');
     if (viewerScanState) {
         viewerScanState.hidden = !scanIsBusy();
-        viewerScanState.textContent = retryWait ? 'Đã cập nhật số liệu, đang chờ quét lại một số link lỗi…' : 'Đang cập nhật số liệu…';
+        viewerScanState.textContent = retryWait
+            ? `Số liệu đã cập nhật. Hệ thống sẽ tự quét lại vài link chưa đọc được lúc ${formatClockTime(retryWait.at)}.`
+            : 'Đang cập nhật số liệu…';
     }
     setGooglePushState();
 }
@@ -2239,13 +2344,15 @@ function formatCookieCheckedAt(value) {
     return date.toLocaleString('vi-VN', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
 }
 
+let threadsCookieStatusSeen = false;
 function renderThreadsCookieStatus(status) {
     const previousGeneration = threadsCookieState.generation;
     threadsCookieState = status || { configured: false, state: 'unknown', generation: '' };
-    if (previousGeneration !== threadsCookieState.generation) {
-        const use = document.getElementById('threadsSessionUse');
-        if (use) use.checked = false;
-    }
+    // A cookie imported in this page never switches on by itself; a page load restores the saved choice.
+    resetSessionSettingOnNewCookie('threads', previousGeneration, threadsCookieState, !threadsCookieStatusSeen);
+    threadsCookieStatusSeen = true;
+    const sessionUse = document.getElementById('threadsSessionUse');
+    if (sessionUse) sessionUse.checked = platformScanSettings.threads.useSession && Boolean(threadsCookieState.configured);
     const labels = { none: 'Chưa import', unchecked: 'Chưa kiểm tra', valid: 'Hợp lệ', expired: 'Hết hạn', invalid: 'Không hợp lệ', checkpoint: 'Cần xác minh', unknown: 'Chưa xác định', storage_unavailable: 'Kho bảo mật không khả dụng' };
     const text = labels[threadsCookieState.state] || 'Chưa xác định';
     const badge = document.getElementById('threadsCookieStatus');
@@ -2388,12 +2495,15 @@ function confirmThreadsCookieDelete() {
 }
 
 // ---- TikTok cookie session (opt-in "Cookie TikTok") -------------------------
+let tiktokCookieStatusSeen = false;
 function renderTikTokCookieStatus(status) {
     const previousGeneration = tiktokCookieState.generation;
     tiktokCookieState = status || { configured: false, state: 'unknown', generation: '' };
+    // A cookie imported in this page never switches on by itself; a page load restores the saved choice.
+    resetSessionSettingOnNewCookie('tiktok', previousGeneration, tiktokCookieState, !tiktokCookieStatusSeen);
+    tiktokCookieStatusSeen = true;
     const use = document.getElementById('tiktokSessionUse');
-    // A new or removed session never stays switched on by itself.
-    if (use && (previousGeneration !== tiktokCookieState.generation || !tiktokCookieState.configured)) use.checked = false;
+    if (use) use.checked = platformScanSettings.tiktok.useSession && Boolean(tiktokCookieState.configured);
     const labels = { none: 'Chưa import', unchecked: 'Chưa kiểm tra', valid: 'Hợp lệ', expired: 'Hết hạn', invalid: 'Không hợp lệ', unknown: 'Chưa xác định', storage_unavailable: 'Kho bảo mật không khả dụng' };
     const text = labels[tiktokCookieState.state] || 'Chưa xác định';
     const badge = document.getElementById('tiktokCookieStatus');
@@ -2533,8 +2643,6 @@ const SCRAPE_MODE_LABELS = Object.freeze({
     hybrid: 'Hybrid (Request + trình duyệt)',
     request: 'Request (HTTP)',
 });
-
-const DEFAULT_WORKER_COUNT = 10;
 
 // Collects the scan settings, or explains (and returns null) when the scan cannot start.
 function buildScanRequest(partners, sheetName) {
@@ -4035,6 +4143,9 @@ for (const platform of PLATFORM_KEYS) {
 if (proxyUseCheckbox) {
     proxyUseCheckbox.addEventListener('change', syncProxyCardActiveState);
 }
+for (const input of [workerCountSelect, scrapeModeSelect, proxyUseCheckbox, document.getElementById('threadsSessionUse'), document.getElementById('tiktokSessionUse')]) {
+    input?.addEventListener('change', scanSettingChanged);
+}
 
 window.addEventListener('resize', syncCompactDrawerState);
 
@@ -4043,6 +4154,7 @@ window.onload = async () => {
     setWorkspaceTab('sheet');
     await checkServerVersion();
     await loadSourcePreferences();
+    await loadScanSettings();
     await updateFileList({ applyGoogleSheetUrl: true });
     // Inactive platforms: load each saved workbook's label and sheets for its source row.
     for (const platform of PLATFORM_KEYS) {
@@ -4051,7 +4163,7 @@ window.onload = async () => {
         try {
             const { response, data } = await fetchFileList(platform, source.fileId);
             if (!response.ok) { source.fileId = ''; continue; }
-            Object.assign(source, { sheets: data.sheets || [], hiddenSheets: data.hiddenSheets || [], label: data.currentLabel || data.current });
+            Object.assign(source, { sheets: data.sheets || [], hiddenSheets: data.hiddenSheets || [], defaultSheet: data.defaultSheet || '', label: data.currentLabel || data.current });
         } catch {}
     }
     renderSourceRows();

@@ -171,3 +171,31 @@ def test_stale_saved_sheet_never_blocks_switching_platform(known_sheets, listed_
         assert.equal(bodies.length,1); assert.equal(bodies[0].scan_sheet,'Keep');
       }
     })()""" % (json.dumps(listed_sheets), json.dumps(known_sheets), json.dumps(known_sheets)))
+
+
+def test_sync_opens_the_server_newest_month_sheet_everywhere():
+    # Owner report: after "Nạp sheet" the TikTok source stayed on "Tháng 6" (the first tab) in October.
+    run_js("""(async()=>{
+      sourcesInitialized=true; activePlatform='tiktok';
+      Object.assign(platformSources.tiktok,{fileId:'Old.xlsx',displaySheet:'Tháng 6',scanSheet:'Tháng 6',pushSheet:'Tháng 6',sheets:['Tháng 6']});
+      el('googleSheetUrlInput').value='https://docs.google.com/spreadsheets/d/M';
+      const tabs=['Tháng 6','Tháng 7','Tháng 10','Tổng kết tháng 10','T10 12-10-2026-10-31'];
+      const selects=[];
+      fetch=async(url,options={})=>{
+        const path=String(url).split('?')[0]; const body=options.body ? JSON.parse(options.body) : {};
+        if (path==='/select-file') selects.push(body);
+        const data=path==='/sync-google-sheet' ? {file:'New.xlsx',label:'New',sheets:tabs,currentSheet:'Tháng 10',scanSheet:'Tháng 10',defaultSheet:'Tháng 10'}
+          : path==='/select-file' ? {success:true,selected:'New.xlsx',sheet:body.sheet_name||'Tháng 10',scanSheet:body.scan_sheet||'Tháng 10'}
+          : {};
+        return {ok:true,status:200,json:async()=>data};
+      };
+      await syncGoogleSheet('tiktok');
+      const source=platformSources.tiktok;
+      assert.equal(source.fileId,'New.xlsx');
+      assert.equal([source.displaySheet,source.scanSheet,source.pushSheet].join('|'),'Tháng 10|Tháng 10|Tháng 10');
+      assert.equal(selects[0].sheet_name,'Tháng 10'); assert.equal(selects[0].scan_sheet,'Tháng 10');
+      assert.equal(el('scanSheetSelect').value,'Tháng 10'); assert.equal(el('pushSheetSelect').value,'Tháng 10');
+      // A saved sheet that is gone falls back to the server's pick, not the first tab.
+      source.pushSheet='Gone'; source.scanSheet='Gone'; renderSourceRows();
+      assert.equal(source.pushSheet,'Tháng 10');
+    })()""")
