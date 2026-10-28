@@ -43,6 +43,7 @@ import {
   type SourcePreferences,
   type SourceSlot,
 } from '@/lib/sources';
+import type { MonthEntry, RdTable } from '@/lib/riviuData';
 import { createStore, useStoreSelector } from './store';
 
 // ---- Types ----------------------------------------------------------------------------
@@ -97,10 +98,35 @@ export interface GoogleStatus {
   serviceAccount?: { configured?: boolean; email?: string; error?: string };
 }
 
-export type ModalName = 'history' | 'report' | 'guide' | 'proxy' | 'threadsCookie' | 'tiktokCookie' | 'googlePaste';
+export type ModalName = 'history' | 'report' | 'guide' | 'proxy' | 'threadsCookie' | 'tiktokCookie' | 'googlePaste' | 'schedule' | 'export';
+
+/** Where posts and metrics live (GET /api/version "storage"). */
+export type StorageKind = 'workbook' | 'postgres';
+
+/** One platform's scan toolbar, persisted server side (/scan-settings). */
+export interface ScanSettings {
+  workers: number;
+  scrapeMode: ScrapeMode;
+  useProxy: boolean;
+  useSession: boolean;
+}
+
+/** Riviu Data (Postgres storage): the month sheets per platform and the shown table. */
+export interface RdState {
+  months: Record<PlatformKey, MonthEntry[] | null>;
+  thang: Record<PlatformKey, string>;
+  table: RdTable;
+}
+
+export function defaultScanSettings(platform: PlatformKey): ScanSettings {
+  return { workers: DEFAULT_WORKER_COUNT, scrapeMode: PLATFORMS[platform].defaultScrapeMode, useProxy: false, useSession: false };
+}
 
 export interface AppState {
   viewer: Viewer;
+  storage: StorageKind;
+  rd: RdState;
+  scanSettings: Record<PlatformKey, ScanSettings>;
   activePlatform: PlatformKey;
   sources: Record<PlatformKey, SourceSlot>;
   files: FileEntry[];
@@ -136,6 +162,13 @@ export interface AppState {
 function initialState(): AppState {
   return {
     viewer: { authenticated: true, username: '', role: 'viewer', serverMode: true },
+    storage: 'workbook',
+    rd: {
+      months: Object.fromEntries(PLATFORM_KEYS.map(key => [key, null])) as Record<PlatformKey, MonthEntry[] | null>,
+      thang: Object.fromEntries(PLATFORM_KEYS.map(key => [key, ''])) as Record<PlatformKey, string>,
+      table: { state: 'loading' },
+    },
+    scanSettings: Object.fromEntries(PLATFORM_KEYS.map(key => [key, defaultScanSettings(key)])) as Record<PlatformKey, ScanSettings>,
     activePlatform: PLATFORM_KEYS[0],
     sources: Object.fromEntries(PLATFORM_KEYS.map(key => [key, emptySource()])) as Record<PlatformKey, SourceSlot>,
     files: [],
@@ -187,6 +220,8 @@ export function resetAppState(patch: Partial<AppState> = {}) {
   prefs.writing = false;
   prefs.failed = false;
   prefs.generation = 0;
+  cookieStatusSeen.threads = false;
+  cookieStatusSeen.tiktok = false;
 }
 
 // ---- Derived helpers ------------------------------------------------------------------
@@ -206,10 +241,19 @@ export function uiIsBusy(state: AppState = get()): boolean {
 export const CONNECTION_RECONNECTING_TEXT = 'Đang kết nối lại tới server…';
 export const CONNECTION_LOST_TEXT = 'Mất kết nối tới server. Ứng dụng vẫn tự thử lại, hoặc tải lại trang (F5).';
 
+/** Run context `fileId` of a Riviu Data scan (scan_service.RIVIU_DATA_FILE_ID). */
+export const RIVIU_DATA_FILE_ID = 'riviu-data';
+
+/** What the page shows, for the stale-event rules of lib/scan.ts. */
+export function viewContext(state: AppState = get()) {
+  return { activePlatform: state.activePlatform, currentFileId: state.storage === 'postgres' ? RIVIU_DATA_FILE_ID : activeSource(state).fileId };
+}
+
 /** Why an idle Start button cannot start a scan right now ('' when it can). */
 export function startBlockedReason(state: AppState = get()): string {
   if (state.connection === 'lost') return CONNECTION_LOST_TEXT;
   if (state.connection === 'reconnecting') return CONNECTION_RECONNECTING_TEXT;
+  if (state.storage === 'postgres') return state.rd.thang[state.activePlatform] ? '' : 'Chưa có tháng nào để quét.';
   if (state.sourcesInitialized && !activeSource(state).fileId) return 'Chưa chọn nguồn cho nền tảng này.';
   return '';
 }
@@ -869,6 +913,15 @@ async function loadSummary(dataSheetName: string) {
 
 // ---- Run context and the socket -------------------------------------------------------
 
+/**
+ * Storage-specific reactions to the socket, set by state/riviuData.ts on Postgres storage:
+ * follow a run's platform/month, reload the table once a run's numbers were saved.
+ */
+export const storageHooks: {
+  followRun?: (context: RunContext) => void;
+  numbersSaved?: (context: RunContext | null, finished: boolean) => void;
+} = {};
+
 function applyRunContext(context: RunContext) {
   if (!context?.runId) return;
   set(state => ({ scan: applyRunContextPure(state.scan, context).state }));
@@ -879,7 +932,12 @@ function applyRunContext(context: RunContext) {
  * Follow the workbook the server is scanning. Every change goes through that platform's own
  * source slot, and a platform/file change reloads the label, sheet list and preview.
  */
-function showRunSource({ platform, fileId, sheetName }: RunContext) {
+function showRunSource(context: RunContext) {
+  if (get().storage === 'postgres') {
+    storageHooks.followRun?.(context);
+    return;
+  }
+  const { platform, fileId, sheetName } = context;
   const state = get();
   const runPlatform = isPlatform(platform) ? platform : state.activePlatform;
   const slot = state.sources[runPlatform];
@@ -899,14 +957,17 @@ function showRunSource({ platform, fileId, sheetName }: RunContext) {
 
 function finishScanRun(phase: string, stopReason: string) {
   addLog(terminalLogLine(phase as ScanState['phase'], stopReason));
+  if (get().storage === 'postgres') {
+    storageHooks.numbersSaved?.(get().scan.runContext, true);
+    return;
+  }
   void updateFileList();
   void loadPreview();
 }
 
 export function handleSessionSnapshot(session: SessionSnapshot) {
   const state = get();
-  const view = { activePlatform: state.activePlatform, currentFileId: activeSource(state).fileId };
-  const { state: scan, follow } = applySessionSnapshot(state.scan, session, view);
+  const { state: scan, follow } = applySessionSnapshot(state.scan, session, viewContext(state));
   set({ scan });
   if (follow) showRunSource(session);
   if (session.running) set({ workspaceTab: 'live' });
@@ -918,15 +979,18 @@ export function handleSocketMessage(message: SocketMessage) {
     return;
   }
   const state = get();
-  if (isStaleTerminalEvent(message, { activePlatform: state.activePlatform, currentFileId: activeSource(state).fileId })) return;
+  if (isStaleTerminalEvent(message, viewContext(state), state.scan.runContext?.runId || '')) return;
   if (shouldApplyRunContext(message)) applyRunContext(message);
   if (message.type === 'log') {
     addLog(message.message || '', { level: message.level || '', details: message.details || null });
   } else if (message.type === 'status') {
     const data = (message.data || {}) as ProgressData;
+    const previousWait = get().scan.retryWait;
     const { state: scan, finished } = applyStatus(get().scan, data);
     set({ scan });
     if (finished) finishScanRun(finished.phase, finished.stopReason);
+    // The main pass is saved before the cooldown: its numbers are already in the table.
+    else if (scan.retryWait && !previousWait && get().storage === 'postgres') storageHooks.numbersSaved?.(scan.runContext, false);
     // The cookie vault is Threads-only; a Threads scan may mark it expired.
     if (data.done && get().activePlatform === 'threads' && canAdmin()) void refreshCookieStatus('threads');
   } else if (message.type === 'data' && message.row) {
@@ -1061,6 +1125,27 @@ export function startScraping(partners: string[] = [], sheetName = '') {
   set(s => ({ workspaceTab: 'live', sourceDrawerOpen: false, settingsDrawerOpen: false, scan: { ...clearLive(s.scan), phase: 'starting', terminalKey: '' } }));
 }
 
+/** Socket test seam. */
+export function setSocketForTests(socket: WebSocket | null) {
+  ws = socket;
+}
+
+/** Send a command on the open socket; false (with a toast) when it is not connected. */
+export function sendScanCommand(payload: Record<string, unknown>): boolean {
+  if (!ws || ws.readyState !== WebSocket.OPEN) { notify('Lỗi: Chưa kết nối được server.', 'error'); return false; }
+  ws.send(JSON.stringify(payload));
+  return true;
+}
+
+/** Ends the retry cooldown now: the run completes with the main-pass results, no retry pass. */
+export function skipRetryWait() {
+  const scan = get().scan;
+  if (!canAdmin() || !scan.retryWait || scan.retrySkipRequested) return;
+  if (!sendScanCommand({ action: 'skip_retry' })) return;
+  set(s => ({ scan: { ...s.scan, retrySkipRequested: true } }));
+  addLog('Đã gửi lệnh bỏ qua quét lại.');
+}
+
 export function cancelScraping() {
   if (!canAdmin()) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) { notify('Lỗi: Chưa kết nối được server.', 'error'); return; }
@@ -1127,11 +1212,27 @@ export function setProxyText(text: string) {
 // ---- Cookie sessions ------------------------------------------------------------------
 
 const cookieRevision: Record<CookieKind, number> = { threads: 0, tiktok: 0 };
+/** Whether this page load already had a cookie status (the first one keeps the saved choice). */
+const cookieStatusSeen: Record<CookieKind, boolean> = { threads: false, tiktok: false };
 const COOKIE_PATHS: Record<CookieKind, string> = { threads: '/threads-session', tiktok: '/tiktok-session' };
 /** Matches MAX_IMPORT_BYTES in riviu/platforms/threads_session.py. */
 export const COOKIE_IMPORT_MAX_BYTES = 256 * 1024;
 
 function applyCookieStatus(kind: CookieKind, status: CookieStatus | undefined) {
+  const first = !cookieStatusSeen[kind];
+  cookieStatusSeen[kind] = true;
+  if (get().storage === 'postgres') {
+    // The toggle is a saved per-platform setting: a cookie imported or replaced in this page
+    // starts switched off (like app.js); the first status of a page load keeps the saved choice.
+    const previous = get().cookies[kind];
+    const next = status || { configured: false, state: 'unknown', generation: '' };
+    set(state => ({ cookies: { ...state.cookies, [kind]: next } }));
+    const platform: PlatformKey = kind;
+    if (!first && next.configured && previous.generation !== next.generation && get().scanSettings[platform].useSession) {
+      void updateScanSettings(platform, { useSession: false });
+    }
+    return;
+  }
   set(state => {
     const previous = state.cookies[kind];
     const next = status || { configured: false, state: 'unknown', generation: '' };
@@ -1186,6 +1287,54 @@ export async function cookieAction(kind: CookieKind, action: 'import' | 'verify'
 
 export function setUseSession(kind: CookieKind, value: boolean) {
   set(kind === 'threads' ? { useThreadsSession: value } : { useTikTokSession: value });
+}
+
+// ---- Scan settings (server side, per platform) -----------------------------------------
+
+const WORKER_CHOICES = new Set<number>([1, 3, 5, 8, 10, 20, 25, 30, 50]);
+
+export function normalizedScanSettings(platform: PlatformKey, raw: unknown): ScanSettings {
+  const base = defaultScanSettings(platform);
+  if (!raw || typeof raw !== 'object') return base;
+  const record = raw as Record<string, unknown>;
+  const workers = Number(record.workers);
+  const mode = record.scrapeMode;
+  return {
+    workers: WORKER_CHOICES.has(workers) ? workers : base.workers,
+    scrapeMode: mode === 'request' || mode === 'hybrid' || mode === 'browser' ? mode : base.scrapeMode,
+    useProxy: typeof record.useProxy === 'boolean' ? record.useProxy : base.useProxy,
+    useSession: typeof record.useSession === 'boolean' ? record.useSession : base.useSession,
+  };
+}
+
+let scanSettingsSave: Promise<void> = Promise.resolve();
+
+export async function loadScanSettings() {
+  if (!canAdmin()) return;
+  try {
+    const { response, data } = await getJson<{ platforms?: Record<string, unknown>; error?: string }>('/scan-settings', { cache: 'no-store', quietForbidden: true });
+    if (!response.ok || !data.platforms) throw new Error(data.error || 'Không tải được cấu hình quét.');
+    const platforms = data.platforms;
+    set({ scanSettings: Object.fromEntries(PLATFORM_KEYS.map(key => [key, normalizedScanSettings(key, platforms[key])])) as Record<PlatformKey, ScanSettings> });
+  } catch (error) {
+    addLog(`Không tải được cấu hình quét đã lưu: ${errorMessage(error, '')}`);
+  }
+}
+
+/** Change one platform's toolbar and save every platform's settings (saves run in order). */
+export function updateScanSettings(platform: PlatformKey, patch: Partial<ScanSettings>): Promise<void> {
+  set(state => ({ scanSettings: { ...state.scanSettings, [platform]: { ...state.scanSettings[platform], ...patch } } }));
+  if (!canAdmin()) return scanSettingsSave;
+  const body = { platforms: get().scanSettings };
+  scanSettingsSave = scanSettingsSave.then(async () => {
+    try {
+      const { response, data } = await postJson<{ error?: string }>('/scan-settings', body, { quietForbidden: true });
+      if (!response.ok) throw new Error(data.error || 'Không lưu được cấu hình quét.');
+    } catch (error) {
+      addLog(`Không lưu được cấu hình quét: ${errorMessage(error, '')}`);
+    }
+  });
+  return scanSettingsSave;
 }
 
 // ---- Google ---------------------------------------------------------------------------
