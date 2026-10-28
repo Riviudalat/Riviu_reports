@@ -10,6 +10,9 @@ scan options to use. At a slot the server, for that platform:
    pages follow it live over `/ws` like a manual scan,
 3. never pushes to Google: "Tạo sheet" stays a manual admin action.
 
+With `RIVIU_STORAGE=postgres` step 1 is skipped: the scan covers the newest month of the
+platform's posts in Riviu Data (`scan_service.resolve_store_month`).
+
 Option `retryFailed` (default on) adds the scan's retry pass over transient failures; a scheduled
 run interrupted by a restart is resumed at startup (riviu/scan_journal.py) and still never pushes.
 
@@ -36,6 +39,7 @@ from datetime import datetime, timedelta, timezone
 from riviu import scan_service, scan_settings, scan_state
 from riviu import server_context as context
 from riviu import source_files
+from riviu.store import config as store_config
 from riviu.workbook_utils import PLATFORMS, google_sheet_source_for_file, keep_or_newest_month_sheet, write_json_atomic
 
 try:
@@ -304,6 +308,12 @@ async def scan_payload(platform, file_id, sheet, options):
     return payload
 
 
+def scan_source_label(file_id, sheet):
+    if file_id == scan_service.RIVIU_DATA_FILE_ID:
+        return f"Riviu Data {scan_service.month_title(sheet)}"
+    return f'sheet "{sheet}" • file: {file_id}'
+
+
 def _result_from_status(status, task):
     if task.cancelled() or status.get("cancelled") or status.get("phase") == "cancelled":
         result = "cancelled"
@@ -395,20 +405,25 @@ class Scheduler:
         # Taken right after the check (no await in between) and held until the scan task exists:
         # a manual start or source change in the meantime is refused as busy.
         with scan_state.scan_starting():
-            preferences, source, url = await asyncio.to_thread(platform_source, platform)
-            if not url:
-                return await self.record(platform, slot, scheduled, "skipped", "Bỏ qua: nền tảng này chưa có link Google Sheet nguồn.", started)
             options = (await asyncio.to_thread(load_schedule))["platforms"][platform]["options"]
-            await scan_state.manager.broadcast_log(f"Lịch tự động {label} {slot}: đang nạp Google Sheet...")
+            if store_config.ACTIVE.postgres:
+                # Riviu Data holds the post list: nothing to download; the newest month is scanned.
+                file_id, sheet = scan_service.RIVIU_DATA_FILE_ID, ""
+            else:
+                preferences, source, url = await asyncio.to_thread(platform_source, platform)
+                if not url:
+                    return await self.record(platform, slot, scheduled, "skipped", "Bỏ qua: nền tảng này chưa có link Google Sheet nguồn.", started)
+                await scan_state.manager.broadcast_log(f"Lịch tự động {label} {slot}: đang nạp Google Sheet...")
+                try:
+                    synced = await self.sync(url, platform)
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    return await self.record(platform, slot, scheduled, "failed", f"Nạp sheet thất bại, không quét: {error}", started)
+                file_id = synced["file_id"]
             try:
-                synced = await self.sync(url, platform)
-            except asyncio.CancelledError:
-                raise
-            except Exception as error:
-                return await self.record(platform, slot, scheduled, "failed", f"Nạp sheet thất bại, không quét: {error}", started)
-            file_id = synced["file_id"]
-            try:
-                sheet = await context.complete_blocking(adopt_synced_source, preferences, platform, source, synced, url)
+                if file_id != scan_service.RIVIU_DATA_FILE_ID:
+                    sheet = await context.complete_blocking(adopt_synced_source, preferences, platform, source, synced, url)
                 payload = await scan_payload(platform, file_id, sheet, options)
                 target_path, scan_options = await scan_service.prepare_scan_start(payload)
             except asyncio.CancelledError:
@@ -419,7 +434,7 @@ class Scheduler:
             scan_options["push_to_google"] = False
             scan_options["scheduled"] = True
             await scan_state.manager.broadcast_log(
-                f"Lịch tự động {label} {slot}: bắt đầu quét sheet \"{scan_options['sheet_name']}\" • file: {file_id} • "
+                f"Lịch tự động {label} {slot}: bắt đầu quét {scan_source_label(file_id, scan_options['sheet_name'])} • "
                 f"{scan_options['scrape_mode']}{' • proxy bật' if scan_options['use_proxy'] else ''} • luồng: {scan_options['worker_count']}."
             )
             task, run_context = scan_service.start_scan_task(target_path, scan_options)
@@ -431,7 +446,8 @@ class Scheduler:
         result, counts = _result_from_status(status, task)
         messages = {
             # e.g. Threads posts only a logged-in viewer sees: the run log says what to do about them.
-            "completed": " ".join(filter(None, ["Đã nạp sheet và quét xong.", status.get("notice")])),
+            "completed": " ".join(filter(None, [
+                "Đã quét xong." if file_id == scan_service.RIVIU_DATA_FILE_ID else "Đã nạp sheet và quét xong.", status.get("notice")])),
             "stopped": "Quét dừng sớm, kết quả chưa đầy đủ.",
             "cancelled": "Phiên quét đã bị hủy.",
             "failed": f"Quét thất bại: {status.get('message') or 'lỗi không rõ'}",

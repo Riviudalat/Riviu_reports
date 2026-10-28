@@ -261,8 +261,25 @@ class PostgresStore:
             locked_count=int(locked or 0), run_id=run_id, events=events,
         )
 
-    async def report_rows(self, thang, *, conn=None):
-        """The month's report rows (same dict keys as the workbook path), from v_<platform>."""
+    async def months(self):
+        """The month sheets that hold live rows, newest first: [("YYYY-MM", row count), ...].
+
+        Taken from the rows themselves (staff create and move rows between months), never derived
+        from ngay_air; rows with thang_nam NULL belong to no month and are left out.
+        """
+        conn = await self.connect()
+        try:
+            records = await conn.fetch(
+                f"SELECT thang_nam, count(*) AS rows FROM public.v_{self.table} "
+                "WHERE thang_nam IS NOT NULL GROUP BY thang_nam ORDER BY thang_nam DESC"
+            )
+        finally:
+            await conn.close()
+        return [(f"{record['thang_nam'].year:04d}-{record['thang_nam'].month:02d}", int(record["rows"])) for record in records]
+
+    async def report_rows(self, thang, *, conn=None, with_ids=False):
+        """The month's report rows (same dict keys as the workbook path), from v_<platform>;
+        `with_ids` adds each post's id as `_id` (the web app's table)."""
         from riviu.workbook.platforms import get_platform
 
         spec = get_platform(self.platform)
@@ -275,7 +292,11 @@ class PostgresStore:
         finally:
             if own:
                 await conn.close()
-        rows = [row for row in (rules.report_row(spec, record, thang) for record in records) if row is not None]
+        rows = []
+        for record in records:
+            row = rules.report_row(spec, record, thang)
+            if row is not None:
+                rows.append({**row, "_id": record["id"]} if with_ids else row)
         return SheetReportRows(rows=tuple(rows), partners=rules.report_partner_names(records))
 
 

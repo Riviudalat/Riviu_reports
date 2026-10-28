@@ -67,6 +67,9 @@ async def websocket_endpoint(websocket: WebSocket):
                     await websocket.send_json({"type": "session", "data": manager.snapshot(), **manager.context})
                     await websocket.send_json({"type": "log", "message": "Đang xử lý dữ liệu hoặc cập nhật ứng dụng. Vui lòng chờ hoàn tất."})
                     continue
+                # Who started it, for Riviu Data's scan_run; never taken from the client.
+                identity = security.request_identity(websocket) if server_mode.ACTIVE is not None else None
+                payload = {**payload, "started_by": f"riviu-reports:{identity['username']}" if identity else ""}
                 try:
                     target_path, options = await scan_service.prepare_scan_start(payload)
                 except (SourceRequestError, ValueError) as error:

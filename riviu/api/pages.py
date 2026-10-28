@@ -93,8 +93,12 @@ async def api_version():
     from riviu.proxy_utils import PROXY_TEST_BUILD
     from riviu.platforms.tiktok import MAX_WORKERS
 
+    from riviu.store import config as store_config
+
     return {
         "proxyTestBuild": PROXY_TEST_BUILD,
         "app": "riviu-reports",
         "maxWorkers": MAX_WORKERS,
+        # "postgres": posts and metrics come from Riviu Data by month (/riviu-data/*), not workbooks.
+        "storage": store_config.ACTIVE.backend,
     }

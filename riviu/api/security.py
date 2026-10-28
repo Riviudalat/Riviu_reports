@@ -56,8 +56,10 @@ LOGIN_NEXT_PATHS = {"/", ADMIN_PATH}
 VIEWER_GET_PATHS = frozenset({
     "/", "/api/version", "/list-files", "/preview-excel", "/summary-dashboard",
     "/source-preferences", "/report-partners", "/scrape-history",
+    # The same reads on the Riviu Data Postgres (riviu/api/riviu_data.py, 404 on workbook storage).
+    "/riviu-data/months", "/riviu-data/rows", "/riviu-data/report-partners",
 })
-VIEWER_POST_PATHS = frozenset({"/export-report"})
+VIEWER_POST_PATHS = frozenset({"/export-report", "/riviu-data/export-report"})
 # Built frontend assets (the React app under /app/) and the classic page's static files.
 VIEWER_ASSET_PREFIXES = ("/static/", "/app/")
 VIEWER_FORBIDDEN = "Tài khoản của bạn chỉ có quyền xem và tải báo cáo đối tác."

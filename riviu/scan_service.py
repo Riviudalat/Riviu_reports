@@ -7,6 +7,11 @@ One scan is a main pass over the sheet, then (option `retry_failed`, on by defau
 pass over the rows that ended with a transient error, after a cooldown. Each pass runs under a
 stall watchdog, and `riviu.scan_journal` records the rows each save wrote, so a stalled pass or
 a restarted server continues with only the rows not yet saved (`resume_interrupted_scan`).
+
+With `RIVIU_STORAGE=postgres` the source is a Riviu Data month instead of a workbook: the start
+payload names `file_id` "riviu-data" and the month (`YYYY-MM`) as `sheet_name`, each pass reads
+the month's rows through a fresh `PostgresScanSession` and writes `bao_cao`, and the run holds
+the platform's advisory lock and records itself in `scan_run` (`StoreRun`).
 """
 
 import asyncio
@@ -24,6 +29,9 @@ from riviu.platforms.tiktok import clamp_worker_count, run_scraper
 from riviu.platforms.tiktok_session import TikTokSessionError
 from riviu.proxy_utils import resolve_proxy_configs
 from riviu.reports import build_google_push_rows
+from riviu.store import config as store_config
+from riviu.store import postgres as store_postgres
+from riviu.store.rules import MonthError, parse_thang
 from riviu.source_files import (
     SourceRequestError,
     file_display_label,
@@ -50,6 +58,8 @@ _cooldown_sleep = asyncio.sleep
 COOKIE_LABELS = {"threads": "Cookie Threads", "tiktok": "Cookie TikTok"}
 # Saved-session states that cannot log a scan in; the scan is refused instead of running anonymously.
 UNUSABLE_COOKIE_STATES = frozenset({"none", "expired", "invalid", "checkpoint", "storage_unavailable", "missing_session"})
+# The source a Postgres-backed scan names in place of a workbook file id (its sheet is the month).
+RIVIU_DATA_FILE_ID = "riviu-data"
 
 
 def cookie_problem_message(platform, detail=""):
@@ -122,7 +132,7 @@ class RunEvents:
 
 def pass_options(options):
     """Row limits and the save hook of one pass (set by run_scan_passes; absent: every row)."""
-    return {key: options[key] for key in ("skip_rows", "only_rows", "on_rows_saved") if options.get(key) is not None}
+    return {key: options[key] for key in ("skip_rows", "only_rows", "on_rows_saved", "store_session") if options.get(key) is not None}
 
 
 async def run_tiktok_scan(target_path, events, options):
@@ -171,8 +181,10 @@ def scan_options(**overrides):
         # One more pass over transient failures after a cooldown; `scheduled`: started by the scheduler.
         "retry_failed": True, "scheduled": False,
     }
-    # `resume`: the journal of an interrupted run this start continues (resume_interrupted_scan).
-    unknown = set(overrides) - set(options) - {"threads_cookies", "threads_proxies", "threads_generation", "tiktok_cookies", "resume"}
+    # `resume`: the journal of an interrupted run this start continues (resume_interrupted_scan);
+    # `started_by`: who the Riviu Data scan_run names (the admin's username, or the scheduler).
+    unknown = set(overrides) - set(options) - {
+        "threads_cookies", "threads_proxies", "threads_generation", "tiktok_cookies", "resume", "started_by"}
     if unknown:
         raise TypeError(f"Unknown scan options: {sorted(unknown)}")
     return {**options, **overrides}
@@ -331,7 +343,7 @@ async def run_retry_pass(runner, target_path, events, options, journal, rows_of)
         await handle_stall(journal)
 
 
-async def run_scan_passes(target_path, events, options, journal):
+async def run_scan_passes(target_path, events, options, journal, runner=None):
     """Main pass (resumed past saved rows), then the retry pass. Returns the terminal status.
 
     The retry pass covers two kinds of rows. Transient errors are rescanned the same way after
@@ -342,7 +354,7 @@ async def run_scan_passes(target_path, events, options, journal):
     """
     manager = scan_state.manager
     platform = options["platform"]
-    runner = SCAN_RUNNERS[platform]
+    runner = runner or SCAN_RUNNERS[platform]
     combined = False  # counts come from the journal once a resume or a retry pass happened
     prior = None
     main_terminal = None
@@ -493,6 +505,121 @@ def user_cancel_scan():
     return True
 
 
+def store_scan(options):
+    return options.get("file_id") == RIVIU_DATA_FILE_ID
+
+
+def month_title(thang):
+    year, month = thang.split("-")
+    return f"tháng {int(month)}/{year}"
+
+
+class StoreRun:
+    """One scan of a Riviu Data month: the platform's advisory lock and `scan_run` row for the whole
+    run, and a fresh `PostgresScanSession` per pass (`runner`), so the retry pass reads current rows."""
+
+    def __init__(self, options):
+        self.options = options
+        self.platform = options["platform"]
+        self.thang = options["sheet_name"]
+        self.store = store_postgres.PostgresStore(self.platform, store_config.ACTIVE.database_url)
+        self.lock_conn = None
+        self.run_id = None
+        self.totals = {"written": 0, "skipped": 0, "lockedRows": 0, "invalidLinks": 0}
+        self.skipped = []
+        self.diagnostic = {}
+
+    async def open(self):
+        month_start, _ = parse_thang(self.thang)
+        scheduled = bool(self.options.get("scheduled"))
+        conn = await self.store.connect()
+        try:
+            if not await store_postgres.try_scan_lock(conn, self.platform):
+                raise ValueError("Riviu Data đang có một phiên quét khác của nền tảng này; thử lại sau.")
+            try:
+                self.run_id = await store_postgres.begin_scan_run(
+                    conn, platform=self.platform, month_start=month_start,
+                    trigger="timer" if scheduled else "thu_cong",
+                    started_by=self.options.get("started_by") or ("riviu-reports:lich" if scheduled else "riviu-reports"),
+                )
+            except BaseException:
+                await store_postgres.release_scan_lock(conn, self.platform)
+                raise
+        except BaseException:
+            await conn.close()
+            raise
+        self.lock_conn = conn
+
+    async def runner(self, target_path, events, options):
+        """One pass (main or retry) on rows read now; the session's writes are flushed by the scanner."""
+        partners = options["partners"] or ([options["partner"]] if options["partner"] else [])
+        session = await self.store.open_scan(self.thang, selected_partners=partners, run_id=self.run_id, events=events)
+        try:
+            if session.locked_count and not self.totals["lockedRows"]:
+                await scan_state.manager.broadcast_log(f"Bỏ qua {session.locked_count} dòng đã khoá chỉ số.")
+            self.totals["lockedRows"] = session.locked_count
+            await SCAN_RUNNERS[self.platform](target_path, events, {**options, "store_session": session})
+        finally:
+            self.totals["written"] += session.written
+            self.totals["skipped"] += len(session.skipped)
+            self.totals["invalidLinks"] = max(self.totals["invalidLinks"], len(session.invalid_links))
+            self.skipped.extend(session.skipped[:max(0, 200 - len(self.skipped))])
+            self.diagnostic.update(session.diagnostic)
+            await session.close()
+
+    async def close(self, phase, terminal, error=""):
+        """Record the end in scan_run (best effort) and release the lock."""
+        if self.lock_conn is None:
+            return
+        terminal = terminal or {}
+        counts = {key: terminal[key] for key in ("total", "processed", "success", "error", "hidden") if key in terminal}
+        diagnostic = {**self.diagnostic, "skippedRows": self.skipped}
+        if error:
+            diagnostic["error"] = error[:500]
+        stop_reason = terminal.get("stopReason") or ("huy" if phase == store_postgres.PHASE_CANCELLED else None)
+        try:
+            await store_postgres.update_scan_run(
+                self.lock_conn, self.run_id, totals={**counts, **self.totals}, phase=phase,
+                stop_reason=stop_reason, diagnostic=diagnostic, finished=True,
+            )
+        finally:
+            conn, self.lock_conn = self.lock_conn, None
+            try:
+                await store_postgres.release_scan_lock(conn, self.platform)
+            finally:
+                await conn.close()
+
+
+async def run_store_passes(options, events, journal):
+    """The passes of a Riviu Data scan under its lock and scan_run row; returns the terminal status."""
+    run = StoreRun(options)
+    await run.open()
+    phase, terminal, error = store_postgres.PHASE_FAILED, None, ""
+    try:
+        terminal = await run_scan_passes(options["file_label"], events, options, journal, runner=run.runner)
+        phase = store_postgres.PHASE_STOPPED if terminal.get("stopReason") else store_postgres.PHASE_DONE
+        if run.totals["skipped"]:
+            await scan_state.manager.broadcast_log(
+                f"Bỏ qua {run.totals['skipped']} dòng đã bị sửa, xoá hoặc khoá trong lúc quét (giữ nguyên).", level="WARN")
+        return terminal
+    except asyncio.CancelledError:
+        phase = store_postgres.PHASE_CANCELLED
+        raise
+    except Exception as exc:
+        error = str(exc)
+        raise
+    finally:
+        # Shielded: a cancelled scan still records its end and releases the advisory lock.
+        closing = asyncio.ensure_future(run.close(phase, terminal or scan_state.manager.last_status, error))
+        try:
+            await asyncio.shield(closing)
+        except asyncio.CancelledError:
+            await asyncio.gather(closing, return_exceptions=True)
+            raise
+        except Exception:
+            logger.warning("Riviu Data: không ghi được kết thúc scan_run %s", run.run_id)
+
+
 async def run_scraper_safely(target_path, options, run_context=None):
     """Run one scan transaction; `options` holds the validated start payload (see websocket start)."""
     manager = scan_state.manager
@@ -501,6 +628,15 @@ async def run_scraper_safely(target_path, options, run_context=None):
     journal = None
     run_id = (run_context or {}).get("runId")
     try:
+        if store_scan(options):
+            if run_context is None:
+                run_id = manager.begin_run(platform, RIVIU_DATA_FILE_ID, options["sheet_name"])["runId"]
+            options = {**options, "file_label": f"Riviu Data {month_title(options['sheet_name'])}"}
+            journal = await begin_journal(options)
+            terminal = await run_store_passes(options, events, journal)
+            await journal.clear()
+            await manager.broadcast_status({**terminal, "done": True, "phase": "completed"})
+            return
         file_id = file_id_for_path(target_path)
         if run_context is None:
             run_id = manager.begin_run(platform, file_id, options["sheet_name"])["runId"]
@@ -570,12 +706,11 @@ def finalize_unstarted_run(task, run_id):
     }))
 
 
-async def prepare_scan_start(payload):
-    """Validate a start request against the workbook the client names; never the last /select-file."""
-    platform = validate_platform(payload.get("platform", "tiktok"))
+async def resolve_workbook_start(payload, platform):
+    """(file_id, path, sheet) of a workbook scan start."""
     if "file_id" in payload and (not isinstance(payload["file_id"], str) or not payload["file_id"]):
         raise SourceRequestError("Chưa chọn workbook hợp lệ")
-    file_id, target_path, _, platform = resolve_source_file(payload.get("file_id"), platform)
+    file_id, target_path, _, _ = resolve_source_file(payload.get("file_id"), platform)
     if not target_path or not os.path.isfile(target_path):
         raise SourceRequestError("Chưa chọn workbook hợp lệ")
     sheets = await asyncio.to_thread(find_data_sheet_names, target_path)
@@ -585,6 +720,40 @@ async def prepare_scan_start(payload):
     sheet_name = clean_text(payload.get("sheet_name", "")) or (legacy_sheet if legacy_sheet in sheets else default_data_sheet(sheets))
     if sheet_name not in sheets:
         raise ValueError("Sheet không tồn tại")
+    return file_id, target_path, sheet_name
+
+
+async def store_months(platform):
+    """[("YYYY-MM", rows)] of the platform's month sheets in Riviu Data, newest first."""
+    return await store_postgres.PostgresStore(platform, store_config.ACTIVE.database_url).months()
+
+
+async def resolve_store_month(platform, value):
+    """The month a Riviu Data scan covers: the one asked for, else the newest month not in the future."""
+    from riviu.api.riviu_data import default_month
+
+    thang = clean_text(value)
+    if not thang:
+        thang = default_month([month for month, _ in await store_months(platform)])
+        if not thang:
+            raise ValueError("Riviu Data chưa có tháng nào để quét.")
+    try:
+        parse_thang(thang)
+    except MonthError as error:
+        raise ValueError(f"Tháng không hợp lệ: {error}") from error
+    return thang
+
+
+async def prepare_scan_start(payload):
+    """Validate a start request against the workbook the client names; never the last /select-file.
+
+    On Postgres storage the source is a Riviu Data month (`sheet_name` "YYYY-MM", default the newest)."""
+    platform = validate_platform(payload.get("platform", "tiktok"))
+    if store_config.ACTIVE.postgres:
+        file_id, target_path = RIVIU_DATA_FILE_ID, None
+        sheet_name = await resolve_store_month(platform, payload.get("sheet_name", ""))
+    else:
+        file_id, target_path, sheet_name = await resolve_workbook_start(payload, platform)
     scrape_mode = clean_text(payload.get("scrape_mode", "")).lower()
     if scrape_mode not in {"request", "browser", "hybrid"}:
         scrape_mode = "request"
@@ -604,10 +773,14 @@ async def prepare_scan_start(payload):
         proxy_text=proxy_text,
         partner=clean_text(payload.get("partner", "")) or None,
         partners=[clean_text(name) for name in partners_payload if clean_text(name)] if isinstance(partners_payload, list) else [],
-        create_result_sheet=bool(payload.get("create_result_sheet", False)),
-        push_to_google=bool(payload.get("push_to_google", False)),
+        # A Riviu Data month has no result tab and no Google Sheet to push to.
+        create_result_sheet=bool(payload.get("create_result_sheet", False)) and target_path is not None,
+        push_to_google=bool(payload.get("push_to_google", False)) and target_path is not None,
         retry_failed=payload.get("retry_failed", True) is not False,
     )
+    started_by = payload.get("started_by")
+    if target_path is None and isinstance(started_by, str) and started_by.strip():
+        options["started_by"] = started_by.strip()[:200]
     if platform == "threads" and payload.get("use_threads_session") is True:
         generation = payload.get("threads_session_generation")
         if not isinstance(generation, str) or not generation:

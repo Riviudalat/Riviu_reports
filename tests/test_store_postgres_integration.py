@@ -437,3 +437,116 @@ def test_partner_export_from_riviu_data_keeps_untrusted_text_literal(api, db):
     assert (sheet["C4"].value, sheet["D4"].value, sheet["E4"].value) == (TIKTOK_URL, 500, 0)
     # The September row (another thang_nam) is not in the October report.
     assert TIKTOK_URL + "?sep" not in [cell.value for cell in sheet["C"]]
+
+
+# ---- the web app on Riviu Data (scan_service, scheduler, /riviu-data reads) ------------------
+
+def test_months_and_rows_list_the_month_sheets_and_keep_unknown_metrics_blank(api, db):
+    from riviu import app as backend
+
+    known = insert("tiktok", ngay_air=dt.date(2026, 10, 2), link_air=TIKTOK_URL, doi_tac="Cafe A",
+                   ten_kenh="demo", luot_xem=0, tim=7, trang_thai_quet="Success")
+    unscanned = insert("tiktok", ngay_air=dt.date(2026, 10, 3), link_air=TIKTOK_URL + "?n", doi_tac="Cafe B")
+    insert("tiktok", ngay_air=dt.date(2026, 9, 30), link_air=TIKTOK_URL + "?sep", doi_tac="Cafe A")
+    # A month staff opened ahead of time is listed but not the default.
+    insert("tiktok", ngay_air=dt.date(2099, 1, 5), link_air=TIKTOK_URL + "?future")
+    insert("tiktok", ngay_air=None, link_air=TIKTOK_URL + "?nomonth")
+    with TestClient(backend.app, base_url="http://127.0.0.1") as local:
+        local.get("/")
+        months = local.get("/riviu-data/months", params={"platform": "tiktok"}).json()
+        rows = local.get("/riviu-data/rows", params={"platform": "tiktok", "thang": "2026-10"}).json()
+    assert [(m["thang"], m["rows"]) for m in months["months"]] == [("2099-01", 1), ("2026-10", 2), ("2026-09", 1)]
+    assert months["defaultThang"] == "2026-10" and months["months"][1]["label"] == "Tháng 10/2026"
+    by_id = {item["id"]: item for item in rows["rows"]}
+    assert set(by_id) == {known, unscanned}
+    assert (by_id[known]["views"], by_id[known]["likes"], by_id[known]["saves"], by_id[known]["status"]) == (0, 7, None, "Success")
+    assert by_id[unscanned]["views"] is None and by_id[unscanned]["ngayAir"] == "03/10/2026"
+    assert "reposts" not in by_id[known] and rows["partners"] == ["Cafe A", "Cafe B"]
+
+
+def _metrics(**known):
+    return {"views": None, "likes": None, "comments": None, "reposts": None, "shares": None, **known}
+
+
+def _threads_results(monkeypatch, outcomes):
+    """fetch_threads_http answers each URL with its queued outcomes in order (the last one repeats)."""
+    from riviu.platforms import threads
+    from tests.pg_fakes import NoPlaywright
+
+    calls = []
+
+    def fetch(url):
+        calls.append(url)
+        queue = outcomes[url]
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+
+    monkeypatch.setattr(threads, "async_playwright", NoPlaywright)
+    monkeypatch.setattr(threads, "fetch_threads_http", fetch)
+    return calls
+
+
+def test_a_scan_from_the_web_app_retries_transient_errors_and_records_one_scan_run(api, db, monkeypatch, tmp_path):
+    from riviu import scan_journal, scan_service
+
+    ok = insert("threads", ngay_air=dt.date(2026, 10, 2), link_air=THREADS_URL, doi_tac="Cafe A", luot_xem=9)
+    flaky = insert("threads", ngay_air=dt.date(2026, 10, 3), link_air=THREADS_URL[:-1] + "X", doi_tac="Cafe A", luot_xem=4)
+    calls = _threads_results(monkeypatch, {
+        THREADS_URL: [{"channel": "miri_viu", "metrics": _metrics(views=372, likes=0, comments=0, reposts=1, shares=0), "error": ""}],
+        THREADS_URL[:-1] + "X": [
+            {"channel": "", "error": "HTTP 503", "error_kind": "http", "metrics": _metrics()},
+            {"channel": "miri_viu", "metrics": _metrics(views=50, likes=2, comments=0, reposts=0, shares=0), "error": ""},
+        ],
+    })
+    monkeypatch.setattr(scan_service, "_cooldown_sleep", lambda _seconds: asyncio.sleep(0))
+
+    async def scan():
+        _, options = await scan_service.prepare_scan_start({
+            "platform": "threads", "workers": 1, "scrape_mode": "request", "started_by": "riviu-reports:quan.ly",
+            # Never honoured on Riviu Data: no result tab, no Google Sheet.
+            "create_result_sheet": True, "push_to_google": True,
+        })
+        assert (options["file_id"], options["sheet_name"]) == ("riviu-data", "2026-10")
+        assert not options["create_result_sheet"] and not options["push_to_google"]
+        await scan_service.run_scraper_safely(None, options)
+
+    run(scan())
+    status = scan_state.manager.last_status
+    assert status["phase"] == "completed" and status["success"] == 2 and status["error"] == 0, status.get("message", status)
+    assert calls.count(THREADS_URL[:-1] + "X") == 2 and calls.count(THREADS_URL) == 1
+    assert row("threads", ok)["luot_xem"] == 372 and row("threads", flaky)["luot_xem"] == 50
+    [scan_run] = run(sql("SELECT * FROM public.scan_run", fetch=True))
+    assert (scan_run["phase"], scan_run["mode"], scan_run["started_by"]) == ("hoan_tat", "thu_cong", "riviu-reports:quan.ly")
+    assert scan_run["thang_nam"] == dt.date(2026, 10, 1) and scan_run["finished_at"] is not None
+    assert '"written": 3' in scan_run["totals"]  # 2 rows in the main pass + 1 in the retry pass
+    assert scan_journal.load_journal(str(tmp_path)) is None
+    # The advisory lock was released: another scan of the platform may start.
+
+    async def lock_free():
+        conn = await asyncpg.connect(db["scanner"])
+        try:
+            return await conn.fetchval("SELECT pg_try_advisory_lock(hashtext('scan:threads'))")
+        finally:
+            await conn.close()
+
+    assert run(lock_free())
+
+
+def test_a_scheduled_slot_scans_the_newest_month_without_google(api, db, monkeypatch):
+    from riviu import scheduler
+
+    target = insert("threads", ngay_air=dt.date(2026, 10, 2), link_air=THREADS_URL, doi_tac="Cafe A")
+    insert("threads", ngay_air=dt.date(2026, 9, 2), link_air=THREADS_URL + "?sep", doi_tac="Cafe A")
+    calls = _threads_results(monkeypatch, {THREADS_URL: [{"channel": "miri_viu", "metrics": _metrics(views=11, likes=1, comments=0, reposts=0, shares=0), "error": ""}]})
+
+    async def no_sync(url, platform):
+        raise AssertionError("Riviu Data storage never downloads a Google Sheet")
+
+    async def job():
+        return await scheduler.Scheduler(sync=no_sync).run_job("threads", "07:30")
+
+    entry = run(job())
+    assert entry["status"] == "completed" and entry["message"] == "Đã quét xong.", entry
+    assert (entry["fileId"], entry["sheet"]) == ("riviu-data", "2026-10")
+    assert calls == [THREADS_URL] and row("threads", target)["luot_xem"] == 11
+    [scan_run] = run(sql("SELECT mode, started_by FROM public.scan_run", fetch=True))
+    assert (scan_run["mode"], scan_run["started_by"]) == ("timer", "riviu-reports:lich")

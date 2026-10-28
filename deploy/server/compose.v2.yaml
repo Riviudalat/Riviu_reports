@@ -1,0 +1,58 @@
+# Riviu Reports V2 on the Riviu Data Postgres, run next to V1 while it is checked out
+# (docs/riviu-data-postgres.md). Its own checkout, data dir, env and port; same image recipe.
+# Run from the V2 checkout's root:
+#   docker compose -f deploy/server/compose.v2.yaml up -d --build
+# Secrets live on the host under /etc/riviu-v2 (env, DSN file, scan token), never in this repo.
+
+name: riviu-v2
+
+services:
+  riviu:
+    build:
+      context: ../..
+      dockerfile: deploy/server/Dockerfile
+    image: riviu-reports-v2:latest
+    restart: unless-stopped
+    init: true
+    env_file:
+      - /etc/riviu-v2/riviu.env
+    environment:
+      RIVIU_SERVER_MODE: "1"
+      RIVIU_HOST: 0.0.0.0
+      RIVIU_PORT: "8000"
+      RIVIU_DATA_DIR: /data
+      RIVIU_PASSWORD_HASH_FILE: /run/secrets/riviu_password_hash
+      RIVIU_SECRET_KEY_FILE: /run/secrets/riviu_secret_key
+      RIVIU_STORAGE: postgres
+      RIVIU_DATABASE_URL_FILE: /run/secrets/riviu_database_url
+      RIVIU_SCAN_TOKEN_FILE: /run/secrets/riviu_scan_token
+      RIVIU_FORWARDED_ALLOW_IPS: 172.31.111.1
+    volumes:
+      - /srv/riviu-v2/data:/data
+      - /etc/riviu-v2/password.hash:/run/secrets/riviu_password_hash:ro
+      # The V1 key, so the copied Cookie Threads / Cookie TikTok stores decrypt.
+      - /etc/riviu/secret.key:/run/secrets/riviu_secret_key:ro
+      - /etc/riviu-v2/db-url:/run/secrets/riviu_database_url:ro
+      - /etc/riviu-v2/scan-token:/run/secrets/riviu_scan_token:ro
+    ports:
+      - "127.0.0.1:18111:8000"
+    mem_limit: 4g
+    shm_size: 1gb
+    networks:
+      - riviu
+      # Riviu Data's Postgres (host riviu-data-db:5432); never the published host port.
+      - riviu-data
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+networks:
+  riviu:
+    ipam:
+      config:
+        - subnet: 172.31.111.0/24
+          gateway: 172.31.111.1
+  riviu-data:
+    external: true

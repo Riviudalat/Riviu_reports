@@ -73,6 +73,9 @@ def test_every_route_outside_the_viewer_allowlist_needs_the_admin_login(server, 
         ("GET", "/summary-dashboard"), ("GET", "/source-preferences"), ("GET", "/report-partners"),
         ("GET", "/scrape-history"), ("POST", "/export-report"), ("GET", "/logo.png"),
         ("GET", "/riviu-logo.png"), ("GET", "/favicon.ico"),
+        # The same reads on Riviu Data (RIVIU_STORAGE=postgres; 404 here on workbook storage).
+        ("GET", "/riviu-data/months"), ("GET", "/riviu-data/rows"), ("GET", "/riviu-data/report-partners"),
+        ("POST", "/riviu-data/export-report"),
     }
 
 
