@@ -1,4 +1,5 @@
-"""Server-mode login: the shared-password page, logout, the health probe and the auth probe.
+"""Server-mode login: the login page (account or, before any account exists, the shared
+password), logout, the health probe and the auth probe (which also reports the role).
 
 The login guards administration (`/admin` and every non-viewer API); after a login the
 browser returns to `next` (only `/admin` or `/`), and logout returns to the public viewer `/`.
@@ -13,7 +14,7 @@ from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, PlainTextResponse, RedirectResponse
 
 from riviu import server_context as context
-from riviu import server_mode
+from riviu import server_mode, server_users
 from riviu.api import security
 from riviu.api.pages import static_asset_version, templates
 
@@ -21,6 +22,7 @@ from riviu.api.pages import static_asset_version, templates
 router = APIRouter()
 MAX_PASSWORD_LENGTH = 1024
 WRONG_PASSWORD = "Sai mật khẩu."
+WRONG_LOGIN = "Sai tên đăng nhập hoặc mật khẩu."
 TOO_MANY_ATTEMPTS = "Nhập sai quá nhiều lần. Vui lòng thử lại sau 15 phút."
 
 
@@ -28,13 +30,17 @@ def _not_found():
     return JSONResponse({"error": "Not Found"}, status_code=404)
 
 
-def _login_page(request: Request, error: str = "", status_code: int = 200, next_path: str = security.ADMIN_PATH):
+def _login_page(request: Request, error: str = "", status_code: int = 200, next_path: str = security.ADMIN_PATH,
+                username: str = ""):
+    store = server_users.active_store()
     return templates.TemplateResponse(
         request=request,
         name="login.html",
         context={
             "error": error,
             "next_path": security.safe_login_next(next_path),
+            "username": username,
+            "accounts": bool(store and store.has_users()),
             "asset_version": static_asset_version(context.APP_RESOURCE_DIR),
         },
         status_code=status_code,
@@ -50,8 +56,9 @@ async def healthz():
 async def auth_status(request: Request):
     if server_mode.ACTIVE is None:
         return _not_found()
-    authenticated = security.valid_server_session(request)
-    return {"authenticated": authenticated, "role": "admin" if authenticated else "viewer"}
+    identity = security.request_identity(request)
+    role = identity["role"] if identity and identity["role"] == server_users.ROLE_ADMIN else "viewer"
+    return {"authenticated": identity is not None, "role": role, "user": identity}
 
 
 @router.get(security.LOGIN_PATH, include_in_schema=False)
@@ -80,16 +87,31 @@ async def login(request: Request):
     next_path = security.safe_login_next(form.get("next"))
     password = form.get("password")
     password = password if isinstance(password, str) else ""
-    ok = 0 < len(password) <= MAX_PASSWORD_LENGTH and await asyncio.to_thread(
-        server_mode.verify_password, password, config.password_hash,
-    )
+    username = form.get("username")
+    username = server_users.normalize_username(username if isinstance(username, str) else "")[:64]
+    store = server_users.active_store()
+    account = None
+    if not 0 < len(password) <= MAX_PASSWORD_LENGTH:
+        ok = False
+    elif store.has_users():
+        # Once accounts exist, every login names one; the shared password no longer works.
+        account = await asyncio.to_thread(store.verify, username, password)
+        ok = account is not None
+    else:
+        ok = await asyncio.to_thread(server_mode.verify_password, password, config.password_hash)
     if not ok:
         limiter.record_failure(client)
         if limiter.blocked(client):
-            return _login_page(request, TOO_MANY_ATTEMPTS, status_code=429, next_path=next_path)
-        return _login_page(request, WRONG_PASSWORD, status_code=401, next_path=next_path)
+            return _login_page(request, TOO_MANY_ATTEMPTS, status_code=429, next_path=next_path, username=username)
+        error = WRONG_LOGIN if store.has_users() else WRONG_PASSWORD
+        return _login_page(request, error, status_code=401, next_path=next_path, username=username)
     limiter.reset(client)
-    token = await asyncio.to_thread(security.login_sessions().create)
+    if account:
+        token = await asyncio.to_thread(
+            security.login_sessions().create, account["username"], server_mode.password_fingerprint(account["hash"]),
+        )
+    else:
+        token = await asyncio.to_thread(security.login_sessions().create)
     response = RedirectResponse(next_path, status_code=303)
     security.set_auth_cookie(response, token)
     return response

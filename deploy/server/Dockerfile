@@ -1,7 +1,17 @@
-# Riviu Reports in server mode (shared password, behind nginx). Build from the repo root:
+# Riviu Reports in server mode (accounts, behind nginx). Build from the repo root:
 #   docker compose -f deploy/server/compose.yaml build
 # The build context is an allowlist (Dockerfile.dockerignore): only pyproject.toml,
-# uv.lock and riviu/ are sent, so data/, tokens and OAuth files never enter the image.
+# uv.lock, riviu/ and frontend/ (without node_modules) are sent, so data/, tokens and
+# OAuth files never enter the image.
+
+# The React web app (frontend/) is built in its own stage; only its static output
+# (riviu/web/app) reaches the runtime image.
+FROM node:22-bookworm-slim AS web
+WORKDIR /build/frontend
+COPY frontend/package.json frontend/package-lock.json ./
+RUN npm ci --no-audit --no-fund
+COPY frontend/ ./
+RUN npm run build
 
 # The tests run on 3.12 (pyproject: >=3.11,<3.15).
 FROM python:3.12-slim-bookworm
@@ -30,6 +40,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/* /root/.cache
 
 COPY riviu ./riviu
+COPY --from=web /build/riviu/web/app ./riviu/web/app
 
 RUN groupadd --system --gid 10001 riviu \
     && useradd --system --uid 10001 --gid riviu --home-dir /home/riviu --create-home riviu \

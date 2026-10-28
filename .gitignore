@@ -37,3 +37,7 @@ node_modules/
 build/
 output/
 .keys/
+
+# React web app build output (built by `npm run build` in frontend/, and by the server image)
+riviu/web/app/
+frontend/dist/

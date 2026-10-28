@@ -162,10 +162,10 @@ def test_admin_login_returns_to_admin_and_never_redirects_off_site(server):
     form = server.get("/login?next=/admin")
     assert '<input type="hidden" name="next" value="/admin">' in form.text
     assert '<input type="hidden" name="next" value="/admin">' in server.get("/login?next=https://evil.example").text
-    assert server.get("/auth-status").json() == {"authenticated": False, "role": "viewer"}
+    assert server.get("/auth-status").json() == {"authenticated": False, "role": "viewer", "user": None}
     response = server.post("/login", data={"password": "synthetic-team-password", "next": "https://evil.example/x"}, headers={"Origin": PUBLIC})
     assert response.status_code == 303 and response.headers["location"] == "/admin"
-    assert server.get("/auth-status").json() == {"authenticated": True, "role": "admin"}
+    assert server.get("/auth-status").json() == {"authenticated": True, "role": "admin", "user": {"username": "admin", "role": "admin"}}
     again = server.get("/login?next=/")
     assert again.status_code == 303 and again.headers["location"] == "/"
     assert server.get("/admin").status_code == 200

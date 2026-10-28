@@ -224,6 +224,7 @@ def test_drawer_shows_the_service_account_email_and_the_share_instruction():
 
 
 def test_index_page_has_the_upload_button_share_instruction_and_remove_action(local_app):
-    html = local_app.get("/").text
+    local_app.get("/")
+    html = local_app.get("/classic").text
     assert "Nạp tài khoản dịch vụ" in html and "Gỡ tài khoản dịch vụ" in html
     assert "Chia sẻ Google Sheet cho email này với quyền <b>Người chỉnh sửa</b>" in html

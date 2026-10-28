@@ -13,6 +13,11 @@ from riviu.api import security
 
 router = APIRouter()
 templates = Jinja2Templates(directory=os.path.join(context.APP_RESOURCE_DIR, "templates"))
+# The React web app built from frontend/ (`npm run build`); while it is missing, `/` keeps
+# serving the classic page. The classic page stays reachable at /classic during the switch.
+WEB_APP_DIR = os.path.join(context.APP_RESOURCE_DIR, "app")
+WEB_APP_INDEX = os.path.join(WEB_APP_DIR, "index.html")
+CLASSIC_PATH = "/classic"
 
 
 def static_asset_version(base_dir: str) -> str:
@@ -24,8 +29,15 @@ def static_asset_version(base_dir: str) -> str:
     return str(max(mtimes)) if mtimes else "1"
 
 
+def web_app_page():
+    """The built React app (one index for `/` and `/admin`; it asks /auth-status for the role), or None."""
+    if os.path.isfile(WEB_APP_INDEX):
+        return FileResponse(WEB_APP_INDEX, media_type="text/html", headers={"Cache-Control": "no-store"})
+    return None
+
+
 def render_app_page(request: Request, role: str):
-    """The one app page; `role` "viewer" leaves out every admin-only control (server mode `/`)."""
+    """The classic app page; `role` "viewer" leaves out every admin-only control (server mode `/`)."""
     return templates.TemplateResponse(
         request=request,
         name="index.html",
@@ -42,14 +54,20 @@ def render_app_page(request: Request, role: str):
 async def index(request: Request):
     # Server mode: `/` is the public read-only viewer for everyone (logged in or not);
     # administration lives at /admin. Source mode keeps the full app here.
-    return render_app_page(request, "viewer" if server_mode.ACTIVE is not None else "admin")
+    return web_app_page() or render_app_page(request, "viewer" if server_mode.ACTIVE is not None else "admin")
 
 
 @router.get(security.ADMIN_PATH, response_class=HTMLResponse, include_in_schema=False)
 async def admin_page(request: Request):
     if server_mode.ACTIVE is None:
         return JSONResponse({"error": "Not Found"}, status_code=404)
-    # The middleware already sent requests without a login to /login?next=/admin.
+    # The middleware already sent requests without an admin login to /login?next=/admin.
+    return web_app_page() or render_app_page(request, "admin")
+
+
+@router.get(CLASSIC_PATH, response_class=HTMLResponse, include_in_schema=False)
+async def classic_page(request: Request):
+    """The classic page while the React app is new (admin-only in server mode, like /admin)."""
     return render_app_page(request, "admin")
 
 
