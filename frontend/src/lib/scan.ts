@@ -30,6 +30,15 @@ export interface ProgressData extends RunContext {
   etaSeconds?: number | null;
   stopReason?: string;
   message?: string;
+  /** Retry pass over transient failures: during its cooldown retryWaitSeconds/retryAt are set. */
+  retryPass?: boolean;
+  retryWaitSeconds?: number;
+  /** Epoch seconds when the retry pass starts. */
+  retryAt?: number;
+  retryCount?: number;
+  /** A finished run's note (e.g. Threads posts that need Cookie Threads). */
+  notice?: string;
+  loginRequired?: number;
 }
 
 export interface ResultRow extends RunContext {
@@ -114,13 +123,26 @@ export interface ScanState {
   failed: FailedItem[];
   duplicates: DuplicateItem[];
   duplicateRowCount: number;
+  /** The retry-pass cooldown of the tracked run, or null. */
+  retryWait: RetryWait | null;
+  /** "Bỏ qua quét lại" was sent for the current cooldown. */
+  retrySkipRequested: boolean;
+}
+
+export interface RetryWait {
+  runId: string;
+  /** Epoch milliseconds when the retry pass starts. */
+  at: number;
+  count: number;
+  success: number;
+  total: number;
 }
 
 export const TERMINAL_SCAN_PHASES: readonly ScanPhase[] = ['completed', 'failed', 'cancelled'];
 export const BUSY_SCAN_PHASES: readonly ScanPhase[] = ['starting', 'running', 'saving', 'cancelling'];
 
 export function initialScanState(): ScanState {
-  return { phase: 'idle', runContext: null, terminalKey: '', progress: null, rows: [], failed: [], duplicates: [], duplicateRowCount: 0 };
+  return { phase: 'idle', runContext: null, terminalKey: '', progress: null, rows: [], failed: [], duplicates: [], duplicateRowCount: 0, retryWait: null, retrySkipRequested: false };
 }
 
 export function scanIsBusy(phase: ScanPhase): boolean {
@@ -237,10 +259,13 @@ export interface ViewContext {
 /**
  * Whether a socket event must be ignored by this page: a terminal ("done") status/event for a
  * workbook other than the one this page shows belongs to a run this page is not following.
+ * The run this page tracks (`trackedRunId`) always ends here, or the page would stay
+ * "đang quét" after the scan finished.
  */
-export function isStaleTerminalEvent(message: SocketMessage, view: ViewContext): boolean {
+export function isStaleTerminalEvent(message: SocketMessage, view: ViewContext, trackedRunId = ''): boolean {
   const data = message.data as { done?: boolean } | undefined;
-  return Boolean(data?.done && message.platform && (message.platform !== view.activePlatform || message.fileId !== view.currentFileId));
+  const trackedRun = Boolean(message.runId) && message.runId === trackedRunId;
+  return Boolean(data?.done && message.platform && !trackedRun && (message.platform !== view.activePlatform || message.fileId !== view.currentFileId));
 }
 
 /** Events other than logs carry the run context; a new runId resets the live results. */
@@ -262,7 +287,7 @@ export function applyRunContext(state: ScanState, context: RunContext): { state:
     sheetName: context.sheetName ?? state.runContext?.sheetName,
   };
   let next: ScanState = { ...state, runContext };
-  if (changedRun) next = { ...clearLive(next), terminalKey: '' };
+  if (changedRun) next = { ...clearLive(next), terminalKey: '', retryWait: null, retrySkipRequested: false };
   return { state: next, changedRun };
 }
 
@@ -286,9 +311,61 @@ export interface StatusResult {
   finished: { phase: ScanPhase; stopReason: string } | null;
 }
 
-export function applyStatus(state: ScanState, data: ProgressData, { replay = false } = {}): StatusResult {
+// ---- Retry-pass cooldown --------------------------------------------------------------
+// A live status is fresh, so the wait counts from now (immune to clock skew); a snapshot replayed
+// on (re)connect may be minutes old, so it counts to the server's retryAt (clamped to the wait).
+
+export function retryWaitFrom(data: ProgressData | null | undefined, current: RetryWait | null, runId: string, { snapshot = false, now = Date.now() } = {}): RetryWait | null {
+  const seconds = Number(data?.retryWaitSeconds);
+  if (!data || data.done || !data.retryPass || !(seconds > 0)) return null;
+  if (current && current.runId === runId) return current;
+  const serverAt = Number(data.retryAt) * 1000;
+  const at = snapshot && serverAt > 0 ? Math.min(Math.max(serverAt, now), now + seconds * 1000) : now + seconds * 1000;
+  return { runId, at, count: Number(data.retryCount) || Number(data.error) || 0, success: Number(data.success) || 0, total: Number(data.total) || 0 };
+}
+
+export function formatClockTime(ms: number): string {
+  const date = new Date(ms);
+  return `${String(date.getHours()).padStart(2, '0')}:${String(date.getMinutes()).padStart(2, '0')}`;
+}
+
+export function formatCountdown(seconds: number): string {
+  const sec = Math.max(Math.ceil(seconds), 0);
+  return `${Math.floor(sec / 60)}:${String(sec % 60).padStart(2, '0')}`;
+}
+
+/** The admin's progress line during the cooldown. */
+export function retryWaitText(wait: RetryWait, skipRequested: boolean, now = Date.now()): string {
+  const main = `Đã quét xong lượt chính (${wait.success}/${wait.total} thành công).`;
+  if (skipRequested) return `${main} Đã bỏ qua quét lại, đang kết thúc phiên quét…`;
+  const remaining = (wait.at - now) / 1000;
+  if (remaining <= 0) return `${main} Sắp quét lại ${wait.count} link lỗi…`;
+  return `${main} Chờ quét lại ${wait.count} link lỗi lúc ${formatClockTime(wait.at)} (còn ${formatCountdown(remaining)})`;
+}
+
+/** The public viewer's calm line while a scan runs. */
+export function viewerScanText(wait: RetryWait | null): string {
+  return wait
+    ? `Số liệu đã cập nhật. Hệ thống sẽ tự quét lại vài link chưa đọc được lúc ${formatClockTime(wait.at)}.`
+    : 'Đang cập nhật số liệu…';
+}
+
+/** Progress line outside the cooldown: a retry pass in progress, or a finished run's notice first. */
+export function progressLineText(data: ProgressData | null, phase: ScanPhase): string {
+  if (!data) return 'Sẵn sàng chờ lệnh...';
+  const summary = progressSummaryText(data);
+  const terminal = TERMINAL_SCAN_PHASES.includes(phase);
+  if (data.retryPass && !terminal) return `Đang quét lại ${Number(data.retryCount) || data.total || 0} link lỗi… • ${summary}`;
+  if (data.notice && phase === 'completed') return `${data.notice} • ${summary}`;
+  return summary;
+}
+
+export function applyStatus(state: ScanState, data: ProgressData, { replay = false, snapshot = false, now = Date.now() } = {}): StatusResult {
   const phase = phaseFromStatus(data);
-  let next: ScanState = { ...state, progress: data, phase };
+  const runId = String(state.runContext?.runId || '');
+  const retryWait = TERMINAL_SCAN_PHASES.includes(phase) ? null : retryWaitFrom(data, state.retryWait, runId, { snapshot, now });
+  const retrySkipRequested = retryWait && retryWait.runId === state.retryWait?.runId ? state.retrySkipRequested : false;
+  let next: ScanState = { ...state, progress: data, phase, retryWait, retrySkipRequested };
   let finished: StatusResult['finished'] = null;
   if (TERMINAL_SCAN_PHASES.includes(phase)) {
     const terminalKey = `${next.runContext?.runId || ''}:${phase}`;
@@ -334,7 +411,7 @@ export function applySessionSnapshot(state: ScanState, session: SessionSnapshot,
     next = { ...next, rows: [], failed: [], progress: null };
     for (const row of session.results || []) next = appendResult(next, row, session, view.activePlatform);
     if (session.status?.phase || session.status?.done) {
-      next = applyStatus(next, session.status, { replay: !session.running && !trackedActiveRun }).state;
+      next = applyStatus(next, session.status, { replay: !session.running && !trackedActiveRun, snapshot: true }).state;
     }
   }
   if (session.running) next = { ...next, phase: (session.status?.phase as ScanPhase) || 'running' };

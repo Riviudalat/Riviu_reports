@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
-  appendResult, applyRunContext, applySessionSnapshot, applyStatus, classifyLiveResult, initialScanState, isStaleTerminalEvent, progressResultCounts,
-  shouldApplyRunContext, type ScanState,
+  appendResult, applyRunContext, applySessionSnapshot, applyStatus, classifyLiveResult, initialScanState, isStaleTerminalEvent, progressLineText, progressResultCounts,
+  retryWaitText, shouldApplyRunContext, viewerScanText, type ScanState,
 } from './scan';
 
 const view = { activePlatform: 'tiktok' as const, currentFileId: 'data/a.xlsx' };
@@ -95,5 +95,59 @@ describe('result classification', () => {
     state = appendResult(state, { id: 2, status: 'Timeout' }, {}, 'threads');
     const counts = progressResultCounts({ processed: 2, success: 0, hidden: 1, error: 1 }, state.rows, 'threads');
     expect(counts).toEqual({ success: 1, hidden: 0, error: 1 });
+  });
+});
+
+describe('the tracked run always ends here', () => {
+  it('accepts the terminal status of the run this page follows, even for another platform or source', () => {
+    const message = { type: 'status', runId: 'run-9', platform: 'threads', fileId: 'riviu-data', data: { done: true, phase: 'completed' } };
+    // Not tracked: another source's finished run is stale.
+    expect(isStaleTerminalEvent(message, view)).toBe(true);
+    expect(isStaleTerminalEvent(message, view, 'run-other')).toBe(true);
+    // Tracked: it must end the run, or the page would stay "đang quét" forever.
+    expect(isStaleTerminalEvent(message, view, 'run-9')).toBe(false);
+  });
+});
+
+describe('retry-pass cooldown', () => {
+  const NOW = Date.UTC(2026, 9, 28, 5, 0, 0);
+  const cooldown = { phase: 'running', retryPass: true, retryWaitSeconds: 120, retryAt: NOW / 1000 + 30, retryCount: 4, success: 90, total: 100, error: 4 };
+
+  it('counts a live status from now, immune to clock skew', () => {
+    const { state } = applyStatus(running('r1'), cooldown, { now: NOW });
+    expect(state.retryWait).toEqual({ runId: 'r1', at: NOW + 120_000, count: 4, success: 90, total: 100 });
+  });
+
+  it('counts a replayed snapshot to the server retryAt, clamped to the wait', () => {
+    const { state } = applyStatus(running('r1'), cooldown, { snapshot: true, now: NOW });
+    expect(state.retryWait?.at).toBe(NOW + 30_000);
+    const late = applyStatus(running('r1'), { ...cooldown, retryAt: NOW / 1000 + 999 }, { snapshot: true, now: NOW });
+    expect(late.state.retryWait?.at).toBe(NOW + 120_000);
+  });
+
+  it('keeps one wait per run, and a terminal status ends it', () => {
+    const first = applyStatus(running('r1'), cooldown, { now: NOW }).state;
+    const later = applyStatus({ ...first, retrySkipRequested: true }, cooldown, { now: NOW + 5000 }).state;
+    expect(later.retryWait?.at).toBe(NOW + 120_000);
+    expect(later.retrySkipRequested).toBe(true);
+    const done = applyStatus(later, { phase: 'completed', done: true, total: 100, processed: 100 }, { now: NOW + 6000 });
+    expect(done.state.retryWait).toBeNull();
+    expect(done.state.retrySkipRequested).toBe(false);
+    expect(done.finished?.phase).toBe('completed');
+  });
+
+  it('shows the countdown to the admin and a calm line to the viewer', () => {
+    const wait = { runId: 'r1', at: new Date(2026, 9, 28, 14, 35).getTime(), count: 4, success: 90, total: 100 };
+    const now = wait.at - 65_000;
+    expect(retryWaitText(wait, false, now)).toBe('Đã quét xong lượt chính (90/100 thành công). Chờ quét lại 4 link lỗi lúc 14:35 (còn 1:05)');
+    expect(retryWaitText(wait, true, now)).toContain('Đã bỏ qua quét lại');
+    expect(retryWaitText(wait, false, wait.at + 1)).toContain('Sắp quét lại 4 link lỗi');
+    expect(viewerScanText(wait)).toBe('Số liệu đã cập nhật. Hệ thống sẽ tự quét lại vài link chưa đọc được lúc 14:35.');
+    expect(viewerScanText(null)).toBe('Đang cập nhật số liệu…');
+  });
+
+  it('leads the progress line with the retry pass, or with a finished run notice', () => {
+    expect(progressLineText({ retryPass: true, retryCount: 3, total: 3, processed: 1 }, 'running')).toMatch(/^Đang quét lại 3 link lỗi… • Tiến độ: 1\/3/);
+    expect(progressLineText({ notice: '2 bài Threads cần đăng nhập', total: 5, processed: 5, done: true }, 'completed')).toMatch(/^2 bài Threads cần đăng nhập • /);
   });
 });
