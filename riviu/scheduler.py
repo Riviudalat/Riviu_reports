@@ -4,7 +4,8 @@ The admin keeps, per platform, a list of daily time slots (`HH:MM`, Asia/Ho_Chi_
 scan options to use. At a slot the server, for that platform:
 
 1. syncs the platform's Google Sheet like "Nạp sheet" (`riviu.api.google.sync_google_sheet_source`)
-   and makes the new workbook that platform's saved source (`data/source_preferences.json`),
+   and makes the new workbook that platform's saved source (`data/source_preferences.json`) on
+   its newest month sheet (`keep_or_newest_month_sheet`),
 2. starts one scan of it through `scan_service.prepare_scan_start` / `start_scan_task`, so open
    pages follow it live over `/ws` like a manual scan,
 3. never pushes to Google: "Tạo sheet" stays a manual admin action.
@@ -32,10 +33,10 @@ import re
 import secrets
 from datetime import datetime, timedelta, timezone
 
-from riviu import scan_service, scan_state
+from riviu import scan_service, scan_settings, scan_state
 from riviu import server_context as context
 from riviu import source_files
-from riviu.workbook_utils import PLATFORMS, google_sheet_source_for_file, write_json_atomic
+from riviu.workbook_utils import PLATFORMS, google_sheet_source_for_file, keep_or_newest_month_sheet, write_json_atomic
 
 try:
     from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -53,8 +54,8 @@ MAX_BODY_BYTES = 16384
 # current minute's slots; the minutes in between are skipped, never replayed.
 CATCH_UP_LIMIT = timedelta(minutes=3)
 SLOT_PATTERN = re.compile(r"^(?:[01]\d|2[0-3]):[0-5]\d$")
-SCRAPE_MODES = ("request", "hybrid", "browser")
-WORKER_CHOICES = (1, 3, 5, 8, 10, 20, 25, 30, 50)
+SCRAPE_MODES = scan_settings.SCRAPE_MODES
+WORKER_CHOICES = scan_settings.WORKER_CHOICES
 
 logger = logging.getLogger("riviu.scheduler")
 
@@ -67,18 +68,20 @@ def runs_path(base_dir=None):
     return os.path.join(base_dir or context.EXCEL_DIR, "data", "scan_schedule_runs.json")
 
 
-# The page's defaults (PLATFORMS[*].defaultScrapeMode in app.js, 10 workers).
-DEFAULT_SCRAPE_MODES = {"tiktok": "request", "threads": "hybrid"}
+DEFAULT_SCRAPE_MODES = scan_settings.DEFAULT_SCRAPE_MODES
 LOG_LEVELS = {"completed": "OK", "skipped": "WARN", "stopped": "WARN", "cancelled": "WARN", "failed": "ERROR"}
 
 
 def default_options(platform):
-    return {"workers": 10, "scrapeMode": DEFAULT_SCRAPE_MODES.get(platform, "request"), "useProxy": False, "useSession": False,
-            "retryFailed": True}
+    return {**scan_settings.default_settings(platform), "retryFailed": True}
 
 
-def empty_schedule():
-    return {"version": SCHEDULE_VERSION, "platforms": {key: {"slots": [], "options": default_options(key)} for key in PLATFORMS}}
+def empty_schedule(seed=None):
+    """No slots; options from `seed` (the admin's saved scan settings) or the page defaults."""
+    seed = seed or {}
+    return {"version": SCHEDULE_VERSION, "platforms": {
+        key: {"slots": [], "options": {**default_options(key), **seed.get(key, {})}} for key in PLATFORMS
+    }}
 
 
 # ---- Configuration ---------------------------------------------------------------------
@@ -156,7 +159,8 @@ def load_schedule(base_dir=None):
         with open(schedule_path(base_dir), encoding="utf-8") as stream:
             return normalize_schedule(json.load(stream))
     except FileNotFoundError:
-        return empty_schedule()
+        # Nothing scheduled yet: a first slot starts from the admin's scan settings.
+        return empty_schedule(scan_settings.load_settings(base_dir)["platforms"])
     except (OSError, ValueError, TypeError) as error:
         logger.warning("Không đọc được lịch tự động: %s", error)
         return empty_schedule()
@@ -264,12 +268,12 @@ def platform_source(platform):
 
 def adopt_synced_source(preferences, platform, source, synced, url):
     """Make the freshly synced workbook the platform's source, as the admin page does after
-    "Nạp sheet". The saved scan sheet is kept when the new workbook still has it."""
+    "Nạp sheet", on the newest month sheet ("Tháng 10" once it exists). The saved scan sheet is
+    kept only while the new workbook still has it and holds no newer month."""
     from riviu.api.sources import save_source_preferences
 
     data_sheets = synced.get("dataSheets") or []
-    saved = source.get("scanSheet", "")
-    sheet = saved if saved in data_sheets else synced.get("currentSheet", "")
+    sheet = keep_or_newest_month_sheet(data_sheets, source.get("scanSheet", "")) or synced.get("currentSheet", "")
     sources = {key: dict(value) for key, value in preferences.get("sources", {}).items()}
     sources[platform] = {
         **{key: "" for key in ("fileId", "displaySheet", "scanSheet", "pushSheet", "url")},

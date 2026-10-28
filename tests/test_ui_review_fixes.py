@@ -114,11 +114,16 @@ def test_scan_start_shared_proxy_settings_and_safe_logs(platform, use_proxy, has
 
 
 def test_proxy_settings_survive_platform_switch_and_use_saved_text():
+    # Owner report: Threads' "Proxy xoay" was off again after a trip to the TikTok tab. The
+    # toolbar is per platform now: each tab gets back its own switches.
     run_js("""
-      ws=new WebSocket('test'); el('proxyUseCheckbox').checked=true;
+      ws=new WebSocket('test');
       proxyListText='proxy.example:8080'; el('proxyTextInput').value='';
-      applyPlatformUI('threads'); applyPlatformUI('tiktok'); applyPlatformUI('threads');
-      assert.equal(el('proxyUseCheckbox').checked,true);
+      applyPlatformUI('threads'); el('proxyUseCheckbox').checked=true; el('workerCountSelect').value='20';
+      applyPlatformUI('tiktok');
+      assert.equal(el('proxyUseCheckbox').checked,false); assert.equal(el('workerCountSelect').value,'10');
+      applyPlatformUI('threads');
+      assert.equal(el('proxyUseCheckbox').checked,true); assert.equal(el('workerCountSelect').value,'20');
       assert.equal(currentProxyText(),'proxy.example:8080');
       startScraping([],'Data');
       assert.equal(sent[0].platform,'threads'); assert.equal(sent[0].use_proxy,true);
@@ -684,3 +689,60 @@ def test_real_dom_threads_snapshot_keeps_blank_metrics_and_locked_controls():
             assert 'Đang lưu' in page.locator('#progressStatus').inner_text()
         finally:
             browser.close()
+
+
+SCAN_SETTINGS_PAGE_JS = """
+  const posts=[]; let threadsStatus={configured:true,state:'valid',generation:'g1',count:3};
+  const saved={threads:{workers:20,scrapeMode:'browser',useProxy:true,useSession:true},
+    tiktok:{workers:5,scrapeMode:'request',useProxy:false,useSession:false}};
+  fetch=async(url,options={})=>{
+    const path=String(url).split('?')[0];
+    if ((options.method||'GET')==='POST') posts.push([path,JSON.parse(options.body)]);
+    let body={};
+    if (path==='/scan-settings') body={platforms:saved};
+    if (path==='/threads-session/status') body=threadsStatus;
+    if (path==='/tiktok-session/status') body={configured:false,state:'none',generation:''};
+    if (path==='/source-preferences') body={sources:{}};
+    if (path==='/list-files') body={files:[],current:'',sheets:[]};
+    return {ok:true,status:200,json:async()=>body,headers:{get:()=>null}};
+  };
+  updateFileList=originalUpdateFileList;
+  await window.onload();
+"""
+
+
+def test_scan_settings_come_back_per_platform_on_reload_and_tab_switch():
+    # Owner report: Threads' "Proxy xoay" and Cookie Threads were off again after visiting the
+    # TikTok tab or reloading. The server's saved settings are restored for each tab.
+    run_js("(async()=>{" + SCAN_SETTINGS_PAGE_JS + """
+      assert.equal(activePlatform,'tiktok');
+      assert.equal(el('proxyUseCheckbox').checked,false); assert.equal(el('workerCountSelect').value,'5');
+      await setPlatform('threads');
+      assert.equal(el('proxyUseCheckbox').checked,true); assert.equal(el('threadsSessionUse').checked,true);
+      assert.equal(el('workerCountSelect').value,'20'); assert.equal(el('scrapeModeSelect').value,'browser');
+      await setPlatform('tiktok');
+      assert.equal(el('proxyUseCheckbox').checked,false); assert.equal(el('scrapeModeSelect').value,'request');
+      await setPlatform('threads');
+      assert.equal(el('proxyUseCheckbox').checked,true); assert.equal(el('threadsSessionUse').checked,true);
+      // A change is saved at once, for that platform only, as flags.
+      el('proxyUseCheckbox').checked=false; scanSettingChanged(); await scanSettingsSave;
+      const [path,body]=posts.at(-1);
+      assert.equal(path,'/scan-settings');
+      assert.equal(JSON.stringify(body.platforms.threads),JSON.stringify({workers:20,scrapeMode:'browser',useProxy:false,useSession:true}));
+      assert.equal(JSON.stringify(body.platforms.tiktok),JSON.stringify(saved.tiktok));
+      // A cookie imported in this page still starts switched off, and that is saved too.
+      renderThreadsCookieStatus({configured:true,state:'unchecked',generation:'g2',count:3}); await scanSettingsSave;
+      assert.equal(el('threadsSessionUse').checked,false);
+      assert.equal(posts.at(-1)[1].platforms.threads.useSession,false);
+    })()""")
+
+
+def test_saved_cookie_switch_waits_for_a_saved_cookie():
+    run_js("(async()=>{" + SCAN_SETTINGS_PAGE_JS.replace("let threadsStatus={configured:true,state:'valid',generation:'g1',count:3}", "let threadsStatus={configured:false,state:'none',generation:''}") + """
+      await setPlatform('threads');
+      assert.equal(el('threadsSessionUse').checked,false); assert.equal(el('proxyUseCheckbox').checked,true);
+      // Switching tabs with no cookie does not forget the saved choice.
+      await setPlatform('tiktok'); await setPlatform('threads');
+      assert.equal(platformScanSettings.threads.useSession,true);
+      assert.equal(posts.filter(([path])=>path==='/scan-settings').length,0);
+    })()""")

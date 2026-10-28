@@ -8,16 +8,17 @@ never pushes to Google. Synthetic workbooks and a fake clock only.
 import asyncio
 import json
 import os
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
 
 from riviu import app as backend
-from riviu import scan_service, scan_state, scheduler, server_mode
+from riviu import scan_service, scan_settings, scan_state, scheduler, server_mode
 from riviu.api import google as google_api
 from riviu.api import sources as sources_api
 from riviu.google_sheets_sync import GoogleLoginRequired
+from riviu.workbook import naming
 from riviu.workbook_utils import register_google_sheet_source
 
 from test_platform_source_api import make_source
@@ -80,6 +81,17 @@ def test_schedule_and_run_log_persist_atomically_in_the_data_dir(tmp_path):
     assert not [name for name in os.listdir(tmp_path / "data") if name.endswith(".tmp")]
     (tmp_path / "data" / "scan_schedule.json").write_text("{broken", encoding="utf-8")
     assert scheduler.load_schedule(str(tmp_path)) == scheduler.empty_schedule()
+
+
+def test_a_first_schedule_takes_its_options_from_the_admin_scan_settings(tmp_path):
+    scan_settings.save_settings({"platforms": {"threads": {"workers": 20, "scrapeMode": "browser", "useProxy": True, "useSession": True}}}, str(tmp_path))
+    options = scheduler.load_schedule(str(tmp_path))["platforms"]
+    assert options["threads"]["options"] == {"workers": 20, "scrapeMode": "browser", "useProxy": True, "useSession": True, "retryFailed": True}
+    assert options["tiktok"]["options"] == scheduler.default_options("tiktok")
+    # Once saved, the schedule keeps its own options; later toolbar changes do not touch it.
+    scheduler.save_schedule({"platforms": {"threads": {"slots": [{"time": "08:00"}]}}}, str(tmp_path))
+    scan_settings.save_settings({"platforms": {"threads": {"workers": 1}}}, str(tmp_path))
+    assert scheduler.load_schedule(str(tmp_path))["platforms"]["threads"]["options"]["workers"] == 10
 
 
 # ---- Timing --------------------------------------------------------------------------------
@@ -207,6 +219,43 @@ def test_run_keeps_the_saved_scan_sheet_when_the_new_workbook_has_it(run_env, mo
     monkeypatch.setattr(scan_service, "run_scraper_safely", runner)
     asyncio.run(scheduler.Scheduler(sync=synced_workbook(run_env, [])).run_job("threads", "08:00"))
     assert seen == ["New Other"]
+
+
+def make_month_source(path, months):
+    from openpyxl import Workbook
+
+    book = Workbook()
+    book.remove(book.active)
+    for title in months:
+        sheet = book.create_sheet(title)
+        sheet.append(["Link", "Tên Kênh", "Đối tác", "LƯỢT XEM"])
+        sheet.append(["https://www.threads.com/@m/post/Fixture", "m", "Partner", 1000])
+    book.save(path)
+    book.close()
+
+
+def test_run_moves_to_the_newest_month_sheet_instead_of_the_saved_older_month(run_env, monkeypatch):
+    # Owner report: October, yet every scheduled sync kept "Tháng 6" (the saved / first tab).
+    monkeypatch.setattr(naming, "_today", lambda: date(2026, 10, 28))
+    tabs = ["Tháng 6", "Tháng 7", "Tháng 10", "Tổng kết tháng 10", "T10 12-10-2026-10-31"]
+    sources_api.save_source_preferences({"sources": {"threads": {"fileId": "Old.xlsx", "displaySheet": "Tháng 6", "scanSheet": "Tháng 6", "pushSheet": "Tháng 6", "url": SHEET_URL}}})
+
+    async def sync(url, platform):
+        make_month_source(run_env / "Months.xlsx", tabs)
+        register_google_sheet_source(str(run_env), "Months.xlsx", url)
+        return {"file_id": "Months.xlsx", "currentSheet": "Tháng 6", "dataSheets": ["Tháng 6", "Tháng 7", "Tháng 10"]}
+
+    seen = []
+
+    async def runner(target_path, options, run_context=None):
+        seen.append(options["sheet_name"])
+        await scan_state.manager.broadcast_status({"done": True, "phase": "completed"})
+
+    monkeypatch.setattr(scan_service, "run_scraper_safely", runner)
+    asyncio.run(scheduler.Scheduler(sync=sync).run_job("threads", "08:00"))
+    assert seen == ["Tháng 10"]
+    saved = sources_api.load_source_preferences()["sources"]["threads"]
+    assert saved["displaySheet"] == saved["scanSheet"] == saved["pushSheet"] == "Tháng 10"
 
 
 def test_run_is_skipped_while_a_scan_or_source_operation_runs(run_env, monkeypatch):

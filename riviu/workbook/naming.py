@@ -2,6 +2,7 @@
 
 import hashlib
 import re
+from datetime import date
 
 from riviu.workbook.constants import (
     RESULT_SHEET_PREFIX,
@@ -71,6 +72,80 @@ def month_label_for_sheet_name(sheet_name):
     if not 1 <= month <= 12:
         return ""
     return f"T{month}"
+
+
+# "Tháng 10", "tháng 10", "Thg 10", "Tháng 10/2026", "Tháng 10 2026", "Báo cáo tháng 10-26" (after
+# normalize_key: lower case, no diacritics). A two-digit year needs a / . - _ separator so that a
+# trailing day ("Tháng 10 12") is never read as a year.
+_MONTH_WORD_RE = re.compile(
+    r"(?<![a-z0-9])(?:thang|thg)\s*0*(\d{1,2})(?!\d)(?:\s*[/._-]\s*(\d{4}|\d{2})(?!\d)|\s+(\d{4})(?!\d))?"
+)
+# "T10", "T 10", "T10/2026", "T10-26", "T10 2026", optionally followed by more words ("T10 seeding").
+_MONTH_SHORT_RE = re.compile(
+    r"^t\s?0*(\d{1,2})(?:\s*[/._-]\s*(\d{4}|\d{2})(?!\d)|\s+(\d{4})(?!\d))?(?=$|[\s/._-])"
+)
+
+
+def _today():
+    """Today's date; the month picker's clock (tests replace it)."""
+    return date.today()
+
+
+def month_sheet_key(sheet_name, today=None):
+    """`(year, month)` of a month data sheet ("Tháng 10", "T10/2026", ...), else None.
+
+    A name without a year means the latest such month not after `today` (default: now), so in
+    January "Tháng 12" is last December and sorts before "Tháng 1". Summary and generated
+    result/push tabs ("Tổng kết tháng 10", "T10 12-10-2026-10-31") are never month sheets.
+    """
+    if not clean_text(sheet_name) or not is_data_sheet_name(sheet_name):
+        return None
+    key = normalize_key(sheet_name)
+    match = _MONTH_WORD_RE.search(key) or _MONTH_SHORT_RE.match(key)
+    if not match:
+        return None
+    month = int(match.group(1))
+    if not 1 <= month <= 12:
+        return None
+    year_text = match.group(2) or match.group(3)
+    today = today or _today()
+    if year_text:
+        year = int(year_text) + (2000 if len(year_text) == 2 else 0)
+        if not 2000 <= year <= 2099:
+            return None
+    else:
+        year = today.year if month <= today.month else today.year - 1
+    return year, month
+
+
+def newest_month_sheet(sheet_names, today=None):
+    """The data sheet of the newest month, or "" when no month sheet is recognised.
+    Ties ("Tháng 10" and "tháng 10") go to the first in the given order (visible sheets first)."""
+    best_name, best_key = "", None
+    for name in sheet_names or ():
+        key = month_sheet_key(name, today)
+        if key is not None and (best_key is None or key > best_key):
+            best_name, best_key = name, key
+    return best_name
+
+
+def default_data_sheet(sheet_names, today=None):
+    """The sheet a freshly loaded or synced workbook opens on: the newest month sheet, else the
+    first data sheet (the old behaviour)."""
+    names = [name for name in sheet_names or () if is_data_sheet_name(name)]
+    return newest_month_sheet(names, today) or (names[0] if names else "")
+
+
+def keep_or_newest_month_sheet(sheet_names, saved="", today=None):
+    """After a re-sync: the newest month sheet, unless the saved sheet still exists and no newer
+    month is present (same month, or no month sheet recognised at all)."""
+    names = [name for name in sheet_names or () if is_data_sheet_name(name)]
+    if saved and saved in names:
+        newest = newest_month_sheet(names, today)
+        saved_key = month_sheet_key(saved, today)
+        if not newest or (saved_key is not None and saved_key >= month_sheet_key(newest, today)):
+            return saved
+    return default_data_sheet(names, today)
 
 
 def resolve_summary_sheet(workbook_sheet_names, summary_sheet_name):

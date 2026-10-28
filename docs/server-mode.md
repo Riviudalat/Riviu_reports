@@ -46,7 +46,8 @@ Chỉ chạy ở chế độ server (task asyncio khởi động cùng app). Qu�
 
 - Đến giờ, với nền tảng đó: (1) **Nạp sheet** từ link Google Sheet đã lưu của nền tảng (`data/source_preferences.json`,
   hoặc link đăng ký của file hiện tại) bằng đúng code của `/sync-google-sheet`, rồi đặt file mới làm nguồn của nền tảng
-  (giữ sheet quét đã lưu nếu file mới còn sheet đó, không thì sheet dữ liệu đầu tiên); (2) quét file đó qua
+  trên sheet tháng mới nhất (`keep_or_newest_month_sheet`: giữ sheet quét đã lưu chỉ khi file mới còn sheet đó và không có
+  tháng mới hơn); (2) quét file đó qua
   `prepare_scan_start` / `start_scan_task`, nên trang đang mở thấy tiến độ trực tiếp; (3) **không** tạo sheet trên Google.
 - Từ lúc nạp tới khi phiên quét bắt đầu, lịch giữ `scan_state.scan_starting()`: quét tay và thao tác nguồn phải chờ.
 - Bỏ qua (và ghi lại) khi đang có phiên quét hoặc thao tác nguồn, hay khi nền tảng chưa có link. Nạp lỗi
@@ -55,6 +56,15 @@ Chỉ chạy ở chế độ server (task asyncio khởi động cùng app). Qu�
 - Quy tắc Threads giữ nguyên (giãn nhịp, cách ly tuyến proxy nhận HTTP 429, dừng và ghi là "Dừng sớm" khi mọi tuyến đều 429, không xoay proxy né 403/geoblock).
 - Tùy chọn **Quét lại link lỗi** (`retryFailed`, mặc định bật) chạy một lượt quét lại các link lỗi tạm thời sau khi chờ; xem `docs/threads-scanning.md`.
 - Phiên quét dở (lịch hoặc tay) bị gián đoạn do crash/restart container được tự tiếp tục khi app khởi động (trước vòng lặp lịch, nên khung giờ trùng lúc bị bỏ qua vì bận); lượt lịch được tiếp tục vẫn không đẩy Google. Xem `riviu/scan_journal.py`.
+- **Sheet tháng mới nhất** (`riviu/workbook/naming.py` `default_data_sheet`): sau **Nạp sheet** (tay hoặc lịch), khi tải
+  danh sách sheet và khi sheet đã lưu không còn, nguồn mở sheet dữ liệu của tháng mới nhất ("Tháng 10", "tháng 10", "Thg 10",
+  "T10", "Tháng 10/2026"... không phân biệt hoa thường/dấu; không có năm thì là lần gần nhất của tháng đó tính tới hôm nay,
+  nên tháng 1 mới hơn tháng 12 năm trước), bỏ qua tab "Tổng kết…" và tab kết quả theo giờ. Không nhận ra tháng nào thì
+  dùng sheet dữ liệu đầu tiên như trước.
+- **Cấu hình quét** của thanh công cụ (luồng, chế độ, Proxy xoay bật/tắt, Cookie Threads / Cookie TikTok bật/tắt) lưu theo
+  từng nền tảng ở `data/scan_settings.json` (`GET/POST /scan-settings`, chỉ quản trị; chỉ cờ, không bao giờ lưu danh sách
+  proxy hay cookie), nên đổi tab hay mở lại trang ở máy khác vẫn giữ nguyên. Lịch tự động chưa có file cấu hình thì lấy
+  tuỳ chọn ban đầu từ đây.
 - `data/scan_schedule.json` (cấu hình):
   `{"version": 1, "platforms": {"tiktok": {"slots": [{"time": "08:00", "enabled": true}], "options": {"workers": 10, "scrapeMode": "request", "useProxy": false, "useSession": false, "retryFailed": true}}, "threads": {...}}}`.
   `data/scan_schedule_runs.json`: 50 kết quả gần nhất (`status`: completed, failed, skipped, stopped, cancelled).

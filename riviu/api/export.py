@@ -9,6 +9,7 @@ from fastapi.responses import JSONResponse, Response
 from riviu.reports import build_export_payload
 from riviu.source_files import SourceRequestError, content_disposition, resolve_source_file
 from riviu.workbook_utils import (
+    default_data_sheet,
     clean_text,
     find_data_sheet_listing,
     list_workbook_partners_with_link_counts,
@@ -36,7 +37,7 @@ async def report_partners(
 
     try:
         data_sheets, hidden_sheets = await asyncio.to_thread(find_data_sheet_listing, target_path)
-        requested_sheet = clean_text(sheet_name) or (data_sheets[0] if data_sheets else "")
+        requested_sheet = clean_text(sheet_name) or default_data_sheet(data_sheets)
         if requested_sheet and requested_sheet not in data_sheets:
             return JSONResponse(content={"error": f"Sheet {requested_sheet} không tồn tại trong file."}, status_code=400)
         safe_min_views = max(int(min_views or 0), 0)

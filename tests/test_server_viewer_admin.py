@@ -8,6 +8,7 @@ login), and `/ws` refuses start/cancel without an admin login. Synthetic workboo
 import asyncio
 import json
 import re
+from pathlib import Path
 
 import pytest
 from fastapi.routing import APIRoute
@@ -325,3 +326,46 @@ def test_viewer_table_formats_known_metrics_and_keeps_unknown_blank():
       assert.match(body,/<td class="vw-num"><\/td>/);           // unknown views stay blank, never 0
       assert.match(body,/>@a<span class="vw-link-detail"> · video 1<\/span><\/a>/);
     """)
+
+
+def test_scan_settings_are_saved_per_platform_by_the_admin_only_and_hold_flags_only(server):
+    # Owner report: "Proxy xoay" / Cookie Threads were off again after switching tabs or reloading,
+    # and the shared admin login is used from several machines: the server keeps them.
+    settings_file = Path(backend.EXCEL_DIR) / "data" / "scan_settings.json"
+    threads = {"workers": 20, "scrapeMode": "browser", "useProxy": True, "useSession": True}
+    assert server.get("/scan-settings").status_code == 401
+    assert server.post("/scan-settings", headers={"Origin": PUBLIC}, json={"platforms": {"threads": threads}}).status_code == 401
+    assert not settings_file.exists()
+    login(server)
+    assert server.get("/scan-settings").json()["platforms"]["threads"] == {"workers": 10, "scrapeMode": "hybrid", "useProxy": False, "useSession": False}
+    saved = server.post("/scan-settings", headers={"Origin": PUBLIC}, json={"platforms": {"threads": threads}})
+    assert saved.status_code == 200 and saved.json()["success"]
+    reloaded = server.get("/scan-settings").json()["platforms"]
+    assert reloaded["threads"] == threads
+    assert reloaded["tiktok"] == {"workers": 10, "scrapeMode": "request", "useProxy": False, "useSession": False}
+    assert json.loads(settings_file.read_text(encoding="utf-8")) == {"platforms": reloaded}
+    # Never proxy text, cookies or anything else: unknown keys and bad values are refused.
+    for bad in ({"threads": {**threads, "proxyText": "user:pass@proxy:1"}}, {"threads": {"cookies": "sessionid=x"}},
+                {"threads": {"useProxy": "yes"}}, {"threads": {"workers": 7}}, {"threads": {"scrapeMode": "fast"}},
+                {"youtube": {}}):
+        response = server.post("/scan-settings", headers={"Origin": PUBLIC}, json={"platforms": bad})
+        assert response.status_code == 400, bad
+    assert server.get("/scan-settings").json()["platforms"]["threads"] == threads
+    assert "proxy:1" not in settings_file.read_text(encoding="utf-8")
+
+
+def test_viewer_reads_the_retry_cooldown_as_updated_data_with_a_retry_time():
+    # Owner report: "đang chờ quét lại một số link lỗi" read as an error to viewers.
+    from test_ui_review_fixes import RETRY_RUN_JS
+
+    run_viewer_js("(async()=>{" + RETRY_RUN_JS + """
+      status({phase:'running',total:526,processed:100,success:90});
+      assert.equal(el('vwScanState').textContent,'Đang cập nhật số liệu…');
+      status(cooldown);
+      const text=el('vwScanState').textContent;
+      assert.equal(el('vwScanState').hidden,false);
+      const at=new Date(now+300000);
+      const hhmm=String(at.getHours()).padStart(2,'0')+':'+String(at.getMinutes()).padStart(2,'0');
+      assert.equal(text,'Số liệu đã cập nhật. Hệ thống sẽ tự quét lại vài link chưa đọc được lúc '+hhmm+'.');
+      assert.ok(!/lỗi/.test(text), text);
+    })()""")

@@ -394,7 +394,8 @@ def test_threads_retry_pass_waits_out_a_route_429_and_skips_blocks(env, monkeypa
     passes, waits = run_with_passes(env, monkeypatch, "threads", main, [saved(2, "Success")])
     # invalid_post is never retried anonymously; without a cookie session it is reported instead.
     assert len(passes) == 2 and passes[1]["only_rows"] == {key(2)}
-    assert waits == [max(scan_journal.RETRY_COOLDOWN_SECONDS["threads"], scan_service.THREADS_RATE_LIMIT_WAIT_MINUTES * 60)]
+    # A 429 stretches the Threads cooldown to the owner's 10 minutes (not 15: a scheduled slot waits on it).
+    assert waits == [10 * 60] and scan_service.THREADS_RATE_LIMIT_WAIT_MINUTES == 10
     assert scan_state.manager.last_status["loginRequired"] == 1
 
 
