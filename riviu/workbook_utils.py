@@ -198,6 +198,8 @@ from riviu.workbook.report_rows import (  # noqa: F401
     _build_sheet_report_rows,
     _shared_report_rows,
     build_partner_report_rows,
+    group_rows_by_partner,
+    partner_link_counts,
     build_workbook_rows,
     copy_report_row,
     fill_missing_dates_from_previous,

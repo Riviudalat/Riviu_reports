@@ -4,6 +4,7 @@ import re
 from urllib.parse import urlparse
 
 import openpyxl
+import openpyxl.utils
 
 from riviu.workbook_utils import (
     COLUMN_ALIASES,
@@ -191,9 +192,32 @@ def trusted_resolved_media_id(url, stored_source_url, stored_resolved_url):
     return resolved_media_id if extract_media_id(url) == resolved_media_id else ""
 
 
+def scan_row_fields(raw_url, raw_source_url, raw_resolved_url, partners, selected_keys):
+    """url / partners / expected media id of one row to scan, or None when it is skipped.
+
+    Shared by the workbook (`collect_rows`) and the Postgres store, so both pick the same
+    rows, normalise links the same way and trust the same stored resolution.
+    """
+    if not is_scrapable_tiktok_url(raw_url):
+        return None
+    url = normalize_tiktok_url(raw_url)
+    expected_media_id = trusted_resolved_media_id(
+        url, normalize_tiktok_url(raw_source_url), normalize_tiktok_url(raw_resolved_url),
+    )
+    if selected_keys:
+        if not partners:
+            return None
+        if not selected_keys.intersection({partner.casefold() for partner in partners}):
+            return None
+    return {"url": url, "partners": partners, "expected_media_id": expected_media_id}
+
+
+def selected_partner_keys(selected_partner=None, selected_partners=None):
+    return {partner.casefold() for partner in normalize_selected_partners(selected_partner, selected_partners)}
+
+
 def collect_rows(workbook, selected_partner=None, selected_partners=None, sheet_name=None):
-    selected_names = normalize_selected_partners(selected_partner, selected_partners)
-    selected_keys = {partner.casefold() for partner in selected_names}
+    selected_keys = selected_partner_keys(selected_partner, selected_partners)
     rows = []
 
     for sheet_name in selected_data_sheet_names(workbook, sheet_name):
@@ -209,32 +233,21 @@ def collect_rows(workbook, selected_partner=None, selected_partners=None, sheet_
             raw_url = worksheet.cell(row=row_index, column=url_column).value
             if not is_scrapable_tiktok_url(raw_url):
                 continue
-            url = normalize_tiktok_url(raw_url)
-            stored_source_url = normalize_tiktok_url(
-                worksheet.cell(row=row_index, column=columns["source_url"]).value
-            ) if columns.get("source_url") else ""
-            stored_resolved_url = normalize_tiktok_url(
-                worksheet.cell(row=row_index, column=columns["resolved_url"]).value
-            ) if columns.get("resolved_url") else ""
-            expected_media_id = trusted_resolved_media_id(url, stored_source_url, stored_resolved_url)
-
-            partners = []
-            if partner_columns:
-                partners = worksheet_row_partners(worksheet, row_index, partner_columns)
-
-            if selected_keys:
-                if not partners:
-                    continue
-                if not selected_keys.intersection({partner.casefold() for partner in partners}):
-                    continue
+            fields = scan_row_fields(
+                raw_url,
+                worksheet.cell(row=row_index, column=columns["source_url"]).value if columns.get("source_url") else "",
+                worksheet.cell(row=row_index, column=columns["resolved_url"]).value if columns.get("resolved_url") else "",
+                worksheet_row_partners(worksheet, row_index, partner_columns) if partner_columns else [],
+                selected_keys,
+            )
+            if fields is None:
+                continue
 
             rows.append({
                 "sequence": len(rows) + 1,
                 "sheet_name": sheet_name,
                 "row": row_index,
-                "url": url,
-                "partners": partners,
-                "expected_media_id": expected_media_id,
+                **fields,
             })
 
     return rows

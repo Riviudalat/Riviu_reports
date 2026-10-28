@@ -17,8 +17,22 @@ from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
 
 from riviu import scan_service, scan_state, scheduler, server_context, server_mode
-from riviu.api import auth, export, google, pages, proxy, scan, scan_settings, schedule, security, sources, threads_session, tiktok_session
-from riviu.workbook_utils import ensure_data_dir
+from riviu.api import (
+    auth,
+    export,
+    google,
+    internal,
+    pages,
+    proxy,
+    riviu_data,
+    scan,
+    scan_settings,
+    schedule,
+    security,
+    sources,
+    threads_session,
+    tiktok_session,
+)
 
 # Public names kept importable from `riviu.app` (tests, older callers).
 from riviu.api.export import export_report, report_partners  # noqa: F401
@@ -32,7 +46,15 @@ from riviu.api.google import (  # noqa: F401
     upload_google_oauth_client,
     upload_google_service_account,
 )
-from riviu.api.pages import api_version, favicon, index, logo_png, riviu_logo, static_asset_version, templates  # noqa: F401
+from riviu.api.pages import (  # noqa: F401
+    api_version,
+    favicon,
+    index,
+    logo_png,
+    riviu_logo,
+    static_asset_version,
+    templates,
+)
 from riviu.api.proxy import get_proxy_list, save_proxy_list, test_proxy_list  # noqa: F401
 from riviu.api.scan import scrape_history, websocket_endpoint  # noqa: F401
 from riviu.api.security import (  # noqa: F401
@@ -87,7 +109,12 @@ from riviu.scan_service import (  # noqa: F401
     validate_proxy_start,
 )
 from riviu.scan_state import ConnectionManager, scan_running, source_mutation_blocked  # noqa: F401
-from riviu.server_context import complete_blocking, google_io, threads_session_manager, tiktok_session_manager  # noqa: F401
+from riviu.server_context import (  # noqa: F401
+    complete_blocking,
+    google_io,
+    threads_session_manager,
+    tiktok_session_manager,
+)
 from riviu.source_files import (  # noqa: F401
     SourceRequestError,
     content_disposition,
@@ -103,7 +130,8 @@ from riviu.source_files import (  # noqa: F401
     validate_platform,
     validate_workbook,
 )
-
+from riviu.store import config as store_config
+from riviu.workbook_utils import ensure_data_dir
 
 _STATE_OWNERS = {
     **{name: server_context for name in (
@@ -144,6 +172,8 @@ sys.modules[__name__].__class__ = _StateForwardingModule
 # Off unless RIVIU_SERVER_MODE=1; a server-mode process with missing settings must not
 # come up without its login, so ServerModeError propagates and stops the import.
 server_mode.activate_from_environment()
+# RIVIU_STORAGE (default workbook); postgres only in server mode. StoreConfigError stops the import.
+store_config.activate_from_environment()
 
 os.makedirs(server_context.EXCEL_DIR, exist_ok=True)
 
@@ -182,6 +212,8 @@ for _router in (
     scan.router,
     schedule.router,
     scan_settings.router,
+    internal.router,
+    riviu_data.router,
 ):
     app.include_router(_router)
 

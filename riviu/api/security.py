@@ -312,7 +312,14 @@ async def protect_server_api(request: Request, call_next):
     return _security_headers(response)
 
 
+# Machine-to-machine routes (riviu/api/internal.py): no session cookie, no Host check; the
+# route itself requires a bearer token and refuses browser requests.
+INTERNAL_PATHS = frozenset({"/internal/scan"})
+
+
 async def protect_local_api(request: Request, call_next):
+    if request.url.path in INTERNAL_PATHS:
+        return _security_headers(await call_next(request))
     if server_mode.ACTIVE is not None:
         return await protect_server_api(request, call_next)
     if not trusted_local_request(request):

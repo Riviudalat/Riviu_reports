@@ -146,9 +146,14 @@ def build_partner_report_rows(file_path, sheet_name=None, *, platform="tiktok"):
     Same rows, in the same order, as build_workbook_rows(selected_partner=...) per partner.
     """
     spec = get_platform(platform)
-    groups = {}
     with open_workbook_snapshot(file_path) as snapshot:
         rows = _shared_report_rows(snapshot, sheet_name, spec)
+    return group_rows_by_partner(rows)
+
+
+def group_rows_by_partner(rows):
+    """{partner_dedup_key: copied rows} in row order (shared by the workbook and the Postgres store)."""
+    groups = {}
     for row in rows:
         for partner in row["partners"]:
             groups.setdefault(partner_dedup_key(partner), []).append(row)
@@ -175,20 +180,35 @@ def list_workbook_partners_with_link_counts(
     platform="tiktok",
 ):
     spec = get_platform(platform)
-    partner_stats = {}
     with open_workbook_snapshot(file_path) as snapshot:
         data_sheets = snapshot.data_sheet_names
         requested_sheet = clean_text(sheet_name)
         if requested_sheet:
             data_sheets = [requested_sheet] if requested_sheet in data_sheets else []
-        for current_sheet in data_sheets:
-            for partner in sheet_report_rows(snapshot, current_sheet, spec.key).partners:
-                key = partner_dedup_key(partner)
-                if key not in partner_stats:
-                    partner_stats[key] = {"name": partner, "linkCount": 0, "rawLinkCount": 0}
-        if not partner_stats:
+        partner_names = [
+            partner
+            for current_sheet in data_sheets
+            for partner in sheet_report_rows(snapshot, current_sheet, spec.key).partners
+        ]
+        if not partner_names:
             return []
         rows = _shared_report_rows(snapshot, sheet_name, spec)
+    return partner_link_counts(partner_names, rows, apply_min_views=apply_min_views, min_views=min_views, platform=spec.key)
+
+
+def partner_link_counts(partner_names, rows, *, apply_min_views=True, min_views=100, platform="tiktok"):
+    """[{name, linkCount, rawLinkCount}] sorted by name, for partners named on the rows' sheet(s).
+
+    Shared by the workbook and the Postgres store.
+    """
+    spec = get_platform(platform)
+    partner_stats = {}
+    for partner in partner_names:
+        key = partner_dedup_key(partner)
+        if key not in partner_stats:
+            partner_stats[key] = {"name": partner, "linkCount": 0, "rawLinkCount": 0}
+    if not partner_stats:
+        return []
 
     for row in rows:
         row_partners = row.get("partners") or []

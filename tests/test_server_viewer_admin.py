@@ -58,8 +58,8 @@ def test_every_route_outside_the_viewer_allowlist_needs_the_admin_login(server, 
     """Enumerates the real routes, so a new route is admin-only unless it is allowlisted."""
     anonymous, checked = [], 0
     for method, path in app_routes():
-        if (method, path) in PUBLIC_ROUTES:
-            continue
+        if (method, path) in PUBLIC_ROUTES or path in security.INTERNAL_PATHS:
+            continue  # internal routes take a bearer token instead (tests/test_store_postgres.py)
         response = server.request(method, path, headers={"Origin": PUBLIC})
         if security.viewer_request_allowed(method, path):
             anonymous.append((method, path, response.status_code))

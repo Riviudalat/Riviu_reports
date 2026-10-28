@@ -80,6 +80,37 @@ def row_partners_from_values(values):
     return unique_preserve_order(partners)
 
 
+def partners_from_doi_tac(value):
+    """Partners of Riviu Data's comma column `doi_tac` (Postgres backend).
+
+    The twin of Riviu Data's `public.rda_split_doi_tac` / `rda.normalize.split_doi_tac`:
+    split on commas, NFC, zero-width characters removed, whitespace collapsed, empties
+    dropped, first spelling of a `partner_dedup_key` wins. The importer stores
+    `doi_tac_from_partners(row_partners_from_values(cells))`, so for partner names
+    without a comma this returns exactly the workbook's list (tests check the parity).
+    """
+    text = clean_text(value)
+    if not text:
+        return []
+    names = []
+    for part in text.split(","):
+        name = unicodedata.normalize("NFC", part)
+        name = re.sub(r"[\u200b-\u200d\ufeff\u00ad]", "", name)
+        name = re.sub(r"\s+", " ", name).strip()
+        if name:
+            names.append(name)
+    return unique_preserve_order(names)
+
+
+def doi_tac_from_partners(partners):
+    """The `doi_tac` text for a partner list; None when empty. A name with a comma cannot be stored."""
+    names = [clean_text(name) for name in partners or [] if clean_text(name)]
+    for name in names:
+        if "," in name:
+            raise ValueError(f"Tên đối tác chứa dấu phẩy, không lưu được vào doi_tac: {name}")
+    return ", ".join(names) if names else None
+
+
 def extract_row_partners(row, partner_columns: Iterable):
     return row_partners_from_values(row.get(column, "") for column in partner_columns)
 

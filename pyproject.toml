@@ -37,6 +37,9 @@ dependencies = [
     # google-auth needs cryptography on every platform. Without this line uv would lock
     # the Intel Mac version above for all of them; with it the rest get fixed releases.
     "cryptography>=49; sys_platform != 'darwin' or platform_machine != 'x86_64'",
+    # RIVIU_STORAGE=postgres (server mode only): the Riviu Data Postgres driver (Apache-2.0;
+    # psycopg is LGPL-3.0, review M-23). Imported lazily, never on desktop/source runs.
+    "asyncpg>=0.31",
 ]
 
 [dependency-groups]
