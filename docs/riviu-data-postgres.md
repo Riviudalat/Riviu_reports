@@ -151,9 +151,32 @@ Authorization: Bearer <token with scope scan:run>
 `POST /riviu-data/export-report {"platform","thang","partners","applyMinViews","minViews"}` return the
 same partner list and the same Excel files as `/report-partners` / `/export-report` on a workbook
 (same filters, totals, fills, and the formula-injection guard `set_cell_literal`, review M-13). They
-read one month from `v_<platform>` LEFT JOIN `bao_cao.<platform>_chi_so` in one `REPEATABLE READ` transaction and sit behind the normal
-server-mode login. The existing UI still drives the workbook routes; wiring a month picker to
-these routes is not part of this change.
+read one month from `v_<platform>` LEFT JOIN `bao_cao.<platform>_chi_so` in one `REPEATABLE READ` transaction.
+
+## The web app on Riviu Data
+
+`GET /api/version` reports `"storage": "postgres"`, and the web app then works by month instead of by
+workbook file and sheet:
+
+- `GET /riviu-data/months?platform=` lists the month sheets that hold live rows, newest first
+  (`SELECT thang_nam, count(*) FROM v_<t> ... GROUP BY thang_nam`; rows with `thang_nam` NULL are left
+  out). `defaultThang` is the newest month not in the future.
+- `GET /riviu-data/rows?platform=&thang=` returns the month's posts for the table: `id`, `ngayAir`,
+  `channel`, `link`, `partners`, the metrics (`views`, `likes`, `comments`, `saves` or `reposts`,
+  `shares`; `null` = unknown, never 0), `updatedAt`, `status`.
+- These two and the report routes above are public reads, like the workbook viewer routes
+  (`security.VIEWER_GET_PATHS` / `VIEWER_POST_PATHS`).
+- A scan started over `/ws`, by the scheduler or by a resume goes through `scan_service` as on
+  workbooks, with `file_id` `"riviu-data"` and the month (`YYYY-MM`) as `sheet_name` (empty: the default
+  month). `scan_service.StoreRun` takes the platform's advisory lock and one `scan_run` row (`mode`
+  `thu_cong`, or `timer` for the scheduler; `started_by` `riviu-reports:<username>` or
+  `riviu-reports:lich`) for the whole run. Each pass (main, retry) opens a fresh store session, so the
+  retry pass reads current rows and the scan journal resumes by `(month, id, url)`. There is no result tab
+  and no Google push. The scheduler does not download a Google Sheet; it scans the default month.
+- `POST /internal/scan` keeps its own path (`riviu/internal_scan.py`, options from the environment). Both
+  paths share the advisory lock and the in-process scan gate, so they never overlap.
+- `deploy/server/compose.v2.yaml` runs this next to V1 (own checkout, data dir `/srv/riviu-v2/data`, env
+  and secrets in `/etc/riviu-v2`, port 18111, Docker network `riviu-data` to reach `riviu-data-db:5432`).
 
 ## Tests
 
