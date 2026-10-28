@@ -34,11 +34,13 @@ from riviu.workbook_utils import (
     format_filename_datetime,
     format_metric,
     get_platform,
+    group_rows_by_partner,
     is_exportable_report_row,
     is_failed_channel_name,
     list_workbook_partners,
     metric_total,
     partner_dedup_key,
+    partner_link_counts,
     set_cell_literal,
     should_highlight_video_link,
 )
@@ -389,10 +391,18 @@ def _build_export_payload(snapshot, selected_partners, apply_min_views, min_view
     report_sheet = clean_text(requested_sheet_name) or (data_sheets[0] if data_sheets else "")
     if report_sheet and report_sheet not in data_sheets:
         raise ValueError(f"Sheet {report_sheet} không tồn tại trong file.")
-    available_partners = {
-        partner_dedup_key(name): name
-        for name in list_workbook_partners(snapshot, sheet_name=report_sheet, platform=spec.key)
-    }
+    partners = select_export_partners(
+        list_workbook_partners(snapshot, sheet_name=report_sheet, platform=spec.key), selected_partners,
+    )
+    export_timestamp = format_filename_datetime()
+    # The sheet is read once for all partners, not once per partner.
+    rows_by_partner = build_partner_report_rows(snapshot, sheet_name=report_sheet, platform=spec.key)
+    return render_export_payload(spec, partners, rows_by_partner, report_sheet, apply_min_views, min_views, export_timestamp)
+
+
+def select_export_partners(available_names, selected_partners):
+    """The selected partners that exist, in their available spelling, without duplicates."""
+    available_partners = {partner_dedup_key(name): name for name in available_names}
     partners = list(dict.fromkeys(
         available_partners[partner_dedup_key(name)]
         for name in selected_partners
@@ -400,11 +410,26 @@ def _build_export_payload(snapshot, selected_partners, apply_min_views, min_view
     ))
     if not partners:
         raise ValueError("Không tìm thấy đối tác đã chọn trong file")
+    return partners
+
+
+def build_export_payload_from_rows(sheet_rows, selected_partners, apply_min_views, min_views, report_sheet, platform="tiktok"):
+    """build_export_payload for rows that are already read (riviu.store, e.g. one Postgres month).
+
+    sheet_rows: a SheetReportRows; report_sheet labels the file names like a sheet name.
+    """
+    spec = get_platform(platform)
+    available = [item["name"] for item in partner_link_counts(sheet_rows.partners, sheet_rows.rows, platform=spec.key)]
+    partners = select_export_partners(available, selected_partners)
     export_timestamp = format_filename_datetime()
+    rows_by_partner = group_rows_by_partner(sheet_rows.rows)
+    return render_export_payload(spec, partners, rows_by_partner, report_sheet, apply_min_views, min_views, export_timestamp)
+
+
+def render_export_payload(spec, partners, rows_by_partner, report_sheet, apply_min_views, min_views, export_timestamp):
+    """One .xlsx (one partner) or a .zip of partner reports, from rows grouped by partner key."""
     sheet_tag = safe_report_name(report_sheet) if report_sheet else ""
     name_tags = [tag for tag in (spec.file_tag, sheet_tag, export_timestamp) if tag]
-    # The sheet is read once for all partners, not once per partner.
-    rows_by_partner = build_partner_report_rows(snapshot, sheet_name=report_sheet, platform=spec.key)
     # Partners share rows and air dates, so every report in this export shares one date memo.
     parse_date = report_date_parser()
 

@@ -12,6 +12,7 @@ The Python code is the `riviu` package; run it with `python -m riviu` (the root 
 - `riviu/web/templates/index.html`, `riviu/web/static/` and `riviu/web/logo.png` contain the HTML, JavaScript, CSS, icons and logo.
 - `src-tauri/` contains the Rust desktop shell; `desktop/` contains sidecar packaging scripts and `desktop-dist/` the Tauri loading page. Tests live in `tests/`. The current architecture and release notes live in `docs/`, and dated reviews, plans and specs in `docs/archive/`.
 - `Khoidong.bat`, `setup.bat` and `capnhat.bat` are the Windows source-mode launchers (start, install, update).
+- `riviu/store/` (selected by `RIVIU_STORAGE`, default `workbook`), `riviu/internal_scan.py`, `riviu/api/internal.py` and `riviu/api/riviu_data.py` add the opt-in Riviu Data Postgres backend for server mode; see `docs/riviu-data-postgres.md`. Never commit a DSN or scan token.
 - `riviu/server_mode.py` and `riviu/api/auth.py` add the opt-in shared-password server mode (`RIVIU_SERVER_MODE=1`); `deploy/server/` holds its Docker, compose and nginx files. Never commit a real password hash, secret key or env file.
 
 ## Build, Test, and Development Commands

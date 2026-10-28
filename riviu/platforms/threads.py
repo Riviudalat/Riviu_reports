@@ -698,9 +698,41 @@ def write_threads_result(sheet, row_index, result, columns=None):
     return status
 
 
+def selected_threads_partner_keys(selected_partners):
+    return {clean_text(value).casefold() for value in selected_partners or [] if clean_text(value)}
+
+
+def classify_threads_row(raw_url, partners, selected):
+    """("scan", url) for a post link, ("invalid", info) for another Threads link, None to skip.
+
+    Shared by the workbook (`collect_threads_rows`) and the Postgres store.
+    """
+    url = normalize_threads_url(raw_url)
+    if selected and not selected.intersection(value.casefold() for value in partners):
+        return None
+    if is_threads_link(url):
+        return "scan", url
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").casefold()
+    if host in THREADS_HOSTS:
+        kind = "profile" if re.fullmatch(r"/@[^/]+/?", parsed.path) else "malformed"
+        # Host + path only: never echo query strings or userinfo into logs.
+        return "invalid", {"kind": kind, "display": f"{host}{parsed.path}"}
+    return None
+
+
+def group_threads_rows(rows):
+    """Rows grouped by post (one request per post), in first-row order."""
+    buckets = {}
+    for row in rows:
+        key = post_identity(row["url"]) or ("share", row["url"].casefold())
+        buckets.setdefault(key, {"url": row["url"], "rows": []})["rows"].append(row)
+    return list(buckets.values())
+
+
 def collect_threads_rows(workbook, sheet_name="", selected_partners=None, invalid_links=None):
     """Collect scannable post rows; Threads-host rows that are not post links go to invalid_links."""
-    selected = {clean_text(value).casefold() for value in selected_partners or [] if clean_text(value)}
+    selected = selected_threads_partner_keys(selected_partners)
     names = [sheet_name] if sheet_name else workbook_data_sheet_names(workbook)
     rows = []
     for name in names:
@@ -712,19 +744,16 @@ def collect_threads_rows(workbook, sheet_name="", selected_partners=None, invali
             continue
         partner_columns = worksheet_partner_column_indexes(sheet)
         for index in range(2, sheet.max_row + 1):
-            url = normalize_threads_url(sheet.cell(row=index, column=link_column).value)
             partners = worksheet_row_partners(sheet, index, partner_columns) if partner_columns else []
-            if selected and not selected.intersection(value.casefold() for value in partners):
+            outcome = classify_threads_row(sheet.cell(row=index, column=link_column).value, partners, selected)
+            if outcome is None:
                 continue
-            if not is_threads_link(url):
-                parsed = urlparse(url)
-                host = (parsed.hostname or "").casefold()
-                if invalid_links is not None and host in THREADS_HOSTS:
-                    kind = "profile" if re.fullmatch(r"/@[^/]+/?", parsed.path) else "malformed"
-                    # Host + path only: never echo query strings or userinfo into logs.
-                    invalid_links.append({"sheet_name": name, "row": index, "kind": kind, "display": f"{host}{parsed.path}"})
+            kind, value = outcome
+            if kind == "invalid":
+                if invalid_links is not None:
+                    invalid_links.append({"sheet_name": name, "row": index, **value})
                 continue
-            rows.append({"sheet_name": name, "row": index, "url": url, "partners": partners})
+            rows.append({"sheet_name": name, "row": index, "url": value, "partners": partners})
     return rows
 
 
@@ -734,11 +763,7 @@ def _load_threads_rows(file_path, sheet_name, selected_partners):
     workbook = openpyxl.load_workbook(file_path)
     invalid_links = []
     rows = collect_threads_rows(workbook, sheet_name=sheet_name, selected_partners=selected_partners, invalid_links=invalid_links)
-    buckets = {}
-    for row in rows:
-        key = post_identity(row["url"]) or ("share", row["url"].casefold())
-        buckets.setdefault(key, {"url": row["url"], "rows": []})["rows"].append(row)
-    return workbook, rows, list(buckets.values()), invalid_links
+    return workbook, rows, group_threads_rows(rows), invalid_links
 
 
 def _rebuild_summary_or_error(workbook, sheet_name, selected_partners):
@@ -772,7 +797,12 @@ def append_threads_diagnostic(base_dir, entry):
 
 
 async def run_threads_scraper(file_path, websocket_manager=None, worker_count=3, selected_partners=None,
-                              sheet_name="", mode="hybrid", base_dir="", use_proxy=False, proxy_text="", session_cookies=None, proxy_configs=None):
+                              sheet_name="", mode="hybrid", base_dir="", use_proxy=False, proxy_text="", session_cookies=None, proxy_configs=None,
+                              store_session=None):
+    """store_session: scan the rows of a storage session (riviu.store, Postgres) instead of the
+    workbook at file_path (then only a label); the diagnostic goes to the session, not a file."""
+    if store_session is not None and not base_dir:
+        raise ValueError("base_dir is required with store_session")
     started = time.monotonic()
     diagnostic = {
         "startedAt": format_display_datetime(), "platform": "threads", "fileLabel": os.path.basename(file_path),
@@ -784,7 +814,8 @@ async def run_threads_scraper(file_path, websocket_manager=None, worker_count=3,
     try:
         await _run_threads_scraper(file_path, websocket_manager, worker_count, selected_partners,
                                    sheet_name, mode, base_dir, use_proxy, proxy_text, diagnostics=diagnostic,
-                                   session_cookies=session_cookies, proxy_configs=proxy_configs)
+                                   session_cookies=session_cookies, proxy_configs=proxy_configs,
+                                   store_session=store_session)
         diagnostic["phase"] = "rate_limited" if diagnostic.get("stopReason") == RATE_LIMIT_STOP_REASON else "completed"
     except asyncio.CancelledError:
         diagnostic["phase"] = "cancelled"
@@ -795,16 +826,20 @@ async def run_threads_scraper(file_path, websocket_manager=None, worker_count=3,
     finally:
         diagnostic["finishedAt"] = format_display_datetime()
         diagnostic["durationSeconds"] = round(time.monotonic() - started, 2)
-        try:
-            await finish_pending_task(asyncio.create_task(asyncio.to_thread(
-                append_threads_diagnostic, base_dir or os.path.dirname(os.path.abspath(file_path)), diagnostic)))
-        except Exception:
-            # Diagnostic I/O must not replace a scan/save failure or a cancellation.
-            if websocket_manager:
-                try:
-                    await websocket_manager.broadcast_log("Không lưu được chẩn đoán phiên Threads; dữ liệu quét không thay đổi.")
-                except Exception:
-                    pass
+        if store_session is not None:
+            # A store scan keeps its diagnostic in scan_run, not in threads_scan_history.json.
+            store_session.diagnostic = diagnostic
+        else:
+            try:
+                await finish_pending_task(asyncio.create_task(asyncio.to_thread(
+                    append_threads_diagnostic, base_dir or os.path.dirname(os.path.abspath(file_path)), diagnostic)))
+            except Exception:
+                # Diagnostic I/O must not replace a scan/save failure or a cancellation.
+                if websocket_manager:
+                    try:
+                        await websocket_manager.broadcast_log("Không lưu được chẩn đoán phiên Threads; dữ liệu quét không thay đổi.")
+                    except Exception:
+                        pass
 
 
 async def _preflight_session(session_cookies, proxies, diagnostics):
@@ -978,7 +1013,7 @@ async def _rebuild_threads_summary(workbook, sheet_name, selected_partners, webs
 
 async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3, selected_partners=None,
                                sheet_name="", mode="hybrid", base_dir="", use_proxy=False, proxy_text="", diagnostics=None,
-                               session_cookies=None, proxy_configs=None):
+                               session_cookies=None, proxy_configs=None, store_session=None):
     proxies = (list(proxy_configs) if proxy_configs is not None else resolve_threads_proxies(base_dir or os.path.dirname(os.path.abspath(file_path)), proxy_text, mode)) if use_proxy else []
     if use_proxy and not proxies:
         raise ValueError("Bật proxy nhưng chưa có proxy hợp lệ.")
@@ -987,8 +1022,12 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
     # Loading and scanning a large workbook takes a second; keep the server responsive.
     # Owned like a save: a cancellation waits for the read, so no thread of this run
     # still holds the file once the scan is released.
-    workbook, rows, items, invalid_links = await finish_pending_task(asyncio.create_task(asyncio.to_thread(
-        _load_threads_rows, file_path, sheet_name, selected_partners)))
+    if store_session is not None:
+        workbook, rows, invalid_links = None, list(store_session.rows), list(store_session.invalid_links)
+        items = group_threads_rows(rows)
+    else:
+        workbook, rows, items, invalid_links = await finish_pending_task(asyncio.create_task(asyncio.to_thread(
+            _load_threads_rows, file_path, sheet_name, selected_partners)))
     skipped_profiles = sum(1 for invalid in invalid_links if invalid["kind"] == "profile")
     total = len(items)
     workers = max(1, min(int(worker_count or 3), 5 if mode != "request" else 10))
@@ -1017,7 +1056,8 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
         if websocket_manager:
             await websocket_manager.broadcast_log("Không tìm thấy link Threads trong sheet hoặc đối tác đã chọn.")
             await websocket_manager.broadcast_status({"total": 0, "processed": 0, "success": 0, "hidden": 0, "error": 0, "done": True})
-        workbook.close()
+        if workbook is not None:
+            workbook.close()
         return
 
     slots = _RouteSlots(workers)
@@ -1050,9 +1090,17 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
 
         async def save_pending():
             nonlocal dirty, last_saved
+            if store_session is not None:
+                # A failed flush keeps its rows buffered; the next checkpoint retries.
+                saved, _reason = await store_session.flush()
+                last_saved = _checkpoint_clock()
+                if saved:
+                    dirty = False
+                return saved
             await asyncio.to_thread(save_workbook_atomic, workbook, file_path)
             dirty = False
             last_saved = _checkpoint_clock()
+            return True
 
         async def check(index, item):
             # A cookie session keeps one route for the whole run; anonymous runs round-robin.
@@ -1108,7 +1156,10 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
             else:
                 hidden += 1
             for row in item["rows"]:
-                write_threads_result(workbook[row["sheet_name"]], row["row"], result, columns)
+                if store_session is not None:
+                    store_session.write_threads_result(row["row"], result)
+                else:
+                    write_threads_result(workbook[row["sheet_name"]], row["row"], result, columns)
                 dirty = True
             if diagnostics is not None:
                 diagnostics.update(processedUrls=processed, success=success, partial=hidden, error=errors)
@@ -1167,7 +1218,8 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
             # Every page load is done: Chromium closes while the workbook is finalized.
             closing = asyncio.ensure_future(close_browser_bounded(browser))
             # A stopped run is incomplete: like a cancelled one it leaves the summary tab as it was.
-            if sheet_name and not stop_reason:
+            # A store has no summary tab: Riviu Data computes it from the rows.
+            if sheet_name and not stop_reason and store_session is None:
                 await _rebuild_threads_summary(workbook, sheet_name, selected_partners, websocket_manager)
                 dirty = True
             completed = True
@@ -1179,15 +1231,16 @@ async def _run_threads_scraper(file_path, websocket_manager=None, worker_count=3
                         task.cancel()
                 try:
                     await asyncio.gather(*owned, return_exceptions=True)
-                    if dirty:
-                        await save_pending()
+                    if dirty and not await save_pending():
+                        raise RuntimeError("Ghi kết quả vào Postgres thất bại.")
                 finally:
                     try:
                         # Bounded: a slow Chromium exit is force-killed, and
                         # playwright_session waits only briefly for the driver.
                         await (closing if closing is not None else close_browser_bounded(browser))
                     finally:
-                        workbook.close()
+                        if workbook is not None:
+                            workbook.close()
 
             await finish_pending_task(asyncio.create_task(cleanup()))
     if completed and websocket_manager:

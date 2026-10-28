@@ -170,6 +170,17 @@ def seed_channel_cache_from_workbook(rows_to_process, sheet_contexts, channel_ca
             channel_cache[username.casefold()] = raw
 
 
+def seed_channel_cache_from_rows(rows_to_process, channel_cache):
+    """seed_channel_cache_from_workbook for store rows, which carry their channel ("channel")."""
+    for item in rows_to_process:
+        username = extract_profile_username(item.get("url", ""))
+        if not username:
+            continue
+        raw = clean_text(item.get("channel", ""))
+        if raw and raw != "Lỗi" and is_usable_channel_name(raw, item["url"]):
+            channel_cache[username.casefold()] = raw
+
+
 def channel_name_for_sheet(
     url,
     channel_name,
