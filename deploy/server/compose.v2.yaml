@@ -26,7 +26,9 @@ services:
       RIVIU_STORAGE: postgres
       RIVIU_DATABASE_URL_FILE: /run/secrets/riviu_database_url
       RIVIU_SCAN_TOKEN_FILE: /run/secrets/riviu_scan_token
-      RIVIU_FORWARDED_ALLOW_IPS: 172.31.111.1
+      # Docker may route the published port through either network's gateway (both are the
+      # host, where nginx runs); trust both, or every user shares one IP for the login limit.
+      RIVIU_FORWARDED_ALLOW_IPS: 172.31.111.1,192.168.16.1
     volumes:
       - /srv/riviu-v2/data:/data
       - /etc/riviu-v2/password.hash:/run/secrets/riviu_password_hash:ro
