@@ -234,7 +234,7 @@ def _session(platform, records):
     return postgres.PostgresScanSession(store, conn, "2026-10", rows, invalid_links=invalid, run_id=7, events=Events()), conn
 
 
-def test_tiktok_scan_writes_through_the_session_with_guarded_updates(monkeypatch, tmp_path):
+def test_tiktok_scan_writes_through_the_session_with_guarded_upserts(monkeypatch, tmp_path):
     records = [
         {"id": 1, "link_air": TIKTOK_URL, "doi_tac": "Cafe A", "ten_kenh": "Demo", "link_phan_giai": None, "link_nguon_phan_giai": None},
         {"id": 2, "link_air": TIKTOK_URL + "?x=1", "doi_tac": "Cafe B", "ten_kenh": None, "link_phan_giai": None, "link_nguon_phan_giai": None},
@@ -250,8 +250,12 @@ def test_tiktok_scan_writes_through_the_session_with_guarded_updates(monkeypatch
     assert session.written == 2 and session.totals["success"] == 2
     written = {}
     for sql, args in conn.updates:
-        assert "t.link_air = u.link_seen AND t.da_xoa_luc IS NULL AND NOT t.khoa_chi_so" in sql
-        columns = [part.split(" = ")[0] for part in sql.split("SET ", 1)[1].split(" FROM", 1)[0].split(", ")]
+        assert sql.startswith("INSERT INTO bao_cao.tiktok_chi_so AS c (id, ")
+        assert "WHERE EXISTS (SELECT 1 FROM public.v_tiktok v WHERE v.id = u.id AND v.link_air = u.link_seen)" in sql
+        assert sql.endswith("WHERE NOT c.khoa_chi_so RETURNING c.id")
+        columns = sql.split("(id, ", 1)[1].split(")", 1)[0].split(", ")
+        # The conflict branch changes exactly the inserted columns, nothing else.
+        assert sql.split("DO UPDATE SET ", 1)[1].split(" WHERE", 1)[0] == ", ".join(f"{c} = EXCLUDED.{c}" for c in columns)
         for index, row_id in enumerate(args[0]):
             written[row_id] = {"link_seen": args[1][index], **{column: args[2 + n][index] for n, column in enumerate(columns)}}
     assert written[1]["link_seen"] == TIKTOK_URL and written[2]["link_seen"] == TIKTOK_URL + "?x=1"
@@ -259,8 +263,9 @@ def test_tiktok_scan_writes_through_the_session_with_guarded_updates(monkeypatch
         assert (row["luot_xem"], row["tim"], row["binh_luan"]) == (999, 0, None)
     # Row 1 already holds that channel: only row 2 names ten_kenh.
     assert "ten_kenh" not in written[1] and written[2]["ten_kenh"] == "Demo"
-    assert any("set_config('app.user'" in sql and args == ("app:riviu-reports-scanner",) for sql, args in conn.calls)
     assert any("scan_run_item" in sql for sql, _ in conn.calls)
+    # bao_cao is neither audited nor broadcast by Riviu Data.
+    assert not any("set_config" in sql or "pg_notify" in sql for sql, _ in conn.calls)
     assert not list(tmp_path.glob("*.json"))
 
 
@@ -276,7 +281,8 @@ def test_threads_scan_writes_through_the_session_and_keeps_the_diagnostic(monkey
     assert session.written == 1
     assert session.diagnostic["phase"] == "completed" and session.diagnostic["success"] == 1
     [(sql, args)] = conn.updates
-    assert sql.startswith("UPDATE public.threads") and "repost = u.repost" in sql
+    assert sql.startswith("INSERT INTO bao_cao.threads_chi_so") and "repost = EXCLUDED.repost" in sql
+    assert "public.v_threads v" in sql
 
 
 def test_a_row_edited_during_the_scan_is_skipped_and_logged():

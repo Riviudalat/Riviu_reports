@@ -19,7 +19,7 @@ class FakeConn:
         self.calls = []
         self.closed = False
         self.transactions = 0
-        self.updates = []  # (sql, args) of every UPDATE of a post table
+        self.updates = []  # (sql, args) of every bao_cao upsert
 
     async def fetchval(self, sql, *args):
         self.calls.append((sql, args))
@@ -39,7 +39,7 @@ class FakeConn:
 
     async def fetch(self, sql, *args):
         self.calls.append((sql, args))
-        if sql.startswith("UPDATE public."):
+        if sql.startswith("INSERT INTO bao_cao."):
             self.updates.append((sql, args))
             return [FakeRecord(id=row_id) for row_id in args[0] if row_id not in self.reject_ids]
         if "AS deleted" in sql:

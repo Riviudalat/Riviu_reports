@@ -7,8 +7,8 @@ Opt-in (skipped unless both are set):
 Optional: RIVIU_PG_TEST_OWNER_PASSWORD (test-owner), RIVIU_PG_TEST_SCANNER_PASSWORD (test-scanner),
 RIVIU_PG_TEST_APP_PASSWORD (test-app). See docs/riviu-data-postgres.md.
 
-The session creates a fresh database, migrates it as riviu_owner (alembic upgrade head) and
-runs the store as riviu_scanner, the column-limited production role.
+The session creates a fresh database, migrates it as riviu_owner (alembic upgrade head, which
+includes 0011: metrics in schema bao_cao) and runs the store as riviu_scanner, the production role.
 """
 
 import asyncio
@@ -115,18 +115,34 @@ async def sql(query, *args, fetch=False):
 
 
 TABLES = {"tiktok", "threads"}  # test helpers only build SQL for these names
+# Columns that live in bao_cao.<t>_chi_so since Riviu Data migration 0011.
+CHI_SO = {"ten_kenh", "luot_xem", "tim", "binh_luan", "luot_luu", "repost", "chia_se", "trang_thai_quet",
+          "cap_nhat_lan_cuoi", "khoa_chi_so", "link_phan_giai", "link_nguon_phan_giai"}
+
+
+def _insert_sql(target, values):
+    columns = ", ".join(values)
+    params = ", ".join(f"${i}" for i in range(1, len(values) + 1))
+    return f"INSERT INTO {target} ({columns}) VALUES ({params}) RETURNING id"  # noqa: S608
 
 
 def insert(table, **row):
+    """A post in public.<t>; any metric/channel/lock column goes to its bao_cao.<t>_chi_so row."""
     assert table in TABLES
-    columns = ", ".join(row)
-    params = ", ".join(f"${i}" for i in range(1, len(row) + 1))
-    return run(sql(f"INSERT INTO public.{table} ({columns}) VALUES ({params}) RETURNING id", *row.values(), fetch=True))[0]["id"]  # noqa: S608
+    post = {key: value for key, value in row.items() if key not in CHI_SO}
+    chi_so = {key: value for key, value in row.items() if key in CHI_SO}
+    row_id = run(sql(_insert_sql(f"public.{table}", post), *post.values(), fetch=True))[0]["id"]
+    if chi_so:
+        run(sql(_insert_sql(f"bao_cao.{table}_chi_so", {"id": row_id, **chi_so}), row_id, *chi_so.values(), fetch=True))
+    return row_id
 
 
 def row(table, row_id):
+    """The post joined to its bao_cao row (metric columns NULL when it has none)."""
     assert table in TABLES
-    return dict(run(sql(f"SELECT * FROM public.{table} WHERE id = $1", row_id, fetch=True))[0])  # noqa: S608
+    query = (f"SELECT c.*, t.*, c.id IS NOT NULL AS has_chi_so FROM public.{table} t "  # noqa: S608
+             f"LEFT JOIN bao_cao.{table}_chi_so c USING (id) WHERE t.id = $1")
+    return dict(run(sql(query, row_id, fetch=True))[0])
 
 
 # ---- reads ---------------------------------------------------------------------------
@@ -134,11 +150,15 @@ def row(table, row_id):
 def test_a_month_is_selected_by_thang_nam_across_the_year_boundary(db):
     store = postgres.PostgresStore("tiktok", db["scanner"])
     ids = {
-        "dec25": insert("tiktok", thang="Tháng 12", ngay_air=dt.date(2025, 12, 31), link_air=TIKTOK_URL),
-        "jan26": insert("tiktok", thang="Tháng 1", ngay_air=dt.date(2026, 1, 1), link_air=TIKTOK_URL + "?a"),
-        "jan25": insert("tiktok", thang="Tháng 1", ngay_air=dt.date(2025, 1, 15), link_air=TIKTOK_URL + "?b"),
-        "no_date": insert("tiktok", thang="Tháng 1", ngay_air=None, link_air=TIKTOK_URL + "?c"),
+        "dec25": insert("tiktok", ngay_air=dt.date(2025, 12, 31), link_air=TIKTOK_URL),
+        "jan26": insert("tiktok", ngay_air=dt.date(2026, 1, 1), link_air=TIKTOK_URL + "?a"),
+        "jan25": insert("tiktok", ngay_air=dt.date(2025, 1, 15), link_air=TIKTOK_URL + "?b"),
+        "no_date": insert("tiktok", ngay_air=None, link_air=TIKTOK_URL + "?c"),
+        # thang_nam is the month sheet staff put the row in, not the month of ngay_air.
+        "moved": insert("tiktok", ngay_air=dt.date(2026, 2, 3), link_air=TIKTOK_URL + "?m"),
     }
+    run(sql("UPDATE public.tiktok SET thang_nam = date '2025-12-01' WHERE id = $1", ids["moved"]))
+    assert row("tiktok", ids["no_date"])["thang_nam"] is None
 
     async def scan_ids(thang):
         session = await store.open_scan(thang)
@@ -146,7 +166,8 @@ def test_a_month_is_selected_by_thang_nam_across_the_year_boundary(db):
         return [item["row"] for item in session.rows]
 
     assert run(scan_ids("2026-01")) == [ids["jan26"]]
-    assert run(scan_ids("2025-12")) == [ids["dec25"]]
+    assert run(scan_ids("2025-12")) == [ids["dec25"], ids["moved"]]
+    assert run(scan_ids("2026-02")) == []
     assert run(scan_ids("2025-01")) == [ids["jan25"]]
     assert [r["LINK AIR"] for r in run(store.report_rows("2026-01")).rows] == [TIKTOK_URL + "?a"]
 
@@ -194,14 +215,39 @@ def test_tiktok_null_vs_zero_on_every_outcome(db):
 
     assert run(scan()) == (True, None)
     got = row("tiktok", success)
+    assert got["has_chi_so"] and got["trang_thai_quet"] == "Success"
     assert (got["luot_xem"], got["tim"], got["binh_luan"], got["luot_luu"], got["chia_se"]) == (0, None, 3, None, 1234)
     assert got["cap_nhat_lan_cuoi"] is not None and got["link_nguon_phan_giai"] == TIKTOK_URL
     got = row("tiktok", hidden)
     assert [got[k] for k in old] == [None] * 5 and got["cap_nhat_lan_cuoi"] is None and got["ten_kenh"] == "Demo"
     got = row("tiktok", failed)
     assert {k: got[k] for k in old} == old and got["trang_thai_quet"] == "Error: HTTP 403" and got["cap_nhat_lan_cuoi"] is None
-    audit = run(sql("SELECT DISTINCT nguoi_thuc_hien FROM public.lich_su WHERE bang = 'tiktok' AND hanh_dong = 'UPDATE'", fetch=True))
-    assert [r["nguoi_thuc_hien"] for r in audit] == ["app:riviu-reports-scanner"]
+    # Only bao_cao was written: no post edit, so nothing in Riviu Data's history.
+    audit = run(sql("SELECT count(*) AS n FROM public.lich_su WHERE bang = 'tiktok' AND hanh_dong = 'UPDATE'", fetch=True))
+    assert audit[0]["n"] == 0
+
+
+def test_a_post_without_metrics_gets_a_bao_cao_row_and_the_scanner_cannot_edit_posts(db):
+    target = insert("tiktok", ngay_air=dt.date(2026, 10, 2), link_air=TIKTOK_URL, doi_tac="Cafe A")
+    assert not row("tiktok", target)["has_chi_so"]
+
+    async def scan():
+        session = await postgres.PostgresStore("tiktok", db["scanner"]).open_scan("2026-10")
+        session.write_tiktok_result(target, TIKTOK_URL, {}, "", "Error: HTTP 403")
+        result = await session.flush()
+        try:
+            with pytest.raises(asyncpg.InsufficientPrivilegeError):
+                await session.conn.execute("UPDATE public.tiktok SET ghi_chu = 'x' WHERE id = $1", target)
+        finally:
+            await session.close()
+        return session, result
+
+    session, result = run(scan())
+    assert result == (True, None) and session.written == 1
+    got = row("tiktok", target)
+    # A failure inserts only its status; every metric stays unknown (NULL), never 0.
+    assert got["has_chi_so"] and got["trang_thai_quet"] == "Error: HTTP 403" and got["khoa_chi_so"] is False
+    assert [got[k] for k in ("luot_xem", "tim", "binh_luan", "luot_luu", "chia_se", "cap_nhat_lan_cuoi")] == [None] * 6
 
 
 def test_threads_null_vs_zero_and_view_invalidation(db):
@@ -237,7 +283,7 @@ def test_rows_edited_deleted_or_locked_mid_scan_are_skipped_and_logged(db):
         session = await postgres.PostgresStore("tiktok", db["scanner"]).open_scan("2026-10", run_id=run_id, events=Events())
         await sql("UPDATE public.tiktok SET link_air = $2 WHERE id = $1", edited, TIKTOK_URL + "?new")
         await sql("UPDATE public.tiktok SET da_xoa_luc = now() WHERE id = $1", deleted)
-        await sql("UPDATE public.tiktok SET khoa_chi_so = true WHERE id = $1", locked)
+        await sql("UPDATE bao_cao.tiktok_chi_so SET khoa_chi_so = true WHERE id = $1", locked)
         for row_id, url in ((edited, TIKTOK_URL), (deleted, TIKTOK_URL + "?d"), (locked, TIKTOK_URL + "?l")):
             session.write_tiktok_result(row_id, url, {"Views": "999"}, "Demo", "Success")
         result = await session.flush()

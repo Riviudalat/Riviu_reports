@@ -1,10 +1,14 @@
 # Riviu Reports on the Riviu Data Postgres
 
-Riviu Data's Postgres is the single source of truth for the seeding rows (`tiktok`, `threads`).
-With `RIVIU_STORAGE=postgres`, a Riviu Reports **server** scans those tables and builds partner
-reports from them. Desktop and source mode never use Postgres: they keep the workbooks, unchanged.
+Riviu Data's Postgres holds the seeding post list (`public.tiktok`, `public.threads`). Since Riviu
+Data migration `0011_month_sheets` the channel name, metrics, scan status, resolved links and the
+metric lock of each post live in Riviu Reports' own schema **`bao_cao`** in the same database
+(`bao_cao.tiktok_chi_so`, `bao_cao.threads_chi_so`, one row per post id, `ON DELETE CASCADE`).
+With `RIVIU_STORAGE=postgres`, a Riviu Reports **server** scans the posts, writes `bao_cao` and builds
+partner reports from both. Desktop and source mode never use Postgres: they keep the workbooks, unchanged.
 
-Design background: Riviu Data `docs/integration-and-ops.md` §1 and §4.6, `docs/review-v1.md`
+The contract is Riviu Data `docs/riviu-reports-schema.md` (tables, reads, writes, grants). Design
+background: Riviu Data `docs/integration-and-ops.md` §1 and §4.6, `docs/review-v1.md`
 (H-04, H-05, H-06, H-07, M-06, M-09, M-10, M-13, M-19, M-24, M-25).
 
 ## Code map
@@ -43,32 +47,55 @@ value to Riviu Data (`RDA_SCAN_SECRET`) and to the timer (`RIVIU_SCAN_TOKEN_FILE
 
 ## Data rules
 
+- **Reads.** `public.v_<t> v LEFT JOIN bao_cao.<t>_chi_so c USING (id)`: the post fields (`id`,
+  `link_air`, `ngay_air`, `doi_tac`) from the view, `ten_kenh`, metrics, `trang_thai_quet`,
+  `cap_nhat_lan_cuoi`, `link_phan_giai`/`link_nguon_phan_giai` and `khoa_chi_so` from `bao_cao`
+  (all NULL, lock false, when the post has no `bao_cao` row yet).
 - **Month selection.** `thang` is `YYYY-MM`; rows are selected with
-  `thang_nam >= first day AND thang_nam < first day of next month` (review H-05), never by the
-  year-less `thang` text. Rows whose `ngay_air` is NULL have no `thang_nam` and are never scanned.
-- **Soft delete.** Reads go through `v_tiktok` / `v_threads` (`da_xoa_luc IS NULL`). Every UPDATE
-  also requires `da_xoa_luc IS NULL`.
-- **Locked metrics.** Rows with `khoa_chi_so = true` are not scanned at all (DESIGN §5.4/§7), and every
-  UPDATE requires `NOT khoa_chi_so`, so a row locked during the scan gets no write either.
+  `thang_nam >= first day AND thang_nam < first day of next month` (review H-05). Since 0011
+  `thang_nam` is the row's **month sheet**: set when the row is created (from `ngay_air` if not
+  given) and moved by staff, never re-derived from `ngay_air` on update. Rows with `thang_nam`
+  NULL belong to no month and are never scanned.
+- **Soft delete.** Reads go through `v_tiktok` / `v_threads` (live rows only); every write requires
+  the post to still be live in `v_<t>`.
+- **Locked metrics.** Rows with `bao_cao.<t>_chi_so.khoa_chi_so = true` are not scanned at all
+  (DESIGN §5.4/§7), and the upsert's conflict branch requires `NOT khoa_chi_so`, so a row locked
+  during the scan gets no write either. Since 0011 nobody sets the lock from Riviu Data (it has no
+  lock UI any more); the lock is Riviu Reports' to manage. Riviu Reports has no lock toggle yet
+  (out of scope); until it does, a lock can only be set in SQL
+  (`INSERT INTO bao_cao.<t>_chi_so (id, khoa_chi_so) VALUES (…, true) ON CONFLICT (id) DO UPDATE SET khoa_chi_so = true`).
 - **Write rules** (same as the workbook, `riviu/store/rules.py`):
 
   | TikTok outcome | metrics | `trang_thai_quet` | `link_phan_giai` / `link_nguon_phan_giai` | `ten_kenh` | `cap_nhat_lan_cuoi` |
   |---|---|---|---|---|---|
   | `Success` | `metric_or_none` (unknown → NULL, `0` stays 0) | set | set | best quality | `now()` |
   | `should_clear_stale_metrics` (hidden stats, gone confirmed by oEmbed) | NULL | set | — | kept if usable | — |
-  | any other failure | — (not in the UPDATE) | set | — | kept if usable | — |
+  | any other failure | — (not in the upsert) | set | — | kept if usable | — |
 
-  Threads: a known value replaces the old one, a missing one is left out of the UPDATE, views become
+  A column marked — is not named in the upsert: an existing `bao_cao` row keeps its value, a new
+  one gets NULL (unknown, never 0).
+  Threads: a known value replaces the old one, a missing one is left out of the upsert, views become
   NULL only on the explicit `view_query_unknown` invalidation, `cap_nhat_lan_cuoi` only when a channel
   or a metric was read. A channel equal to the stored one is not written, so a staff edit made during
   the scan survives.
 - **Concurrency.** Results are buffered (no I/O in the result loop) and flushed every `save_every`
-  results (TikTok) or 30 s (Threads), and at the end, each flush one short transaction:
-  `set_config('app.user','app:riviu-reports-scanner',true)`, `set_config('app.bulk','on',true)`
-  (no per-row NOTIFY, review M-06), then one `UPDATE … FROM unnest(…) … RETURNING id` per set of
-  changed columns (≤ 500 rows per statement), guarded by
-  `id = … AND link_air = <value read at open> AND da_xoa_luc IS NULL AND NOT khoa_chi_so`, the
-  `scan_run_item` rows, and one `pg_notify('rda_changes', {"resync": true, "bang": …, "ly_do": "quet"})`.
+  results (TikTok) or 30 s (Threads), and at the end, each flush one short transaction: one upsert
+  per set of changed columns (≤ 500 rows per statement), then the `scan_run_item` rows:
+
+  ```sql
+  INSERT INTO bao_cao.tiktok_chi_so AS c (id, <changed columns>)
+  SELECT u.id, u.<changed columns>
+  FROM unnest($1::bigint[], $2::text[], <one array per column>) AS u(id, link_seen, <changed columns>)
+  WHERE EXISTS (SELECT 1 FROM public.v_tiktok v WHERE v.id = u.id AND v.link_air = u.link_seen)
+  ON CONFLICT (id) DO UPDATE SET <col> = EXCLUDED.<col>, …   -- only the changed columns
+  WHERE NOT c.khoa_chi_so
+  RETURNING c.id
+  ```
+
+  (Threads: `bao_cao.threads_chi_so` and `public.v_threads`.) `link_seen` is the `link_air` read at
+  open. `bao_cao` is not audited by Riviu Data (`lich_su` holds post edits only) and its grid does not
+  show metrics, so flushes no longer set `app.user` / `app.bulk` nor send the `rda_changes` resync
+  NOTIFY. `riviu_scanner` has no INSERT/UPDATE/DELETE on `public.tiktok`/`threads` at all.
   A row edited (link changed), deleted or locked during the scan is skipped, logged in the scan log
   ("dòng đã bị sửa trong lúc quét, bỏ qua") and recorded as `Bỏ qua: <reason>` in `scan_run_item`.
   A failed flush keeps its writes buffered and retries at the next checkpoint; a failed final
@@ -104,7 +131,9 @@ Authorization: Bearer <token with scope scan:run>
 - The advisory lock is taken on a dedicated connection held for the whole scan and released
   explicitly before it closes (never pooled, review M-25).
 - `scan_run`: a given `scan_run_id` (Riviu Data's `phase='yeu_cau'` row) is reused (`phase`
-  `dang_quet`, `thang_nam`; `mode` kept if set), otherwise a new row (`mode` = trigger). At the end:
+  `dang_quet`, `thang_nam`; `mode` kept if set), otherwise a new row (`mode` = trigger). This needs
+  the column-limited UPDATE on `scan_run` (granted since 0011); without it the scan fails to start
+  (the former fallback that recorded a second `scan_run` row was removed). At the end:
   `phase` `hoan_tat`/`dung_som`/`loi`/`huy`, `stop_reason`, `finished_at`, `totals`
   (written, skipped, lockedRows, invalidLinks, success/error/hidden…) and `diagnostic` (Threads run
   diagnostic, the first 200 skipped rows, the error text).
@@ -122,7 +151,7 @@ Authorization: Bearer <token with scope scan:run>
 `POST /riviu-data/export-report {"platform","thang","partners","applyMinViews","minViews"}` return the
 same partner list and the same Excel files as `/report-partners` / `/export-report` on a workbook
 (same filters, totals, fills, and the formula-injection guard `set_cell_literal`, review M-13). They
-read one month from `v_<platform>` in one `REPEATABLE READ` transaction and sit behind the normal
+read one month from `v_<platform>` LEFT JOIN `bao_cao.<platform>_chi_so` in one `REPEATABLE READ` transaction and sit behind the normal
 server-mode login. The existing UI still drives the workbook routes; wiring a month picker to
 these routes is not part of this change.
 
@@ -149,9 +178,10 @@ uv run pytest -q tests/test_store_postgres_integration.py
 docker compose -p rr-pgtest -f C:\Users\cattfan\Desktop\Riviu_Data_App\backend\docker-compose.test.yml down -v
 ```
 
-They cover: `thang_nam` selection across a year boundary, locked and soft-deleted rows (at read and
-mid-scan), the `link_air` guard (row edited mid-scan → skipped, logged, `scan_run_item`), NULL vs 0
-on every TikTok/Threads outcome, audit actor `app:riviu-reports-scanner`, the advisory-lock 409,
+They cover: `thang_nam` selection across a year boundary and for a row moved to another month sheet,
+locked and soft-deleted rows (at read and mid-scan), the `link_air` guard (row edited mid-scan →
+skipped, logged, `scan_run_item`), NULL vs 0 on every TikTok/Threads outcome, the first `bao_cao` row
+of a never-scanned post, no `lich_su` entry and no UPDATE grant on `public.tiktok`, the advisory-lock 409,
 timer 200 vs manual 202 (reusing a `scan_run` created by `riviu_app`), a real Threads scan through
 the endpoint, the partner export with an untrusted channel, and Python vs SQL `rda_split_doi_tac`
 parity. The unit file covers config, write rules, workbook/Postgres parity of rows, partners and
@@ -162,39 +192,19 @@ links, the runners on a session, and auth 401/403, 404, 409, 422.
 1. **`dual` is not built.** `RIVIU_STORAGE=dual` refuses to start. Phase 2 of the migration plan
    (shadow writes) would need it.
 2. **Locked rows are not scanned at all**, not "scanned without metrics": DESIGN §7 says the scanner
-   skips them. Their status and channel are therefore not refreshed either.
-3. **`v_tiktok` lacks `link_phan_giai` / `link_nguon_phan_giai`.** Migration 0003 creates it as
-   `SELECT *` before 0009 adds those columns, so Postgres froze the old column list. The TikTok queries
-   read `v_tiktok` joined to `tiktok` on `id` for the two columns. Riviu Data should recreate the view
-   (or add `v_tiktok_report`).
-4. **No `v_<platform>_report` / `v_<platform>_partner_summary` views exist** in the migrations. Reports
-   read `v_<platform>` and build the report rows in Python (the same functions as the workbook path).
-   Proposed views for Riviu Data (security_invoker, review L-03):
-
-   ```sql
-   CREATE VIEW public.v_tiktok_report WITH (security_invoker = true) AS
-   SELECT t.id, t.thang_nam, t.ngay_air, t.ten_kenh, t.link_air, t.doi_tac, t.luot_xem, t.tim, t.binh_luan,
-          t.luot_luu, t.chia_se, t.cap_nhat_lan_cuoi, t.trang_thai_quet, t.link_phan_giai, t.link_nguon_phan_giai,
-          t.khoa_chi_so, public.rda_split_doi_tac(t.doi_tac) AS doi_tac_ds
-   FROM public.tiktok t WHERE t.da_xoa_luc IS NULL;
-   -- v_threads_report: the same with repost instead of luot_luu and without the two link columns.
-
-   CREATE VIEW public.v_tiktok_partner_summary WITH (security_invoker = true) AS
-   SELECT r.thang_nam, d.ten AS doi_tac, count(*) AS tong_link,
-          sum(r.luot_xem) AS tong_luot_xem, sum(r.tim) AS tong_tim, sum(r.binh_luan) AS tong_binh_luan,
-          sum(r.luot_luu) AS tong_luot_luu, sum(r.chia_se) AS tong_chia_se, max(r.cap_nhat_lan_cuoi) AS cap_nhat_lan_cuoi
-   FROM public.v_tiktok_report r JOIN public.tiktok_doi_tac l ON l.tiktok_id = r.id JOIN public.doi_tac d ON d.id = l.doi_tac_id
-   GROUP BY r.thang_nam, d.ten;
-   -- SUM ignores NULLs and is NULL when nothing is known: the workbook's metric_total rule.
-   ```
-
-   The Python side keeps the failed-channel and min-views filters and the `@username` display rule.
-5. **`deploy/postgres/riviu_scanner.sql` grants only `SELECT, INSERT` on `scan_run`**, while migration
-   0009 grants `SELECT, INSERT, UPDATE`. Re-running the roles script would remove the `UPDATE` that
-   progress and the final phase need. Without it the store logs a warning, records the scan in a new
-   `scan_run` row pointing at the requested one (`diagnostic.scanRunYeuCau`), and cannot set
-   `finished_at`. Riviu Data should grant `UPDATE (phase, thang_nam, mode, totals, diagnostic,
-   stop_reason, finished_at)` on `scan_run` in the script.
+   skips them. Their status and channel are therefore not refreshed either. The lock is in `bao_cao`
+   and has no UI yet (see Data rules).
+3. **Resolved by 0011: resolution links.** `link_phan_giai` / `link_nguon_phan_giai` now live in
+   `bao_cao.tiktok_chi_so`; the former `v_tiktok` JOIN `tiktok` workaround is gone.
+4. **Changed by 0011: no report views.** Reports read `v_<t>` LEFT JOIN `bao_cao.<t>_chi_so` and build
+   the report rows in Python (the same functions as the workbook path), which keeps the failed-channel
+   and min-views filters and the `@username` display rule. The `v_<t>_report` / partner-summary views
+   proposed earlier are no longer asked of Riviu Data: `bao_cao` is Riviu Reports' own schema, so such
+   views, if ever needed, would be Riviu Reports' (schema doc §6 shows the join).
+5. **Resolved by 0011: `scan_run` UPDATE.** Migration 0011 and `deploy/postgres/riviu_scanner.sql` grant
+   `UPDATE (phase, thang_nam, mode, totals, diagnostic, stop_reason, finished_at)`; the fallback that
+   recorded a second `scan_run` row (`diagnostic.scanRunYeuCau`) was removed, so a missing grant is a
+   visible deployment error instead of a silently split run.
 6. **`scan_run_item` has no UPDATE grant**, so its insert is `ON CONFLICT DO NOTHING`: if a row were
    written twice in one run, the first flushed status stays.
 7. **Advisory-lock key.** The spec's single-key `hashtext('scan:'||platform)` is used. Riviu Data's

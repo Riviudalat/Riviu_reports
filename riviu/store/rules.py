@@ -1,7 +1,7 @@
 """Pure rules of the Postgres backend: months, scan writes and report rows (no I/O).
 
 The write functions return the columns one result changes, as {column: value}. A column
-that must keep its old value is left out (the UPDATE never names it), exactly like a
+that must keep its old value is left out (the bao_cao upsert never names it), exactly like a
 workbook cell the scanner does not touch:
 
 TikTok (`riviu.platforms.tiktok.workbook_io.write_result`):
@@ -40,7 +40,7 @@ REPORT_METRIC_COLUMNS = {
     "threads": {"LƯỢT XEM": "luot_xem", "TIM": "tim", "BÌNH LUẬN": "binh_luan", "REPOST": "repost", "CHIA SẺ": "chia_se"},
 }
 ALL_REPORT_METRICS = ("LƯỢT XEM", "TIM", "BÌNH LUẬN", "LƯỢT LƯU", "REPOST", "CHIA SẺ")
-# Columns riviu_scanner may write (riviu_scanner.sql / migration 0009). Anything else is a bug.
+# Columns of bao_cao.<t>_chi_so the scanner writes (khoa_chi_so is never written by a scan). Anything else is a bug.
 WRITABLE_COLUMNS = {
     "tiktok": frozenset({*TIKTOK_METRIC_COLUMNS.values(), "ten_kenh", "trang_thai_quet", "cap_nhat_lan_cuoi",
                          "link_phan_giai", "link_nguon_phan_giai"}),

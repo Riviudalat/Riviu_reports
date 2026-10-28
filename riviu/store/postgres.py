@@ -1,18 +1,22 @@
 """The Postgres backend (Riviu Data): rows to scan, buffered result writes, scan_run, reports.
 
-Connects only as `riviu_scanner` (column-limited role, riviu_scanner.sql / migration 0009).
+Connects only as `riviu_scanner` (riviu_scanner.sql / migration 0011). Contract: Riviu Data
+`docs/riviu-reports-schema.md`.
 
-Reads select a month by `thang_nam` (first day of the month of ngay_air, review H-05), never
-by the year-less `thang` text, through the soft-delete views `v_tiktok` / `v_threads`. Rows
+Since Riviu Data migration 0011 the post list lives in `public.<t>` (read through the
+soft-delete views `v_tiktok` / `v_threads`) and the channel, metrics, scan status, resolved
+links and lock live in Riviu Reports' schema `bao_cao` (`bao_cao.<t>_chi_so`, one row per
+post id, absent = nothing known yet). Reads are `v_<t> LEFT JOIN bao_cao.<t>_chi_so USING (id)`
+and select a month by `thang_nam` (the row's month sheet, review H-05), never by text. Rows
 with `khoa_chi_so = true` are not scanned at all (DESIGN 5.4, review H-07).
 
 Writes are buffered in memory (no network I/O while a result is recorded) and flushed in
-one short transaction per checkpoint: column-limited UPDATEs grouped by the set of columns
-they change, each guarded by `id`, `link_air = <value read at open>`, `da_xoa_luc IS NULL`
-and `NOT khoa_chi_so`. A row edited, deleted or locked during the scan therefore gets no
-write; it is counted, logged ("dòng đã bị sửa trong lúc quét, bỏ qua") and recorded in
-scan_run_item. Every flush sets `app.user = 'app:riviu-reports-scanner'` and
-`app.bulk = 'on'` (no per-row NOTIFY, review M-06) and sends one resync NOTIFY instead.
+one short transaction per checkpoint: upserts into `bao_cao.<t>_chi_so` grouped by the set
+of columns they change, each guarded by `EXISTS (live post with id and link_air = <value
+read at open>)` and, on conflict, `NOT khoa_chi_so`. A row edited, deleted or locked during
+the scan therefore gets no write; it is counted, logged ("dòng đã bị sửa trong lúc quét, bỏ
+qua") and recorded in scan_run_item. `bao_cao` is neither audited nor broadcast by Riviu
+Data, so flushes set no `app.user` / `app.bulk` and send no NOTIFY.
 """
 
 from __future__ import annotations
@@ -29,17 +33,18 @@ from riviu.workbook.text import clean_text
 
 log = logging.getLogger("riviu.store.postgres")
 
-APP_USER = "app:riviu-reports-scanner"
 APPLICATION_NAME = "riviu-reports-scanner"
 TABLES = {"tiktok": "tiktok", "threads": "threads"}
 # Fixed per-table statements (identifiers come from TABLES only, never from input).
 LOCKED_COUNT_SQL = {
-    "tiktok": "SELECT count(*) FROM public.v_tiktok WHERE thang_nam >= $1 AND thang_nam < $2 AND khoa_chi_so",
-    "threads": "SELECT count(*) FROM public.v_threads WHERE thang_nam >= $1 AND thang_nam < $2 AND khoa_chi_so",
+    table: f"SELECT count(*) FROM public.v_{table} v JOIN bao_cao.{table}_chi_so c USING (id) "
+    "WHERE v.thang_nam >= $1 AND v.thang_nam < $2 AND c.khoa_chi_so"
+    for table in TABLES.values()
 }
+# public.<t> (not the view): a row soft-deleted during the scan must be told apart from a gone one.
 SKIP_REASON_SQL = {
-    table: f"SELECT id, link_air, da_xoa_luc IS NOT NULL AS deleted, khoa_chi_so FROM public.{table} "
-    "WHERE id = ANY($1::bigint[])"
+    table: f"SELECT t.id, t.link_air, t.da_xoa_luc IS NOT NULL AS deleted, coalesce(c.khoa_chi_so, false) AS khoa_chi_so "
+    f"FROM public.{table} t LEFT JOIN bao_cao.{table}_chi_so c USING (id) WHERE t.id = ANY($1::bigint[])"
     for table in TABLES.values()
 }
 UPDATE_CHUNK = 500
@@ -95,26 +100,17 @@ async def release_scan_lock(conn, platform):
 # ---- scan_run -------------------------------------------------------------------------
 
 async def begin_scan_run(conn, *, platform, month_start, trigger, started_by, scan_run_id=None):
-    """The scan_run id for this scan: the requested one (phase 'yeu_cau' from Riviu Data) or a new row."""
-    import asyncpg
+    """The scan_run id for this scan: the requested one (phase 'yeu_cau' from Riviu Data) or a new row.
 
+    UPDATE on scan_run is granted (migration 0011, riviu_scanner.sql); a missing grant is a
+    deployment error and fails the start instead of silently recording a second run.
+    """
     if scan_run_id is not None:
-        try:
-            run_id = await conn.fetchval(
-                "UPDATE public.scan_run SET phase = $3, thang_nam = $4, mode = coalesce(mode, $5) "
-                "WHERE id = $1 AND platform = $2 AND finished_at IS NULL RETURNING id",
-                scan_run_id, platform, PHASE_RUNNING, month_start, trigger,
-            )
-        except asyncpg.InsufficientPrivilegeError:
-            # riviu_scanner.sql grants only SELECT, INSERT on scan_run; record a new row
-            # that points at the request instead of failing the scan.
-            log.warning("riviu_scanner has no UPDATE on scan_run; scan_run %s stays 'yeu_cau'", scan_run_id)
-            return await conn.fetchval(
-                "INSERT INTO public.scan_run (platform, thang_nam, phase, mode, started_by, diagnostic) "
-                "VALUES ($1, $2, $3, $4, $5, $6::jsonb) RETURNING id",
-                platform, month_start, PHASE_RUNNING, trigger, started_by,
-                json.dumps({"scanRunYeuCau": scan_run_id}),
-            )
+        run_id = await conn.fetchval(
+            "UPDATE public.scan_run SET phase = $3, thang_nam = $4, mode = coalesce(mode, $5) "
+            "WHERE id = $1 AND platform = $2 AND finished_at IS NULL RETURNING id",
+            scan_run_id, platform, PHASE_RUNNING, month_start, trigger,
+        )
         if run_id is None:
             raise ScanRunNotFound(f"scan_run {scan_run_id} không tồn tại, khác nền tảng hoặc đã kết thúc")
         return run_id
@@ -148,33 +144,35 @@ async def update_scan_run(conn, run_id, *, totals=None, phase=None, stop_reason=
 
 # ---- Reads ------------------------------------------------------------------------------
 
+# The post list joined to its bao_cao row (NULLs when the post has none yet, schema doc §3).
+_MONTH_FROM = (
+    "FROM public.v_{t} v LEFT JOIN bao_cao.{t}_chi_so c USING (id) "
+    "WHERE v.thang_nam >= $1 AND v.thang_nam < $2"
+)
+
+
 def _scan_query(platform):
-    if platform == "tiktok":
-        # v_tiktok is `SELECT *` from migration 0003, so it predates link_phan_giai (0009):
-        # the view filters deleted rows, the base table supplies the two resolution columns.
-        return (
-            "SELECT v.id, v.link_air, v.doi_tac, v.ten_kenh, t.link_phan_giai, t.link_nguon_phan_giai "
-            "FROM public.v_tiktok v JOIN public.tiktok t ON t.id = v.id "
-            "WHERE v.thang_nam >= $1 AND v.thang_nam < $2 AND NOT v.khoa_chi_so ORDER BY v.id"
-        )
+    table = _table(platform)
+    links = ", c.link_phan_giai, c.link_nguon_phan_giai" if platform == "tiktok" else ""
     return (
-        "SELECT id, link_air, doi_tac, ten_kenh FROM public.v_threads "
-        "WHERE thang_nam >= $1 AND thang_nam < $2 AND NOT khoa_chi_so ORDER BY id"
+        f"SELECT v.id, v.link_air, v.doi_tac, c.ten_kenh{links} "
+        + _MONTH_FROM.format(t=table)
+        + " AND NOT coalesce(c.khoa_chi_so, false) ORDER BY v.id"
     )
 
 
 def _report_query(platform):
+    table = _table(platform)
     if platform == "tiktok":
-        return (
-            "SELECT v.id, v.ngay_air, v.ten_kenh, v.link_air, v.doi_tac, v.luot_xem, v.tim, v.binh_luan, "
-            "v.luot_luu, v.chia_se, v.cap_nhat_lan_cuoi, v.trang_thai_quet, t.link_phan_giai, t.link_nguon_phan_giai "
-            "FROM public.v_tiktok v JOIN public.tiktok t ON t.id = v.id "
-            "WHERE v.thang_nam >= $1 AND v.thang_nam < $2 ORDER BY v.id"
-        )
+        metrics = "c.luot_xem, c.tim, c.binh_luan, c.luot_luu, c.chia_se"
+        links = ", c.link_phan_giai, c.link_nguon_phan_giai"
+    else:
+        metrics, links = "c.luot_xem, c.tim, c.binh_luan, c.repost, c.chia_se", ""
     return (
-        "SELECT id, ngay_air, ten_kenh, link_air, doi_tac, luot_xem, tim, binh_luan, repost, chia_se, "
-        "cap_nhat_lan_cuoi, trang_thai_quet FROM public.v_threads "
-        "WHERE thang_nam >= $1 AND thang_nam < $2 ORDER BY id"
+        f"SELECT v.id, v.ngay_air, c.ten_kenh, v.link_air, v.doi_tac, {metrics}, "
+        f"c.cap_nhat_lan_cuoi, c.trang_thai_quet{links} "
+        + _MONTH_FROM.format(t=table)
+        + " ORDER BY v.id"
     )
 
 
@@ -372,11 +370,8 @@ class PostgresScanSession:
             groups[tuple(sorted(write["set"]))].append((row_id, write))
         updated = set()
         async with conn.transaction():
-            await conn.execute(
-                "SELECT set_config('app.user', $1, true), set_config('app.bulk', 'on', true)", APP_USER,
-            )
             for columns, items in groups.items():
-                sql = self._update_sql(columns)
+                sql = self._upsert_sql(columns)
                 for start in range(0, len(items), UPDATE_CHUNK):
                     chunk = items[start:start + UPDATE_CHUNK]
                     args = [[row_id for row_id, _ in chunk], [write["link_seen"] for _, write in chunk]]
@@ -394,27 +389,33 @@ class PostgresScanSession:
                     [*(batch[row_id]["status"] or "" for row_id in updated),
                      *(f"Bỏ qua: {item['reason']}" for item in skipped)],
                 )
-            if updated:
-                await conn.execute(
-                    "SELECT pg_notify('rda_changes', json_build_object('resync', true, 'bang', $1::text, 'ly_do', 'quet')::text)",
-                    self.platform,
-                )
         return updated, skipped
 
-    def _update_sql(self, columns):
+    def _upsert_sql(self, columns):
+        """One upsert into bao_cao.<t>_chi_so naming only `columns` (schema doc §4).
+
+        A post without a bao_cao row gets one (the other columns stay NULL = unknown); an
+        existing row changes only `columns`, so a value the result does not touch is kept.
+        """
+        if not columns:
+            raise StoreError("không có cột nào để ghi")
         for column in columns:
             if column not in rules.WRITABLE_COLUMNS[self.platform]:
                 raise StoreError(f"cột không được phép ghi: {column}")
-        assignments = ", ".join(f"{column} = u.{column}" for column in columns)
         arrays = ", ".join(["$1::bigint[]", "$2::text[]", *(
             f"${index}::{rules.COLUMN_TYPES[column]}[]" for index, column in enumerate(columns, start=3)
         )])
         names = ", ".join(["id", "link_seen", *columns])
+        targets = ", ".join(["id", *columns])
+        values = ", ".join(f"u.{column}" for column in ("id", *columns))
+        assignments = ", ".join(f"{column} = EXCLUDED.{column}" for column in columns)
         return (
-            f"UPDATE public.{self.table} AS t SET {assignments} "
-            f"FROM unnest({arrays}) AS u({names}) "
-            "WHERE t.id = u.id AND t.link_air = u.link_seen AND t.da_xoa_luc IS NULL AND NOT t.khoa_chi_so "
-            "RETURNING t.id"
+            f"INSERT INTO bao_cao.{self.table}_chi_so AS c ({targets}) "
+            f"SELECT {values} FROM unnest({arrays}) AS u({names}) "
+            f"WHERE EXISTS (SELECT 1 FROM public.v_{self.table} v WHERE v.id = u.id AND v.link_air = u.link_seen) "
+            f"ON CONFLICT (id) DO UPDATE SET {assignments} "
+            "WHERE NOT c.khoa_chi_so "
+            "RETURNING c.id"
         )
 
     async def _skip_reasons(self, conn, row_ids, batch):
