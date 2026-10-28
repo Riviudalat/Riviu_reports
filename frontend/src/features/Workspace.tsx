@@ -267,7 +267,7 @@ function SheetPanel() {
 const LIVE_RENDER_LIMIT = 2000;
 const LIVE_PINNED_SCROLL_PX = 32;
 
-function LivePanel({ onlySuccess }: { onlySuccess: boolean }) {
+export function LivePanel({ onlySuccess, hideSheet = false }: { onlySuccess: boolean; hideSheet?: boolean }) {
   const rows = useApp(state => state.scan.rows);
   const runPlatform = useApp(state => state.scan.runContext?.platform);
   const active = useApp(state => state.activePlatform);
@@ -295,7 +295,7 @@ function LivePanel({ onlySuccess }: { onlySuccess: boolean }) {
         <table className={tableClass}>
           <thead>
             <tr>
-              <th className={thClass}>ID</th><th className={thClass}>Sheet</th><th className={thClass}>Tên kênh</th>
+              <th className={thClass}>ID</th>{!hideSheet && <th className={thClass}>Sheet</th>}<th className={thClass}>Tên kênh</th>
               <th className={thClass}>{config.liveLinkHeader}</th>
               <th className={cn(thClass, 'text-right')}>Lượt xem</th><th className={cn(thClass, 'text-right')}>Tim</th>
               <th className={cn(thClass, 'text-right')}>Bình luận</th><th className={cn(thClass, 'text-right')}>{config.savedMetric.column}</th>
@@ -303,8 +303,8 @@ function LivePanel({ onlySuccess }: { onlySuccess: boolean }) {
             </tr>
           </thead>
           <tbody data-testid="live-rows">
-            {visible.length === 0 && <EmptyRow colSpan={10}>Chưa có kết quả mới</EmptyRow>}
-            {visible.map(row => <LiveResultRow key={row.seq} row={row} />)}
+            {visible.length === 0 && <EmptyRow colSpan={hideSheet ? 9 : 10}>Chưa có kết quả mới</EmptyRow>}
+            {visible.map(row => <LiveResultRow key={row.seq} row={row} hideSheet={hideSheet} />)}
           </tbody>
         </table>
       </div>
@@ -317,14 +317,14 @@ function LivePanel({ onlySuccess }: { onlySuccess: boolean }) {
   );
 }
 
-function LiveResultRow({ row }: { row: LiveRow }) {
+function LiveResultRow({ row, hideSheet = false }: { row: LiveRow; hideSheet?: boolean }) {
   const missing = Array.isArray(row.missingMetrics) && row.missingMetrics.length ? ` • Nguồn chưa trả: ${row.missingMetrics.join(', ')}` : '';
   const tone = row.kind === 'success' ? 'text-success' : row.kind === 'nostats' ? 'text-warning' : 'text-destructive';
   const metric = (value: unknown) => <td className={cn(tdClass, 'text-right font-semibold tabular-nums')}>{formatResultNumber(value)}</td>;
   return (
     <tr className={cn('hover:bg-muted/40', row.videoLink && 'bg-video-link/5', row.singlePartner && 'bg-single-partner-link/5')} data-result={row.kind}>
       <td className={cn(tdClass, 'tabular-nums')}>{String(row.id ?? '')}</td>
-      <td className={cn(tdClass, 'whitespace-nowrap')}>{row.sheetName || ''}</td>
+      {!hideSheet && <td className={cn(tdClass, 'whitespace-nowrap')}>{row.sheetName || ''}</td>}
       <td className={cn(tdClass, 'max-w-40 truncate')} title={row.channelName || ''}>{row.channelName || ''}</td>
       <td className={cn(tdClass, 'max-w-[20rem] truncate')} title={row.url}>
         <a href={row.url} target="_blank" rel="noopener noreferrer" className={cn('hover:underline', row.videoLink || row.singlePartner ? linkColorClass(row) : '')}>{row.url}</a>
@@ -337,7 +337,7 @@ function LiveResultRow({ row }: { row: LiveRow }) {
 
 // ---- Failure, duplicate and log panels ------------------------------------------------
 
-function FailurePanel({ kind }: { kind: 'nostats' | 'errors' }) {
+export function FailurePanel({ kind }: { kind: 'nostats' | 'errors' }) {
   const failed = useApp(state => state.scan.failed);
   const active = useApp(state => state.activePlatform);
   const items = useMemo(() => failedLinksForKind(failed, kind), [failed, kind]);
@@ -373,7 +373,7 @@ function FailurePanel({ kind }: { kind: 'nostats' | 'errors' }) {
   );
 }
 
-function DuplicatesPanel() {
+export function DuplicatesPanel() {
   const items = useApp(state => state.scan.duplicates);
   return (
     <div className="min-h-0 flex-1 overflow-auto">
@@ -455,7 +455,7 @@ function LogLine({ line }: { line: LogEntry }) {
   );
 }
 
-function LogsPanel() {
+export function LogsPanel() {
   const logs = useApp(state => state.logs);
   const box = useRef<HTMLDivElement>(null);
   useEffect(() => {

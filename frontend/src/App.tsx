@@ -14,6 +14,8 @@ import { GuideDialog } from '@/features/GuideDialog';
 import { CookieDialog, GooglePasteDialog, ProxyDialog } from '@/features/SettingsDialogs';
 import { LoginPage } from '@/features/LoginPage';
 import { useIsAdmin } from '@/components/common';
+import { fetchVersion, isAdminPage } from '@/lib/version';
+import { RiviuDataApp } from '@/features/v2/RiviuDataApp';
 
 function ConnectionBanner() {
   const state = useApp(s => s.connection);
@@ -79,11 +81,18 @@ function isLoginRoute(): boolean {
 export default function App() {
   const loginRoute = isLoginRoute();
   const viewer = useQuery({ queryKey: ['viewer'], queryFn: fetchViewer, enabled: !loginRoute, staleTime: Infinity, retry: false });
+  // Unreachable /api/version keeps the workbook UI (the behaviour before Riviu Data).
+  const version = useQuery({ queryKey: ['version'], queryFn: fetchVersion, enabled: !loginRoute, staleTime: Infinity, retry: 2 });
+  const storage = version.data?.storage ?? (version.isError ? 'workbook' : undefined);
   useEffect(() => {
-    if (viewer.data && !viewer.data.authenticated) window.location.assign('/login');
-  }, [viewer.data]);
+    // Riviu Data has a public viewer at /; the workbook UI still needs a login.
+    if (storage === 'workbook' && viewer.data && !viewer.data.authenticated) window.location.assign('/login');
+  }, [viewer.data, storage]);
   if (loginRoute) return <LoginPage />;
-  if (!viewer.data || !viewer.data.authenticated) {
+  if (viewer.data && storage === 'postgres') {
+    return <RiviuDataApp viewer={viewer.data} adminPage={isAdminPage(window.location.pathname, viewer.data)} />;
+  }
+  if (!viewer.data || !storage || !viewer.data.authenticated) {
     return (
       <div className="flex h-full items-center justify-center gap-2 text-sm text-muted-foreground">
         <Loader2Icon className="size-4 animate-spin" /> Đang tải...
