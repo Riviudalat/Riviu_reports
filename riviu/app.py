@@ -198,8 +198,8 @@ _STATIC_DIR = os.path.join(server_context.APP_RESOURCE_DIR, "static")
 if os.path.isdir(_STATIC_DIR):
     app.mount("/static", StaticFiles(directory=_STATIC_DIR), name="static")
 # The React web app (frontend/, built by Vite into riviu/web/app with base /app/).
-if os.path.isdir(pages.WEB_APP_DIR):
-    app.mount("/app", StaticFiles(directory=pages.WEB_APP_DIR), name="web-app")
+# Mounted even before the first build (check_dir=False), so a build made while the server runs is served.
+app.mount("/app", StaticFiles(directory=pages.WEB_APP_DIR, check_dir=False), name="web-app")
 
 app.middleware("http")(security.protect_local_api)
 
