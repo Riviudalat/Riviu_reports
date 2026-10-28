@@ -14,7 +14,7 @@ const API_PATHS = [
   '/upload-excel', '/source-preferences', '/sync-google-sheet', '/push-google-sheet',
   '/google-oauth-status', '/google-oauth-client', '/google-service-account', '/google-oauth-login',
   '/google-oauth-complete', '/proxy-list', '/proxy-test', '/scrape-history', '/report-partners',
-  '/export-report', '/threads-session', '/tiktok-session',
+  '/export-report', '/threads-session', '/tiktok-session', '/riviu-data', '/scan-settings', '/schedule',
 ];
 
 export default defineConfig({
