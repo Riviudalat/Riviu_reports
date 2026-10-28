@@ -16,8 +16,8 @@ function json(data: unknown, status = 200, headers: Record<string, string> = {})
 }
 
 const ROWS: RdRow[] = [
-  { id: 1, ngayAir: '12/10/2026', channel: 'kenh6', link: 'https://www.tiktok.com/@kenh6/video/7400000000000015838', partners: ['Cafe Mây'], views: 349, likes: 0, comments: null, saves: null, shares: 0, updatedAt: '28/10/2026-12:30', status: 'Success' },
-  { id: 2, ngayAir: '13/10/2026', channel: '', link: 'https://www.tiktok.com/@kenh27/video/7400000000000071271', partners: ['Spa'], views: null, likes: null, comments: null, saves: null, shares: null, updatedAt: '', status: 'Error: Không đọc được số liệu' },
+  { id: 1, ngayAir: '12/10/2026', nguoiAir: 'Phát', channel: 'kenh6', link: 'https://www.tiktok.com/@kenh6/video/7400000000000015838', partners: ['Cafe Mây'], views: 349, likes: 0, comments: null, saves: null, shares: 0, updatedAt: '28/10/2026-12:30', status: 'Success' },
+  { id: 2, ngayAir: '13/10/2026', channel: '', link: 'https://www.tiktok.com/@kenh27/photo/7400000000000071271', partners: ['Spa', 'Cafe Mây'], views: null, likes: null, comments: null, saves: null, shares: null, updatedAt: '', status: 'Error: Không đọc được số liệu' },
 ];
 
 let calls: Array<{ url: string; init?: RequestInit }> = [];
@@ -77,10 +77,11 @@ describe('public viewer page (/)', () => {
   it('shows the month report read-only, with a login link and no admin controls', () => {
     renderAs(ANON, false);
     expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Tháng 10/2026');
+    expect(screen.getByTestId('month-select')).toHaveTextContent('Tháng 10/2026');
     expect(screen.getByTestId('login-link')).toHaveAttribute('href', '/admin');
     expect(screen.getByTestId('open-export')).toBeEnabled();
-    for (const id of ['scan-toolbar', 'start-scan', 'settings-menu', 'account-menu']) expect(screen.queryByTestId(id)).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Lịch tự động' })).not.toBeInTheDocument();
+    for (const id of ['scan-toolbar', 'start-scan', 'settings-menu', 'logout']) expect(screen.queryByTestId(id)).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Hẹn giờ tự động' })).not.toBeInTheDocument();
     expect(screen.queryByText(/Hướng dẫn/)).not.toBeInTheDocument();
     expect(screen.getByTestId('last-update')).toHaveTextContent('Số liệu cập nhật lúc 12:30, 28/10/2026');
   });
@@ -99,13 +100,46 @@ describe('public viewer page (/)', () => {
 
   it('filters by partner and search, totals follow the filter', async () => {
     renderAs(ANON, false);
-    await userEvent.selectOptions(screen.getByLabelText('Lọc theo đối tác'), 'Spa');
+    await userEvent.click(screen.getByRole('combobox', { name: 'Lọc theo đối tác' }));
+    await userEvent.type(screen.getByLabelText('Tìm đối tác…'), 'spa');
+    expect(screen.getAllByRole('option').map(option => option.textContent)).toEqual(['Spa1']);
+    await userEvent.click(screen.getByRole('option', { name: /Spa/ }));
     expect(screen.getAllByTestId('link-row')).toHaveLength(1);
     expect(screen.getByTestId('row-count')).toHaveTextContent('1 / 2');
     expect(screen.getByTestId('total-views')).toHaveTextContent(/^$/);
-    await userEvent.selectOptions(screen.getByLabelText('Lọc theo đối tác'), '');
+    await userEvent.click(screen.getByRole('combobox', { name: 'Lọc theo đối tác' }));
+    await userEvent.click(screen.getByRole('option', { name: /Tất cả đối tác/ }));
     await userEvent.type(screen.getByLabelText('Tìm trong danh sách link'), 'kenh6');
     expect(screen.getAllByTestId('link-row')).toHaveLength(1);
+  });
+
+  it('shows Người đăng, the post type and an exclusive tag for a single partner', () => {
+    renderAs(ANON, false);
+    expect(screen.getAllByRole('columnheader').map(cell => cell.textContent)).toEqual([
+      'Ngày đăng', 'Người đăng', 'Tên kênh', 'Link', 'Lượt xem', 'Tim', 'Bình luận', 'Lượt lưu', 'Chia sẻ', 'Đối tác', 'Trạng thái', 'Cập nhật',
+    ]);
+    const [first, second] = screen.getAllByTestId('link-row');
+    expect(within(first).getByText('Phát')).toBeInTheDocument();
+    expect(within(first).getByText('Video')).toBeInTheDocument();
+    expect(within(first).getByTestId('exclusive-tag')).toHaveTextContent('Độc quyền');
+    expect(within(second).getByText('Ảnh')).toBeInTheDocument();
+    expect(within(second).queryByTestId('exclusive-tag')).not.toBeInTheDocument();
+  });
+
+  it('opens a post link on double click and copies it with Ctrl + click', async () => {
+    const open = vi.fn();
+    vi.stubGlobal('open', open);
+    const writeText = vi.fn(async () => undefined);
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true });
+    renderAs(ANON, false);
+    const link = screen.getAllByTestId('post-link')[0];
+    await userEvent.click(link);
+    expect(open).not.toHaveBeenCalled();
+    expect(link).toHaveFocus();
+    await userEvent.dblClick(link);
+    expect(open).toHaveBeenCalledWith(ROWS[0].link, '_blank', 'noopener,noreferrer');
+    fireEvent.click(link, { ctrlKey: true });
+    expect(writeText).toHaveBeenCalledWith(ROWS[0].link);
   });
 
   it('shows a calm progress line while a scan runs, and the retry time during the cooldown', () => {
@@ -142,13 +176,13 @@ describe('public viewer page (/)', () => {
 });
 
 describe('admin page (/admin)', () => {
-  it('has the scan toolbar, schedule, settings and account menu', () => {
+  it('has the scan toolbar, schedule, settings and a logout button', () => {
     renderAs(ADMIN, true);
     expect(screen.getByTestId('scan-toolbar')).toBeInTheDocument();
     expect(screen.getByTestId('start-scan')).toHaveTextContent('Quét tháng 10/2026');
-    expect(screen.getByRole('button', { name: 'Lịch tự động' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Hẹn giờ tự động' })).toBeInTheDocument();
     expect(screen.getByTestId('settings-menu')).toBeInTheDocument();
-    expect(screen.getByTestId('account-menu')).toBeInTheDocument();
+    expect(screen.getByTestId('logout')).toHaveTextContent('Đăng xuất');
     expect(screen.queryByTestId('login-link')).not.toBeInTheDocument();
   });
 

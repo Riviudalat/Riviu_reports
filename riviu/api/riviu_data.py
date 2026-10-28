@@ -82,6 +82,7 @@ def table_row(row, platform):
     return {
         "id": row["_id"],
         "ngayAir": ngay_air.strftime("%d/%m/%Y") if ngay_air else "",
+        "nguoiAir": row.get("_nguoiAir", ""),
         "channel": row["TÊN KÊNH"],
         "link": row["LINK AIR"],
         "partners": list(row["partners"]),

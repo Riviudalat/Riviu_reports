@@ -1,5 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react';
-import { CheckCircle2Icon, ExternalLinkIcon, Loader2Icon, NetworkIcon, SaveIcon, Trash2Icon, UploadIcon } from 'lucide-react';
+import { CheckCircle2Icon, CookieIcon, ExternalLinkIcon, Loader2Icon, NetworkIcon, SaveIcon, Trash2Icon, UploadIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Dialog, DialogBody, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from '@/components/ui/dialog';
 import { Badge, Textarea } from '@/components/ui/misc';
@@ -8,7 +8,7 @@ import { errorMessage, getJson, postJson } from '@/lib/api';
 import { formatCookieCheckedAt } from '@/lib/format';
 import { cn } from '@/lib/utils';
 import {
-  appStore, closeModal, cookieAction, COOKIE_IMPORT_MAX_BYTES, notify, refreshCookieStatus, refreshProxyStatus, submitGooglePaste, uiIsBusy, useApp, type CookieKind,
+  appStore, closeModal, cookieAction, openModal, COOKIE_IMPORT_MAX_BYTES, notify, refreshCookieStatus, refreshProxyStatus, submitGooglePaste, uiIsBusy, useApp, type CookieKind,
 } from '@/state/app';
 
 // ---- Proxy ----------------------------------------------------------------------------
@@ -19,7 +19,7 @@ interface ProxyTestResult {
   okCount?: number;
   uniqueIps?: unknown;
   message?: string;
-  results?: Array<{ ok?: boolean; ip?: string; name?: string; label?: string; line?: number }>;
+  results?: Array<{ ok?: boolean; ip?: string; location?: string; name?: string; label?: string; line?: number }>;
 }
 
 function isLegacyProxyTestResponse(data: ProxyTestResult): boolean {
@@ -57,15 +57,17 @@ export function ProxyDialog() {
   const open = useApp(state => state.modal === 'proxy');
   return (
     <Dialog open={open} onOpenChange={value => !value && closeModal()}>
-      <DialogContent className="max-w-2xl">{open && <ProxyBody />}</DialogContent>
+      <DialogContent className="max-w-4xl">{open && <ProxyBody />}</DialogContent>
     </Dialog>
   );
 }
 
+type ProxyRow = NonNullable<ProxyTestResult['results']>[number];
+
 function ProxyBody() {
   const [text, setText] = useState(() => appStore.get().proxyText);
   const [count, setCount] = useState(() => appStore.get().proxyCount);
-  const [result, setResult] = useState<{ tone: '' | 'ok' | 'error'; text: string }>({ tone: '', text: 'Chưa test.' });
+  const [result, setResult] = useState<{ tone: '' | 'ok' | 'error'; text: string; rows: ProxyRow[] }>({ tone: '', text: '', rows: [] });
   const [busy, setBusy] = useState<'' | 'save' | 'test'>('');
   const textareaId = useId();
   useEffect(() => {
@@ -95,15 +97,16 @@ function ProxyBody() {
 
   const test = async () => {
     setBusy('test');
-    setResult({ tone: '', text: 'Đang kiểm tra proxy...' });
+    setResult({ tone: '', text: 'Đang kiểm tra proxy...', rows: [] });
     try {
       const { response, data } = await postJson<ProxyTestResult & { detail?: string }>(`/proxy-test?_=${Date.now()}`, { text, save: false });
       if (!response.ok) throw new Error(data.detail || data.message || 'Test thất bại');
       const lines = proxyTestLines(data);
-      setResult({ tone: lines.ok ? 'ok' : 'error', text: lines.text });
+      const legacy = isLegacyProxyTestResponse(data);
+      setResult({ tone: lines.ok ? 'ok' : 'error', text: legacy ? lines.text : lines.text.split('\n')[0], rows: legacy ? [] : data.results || [] });
       notify(data.message || 'Test xong', Number(data.okCount || 0) > 0 ? 'success' : 'warn');
     } catch (error) {
-      setResult({ tone: 'error', text: errorMessage(error, 'Test thất bại') });
+      setResult({ tone: 'error', text: errorMessage(error, 'Test thất bại'), rows: [] });
       notify(errorMessage(error, 'Test proxy thất bại'), 'error');
     } finally {
       setBusy('');
@@ -115,19 +118,50 @@ function ProxyBody() {
       <DialogHeader>
         <DialogTitle><NetworkIcon className="size-4 text-primary" /> Cấu hình proxy</DialogTitle>
         <DialogDescription>
-          {count > 0 ? `Đã lưu ${count} proxy. Mỗi dòng 1 proxy — các tuyến proxy được phân bổ cho luồng quét tùy nền tảng và chế độ.` : 'Chưa có proxy. Dán vào ô bên dưới rồi Test hoặc Lưu.'}
+          {count > 0 ? `Đã lưu ${count} proxy · mỗi dòng 1 proxy.` : 'Chưa có proxy. Dán vào ô bên dưới rồi Test hoặc Lưu.'}
         </DialogDescription>
       </DialogHeader>
-      <DialogBody className="flex flex-col gap-3">
-        <p className="text-xs text-muted-foreground">
-          Hỗ trợ: <code>host:port:user:pass</code> · <code>user:pass@host:port</code> · <code>http://user:pass@host:port</code> · <code>socks5://...</code> · <code>host:port</code>
-        </p>
-        <label htmlFor={textareaId} className="sr-only">Danh sách proxy</label>
-        <Textarea id={textareaId} rows={10} value={text} onChange={event => setText(event.target.value)} spellCheck={false} autoComplete="off"
-          placeholder={'Mỗi dòng 1 proxy\n103.162.31.100:8080:user:pass\nuser:pass@1.2.3.4:8080\nhttp://user:pass@host:port'} />
-        <pre className={cn('whitespace-pre-wrap rounded-lg border bg-muted/40 p-3 font-mono text-xs', result.tone === 'ok' && 'border-success/40 text-success', result.tone === 'error' && 'border-destructive/40 text-destructive')} data-testid="proxy-result">
-          {result.text}
-        </pre>
+      <DialogBody className="grid gap-4 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+        <div className="flex min-w-0 flex-col gap-1.5">
+          <label htmlFor={textareaId} className="text-xs font-medium text-muted-foreground">Danh sách proxy</label>
+          <Textarea id={textareaId} value={text} onChange={event => setText(event.target.value)} spellCheck={false} autoComplete="off" wrap="off"
+            className="h-72 resize-none text-xs leading-5"
+            placeholder={'Mỗi dòng 1 proxy\n103.162.31.100:8080:user:pass\nuser:pass@1.2.3.4:8080\nhttp://user:pass@host:port'} />
+          <p className="text-[11px] text-muted-foreground" title="host:port:user:pass · user:pass@host:port · http://user:pass@host:port · socks5://... · host:port">
+            Dạng: <code>host:port:user:pass</code>, <code>user:pass@host:port</code>, <code>http://</code>, <code>socks5://</code>
+          </p>
+        </div>
+        <div className="flex min-w-0 flex-col gap-1.5">
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium text-muted-foreground">Kết quả test</span>
+            {result.text && (
+              <span className={cn('text-xs font-semibold', result.tone === 'ok' && 'text-success', result.tone === 'error' && 'text-destructive')} role="status">{result.text}</span>
+            )}
+          </div>
+          <div className="h-72 overflow-y-auto rounded-md border bg-muted/30" data-testid="proxy-result">
+            {result.rows.length === 0 ? (
+              <p className="flex h-full items-center justify-center px-4 text-center text-sm text-muted-foreground">
+                {busy === 'test' ? <Loader2Icon className="size-5 animate-spin" /> : 'Bấm Test proxy để xem IP và khu vực của từng proxy.'}
+              </p>
+            ) : (
+              <ul className="divide-y text-xs">
+                {result.rows.map((item, index) => {
+                  const ok = Boolean(item?.ok && item.ip);
+                  return (
+                    <li key={item?.line ?? index} className="flex items-center gap-2 px-3 py-1.5">
+                      <span className={cn('size-2 shrink-0 rounded-full', ok ? 'bg-success' : 'bg-destructive')} aria-hidden="true" />
+                      <span className="w-6 shrink-0 tabular-nums text-muted-foreground">{item?.line || index + 1}</span>
+                      <span className="w-28 shrink-0 font-mono tabular-nums">{ok ? item.ip : 'Lỗi'}</span>
+                      <span className={cn('min-w-0 flex-1 truncate', ok ? 'text-foreground/80' : 'text-destructive')}>
+                        {ok ? (item.location || 'Không rõ khu vực') : 'Không kết nối được'}
+                      </span>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+          </div>
+        </div>
       </DialogBody>
       <DialogFooter>
         <Button variant="outline" onClick={closeModal}>Đóng</Button>
@@ -156,7 +190,37 @@ export function CookieDialog({ kind }: { kind: CookieKind }) {
   );
 }
 
-function CookieBody({ kind }: { kind: CookieKind }) {
+/** TikTok and Threads cookies in one dialog with a tab per platform (the V2 settings menu). */
+export function CookiesDialog() {
+  const modal = useApp(state => state.modal);
+  const open = modal === 'threadsCookie' || modal === 'tiktokCookie';
+  const kind: CookieKind = modal === 'threadsCookie' ? 'threads' : 'tiktok';
+  const busy = useApp(state => state.cookieBusy.threads || state.cookieBusy.tiktok);
+  return (
+    <Dialog open={open} onOpenChange={value => { if (!value && !busy) closeModal(); }}>
+      <DialogContent className="max-w-xl" closeDisabled={busy} onEscapeKeyDown={event => { if (busy) event.preventDefault(); }} onPointerDownOutside={event => { if (busy) event.preventDefault(); }}>
+        {open && <CookieBody key={kind} kind={kind} tabs />}
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function CookieTabs({ kind }: { kind: CookieKind }) {
+  const busy = useApp(state => state.cookieBusy.threads || state.cookieBusy.tiktok);
+  return (
+    <div className="mt-2 inline-flex w-fit rounded-lg bg-muted p-1" role="tablist" aria-label="Cookie nền tảng">
+      {(['tiktok', 'threads'] as const).map(value => (
+        <button key={value} type="button" role="tab" aria-selected={kind === value} disabled={busy && kind !== value}
+          onClick={() => openModal(value === 'threads' ? 'threadsCookie' : 'tiktokCookie')}
+          className={cn('flex items-center gap-1.5 rounded-md px-3 py-1 text-sm font-medium disabled:opacity-50', kind === value ? 'bg-card shadow-sm' : 'text-muted-foreground hover:text-foreground')}>
+          <PlatformIcon platform={value} /> {value === 'threads' ? 'Threads' : 'TikTok'}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function CookieBody({ kind, tabs = false }: { kind: CookieKind; tabs?: boolean }) {
   const status = useApp(state => state.cookies[kind]);
   const busy = useApp(state => uiIsBusy(state));
   const ownBusy = useApp(state => state.cookieBusy[kind]);
@@ -209,10 +273,11 @@ function CookieBody({ kind }: { kind: CookieKind }) {
   return (
     <>
       <DialogHeader>
-        <DialogTitle><PlatformIcon platform={platform} /> Cookie {label}</DialogTitle>
+        {tabs ? <DialogTitle><CookieIcon className="size-4 text-primary" /> Cookie đăng nhập</DialogTitle> : <DialogTitle><PlatformIcon platform={platform} /> Cookie {label}</DialogTitle>}
         <DialogDescription>
           {kind === 'tiktok' ? 'Cho bài chỉ xem được khi đăng nhập. Dùng tuyến proxy/direct đang chọn khi quét.' : 'Dùng tuyến proxy/direct đang chọn khi quét.'}
         </DialogDescription>
+        {tabs && <CookieTabs kind={kind} />}
       </DialogHeader>
       <DialogBody className="flex flex-col gap-4">
         {kind === 'tiktok' && (
@@ -242,10 +307,6 @@ function CookieBody({ kind }: { kind: CookieKind }) {
         </section>
         <section className="flex flex-col gap-2">
           <h3 className="text-sm font-semibold">Import phiên mới</h3>
-          <p className="text-xs text-muted-foreground">
-            Cookie-Editor ở {kind === 'tiktok' ? 'tiktok.com' : 'threads.com'} → <strong>Export → JSON</strong>.
-            {kind === 'tiktok' && <> Cần cookie <code>sessionid</code>, <code>sessionid_ss</code> hoặc <code>sid_tt</code>.</>}
-          </p>
           <div className="inline-flex w-fit rounded-lg bg-muted p-1" role="tablist" aria-label="Nguồn cookie">
             {(['file', 'paste'] as const).map(value => (
               <button key={value} type="button" role="tab" aria-selected={source === value} disabled={ownBusy} onClick={() => switchSource(value)}
@@ -260,7 +321,7 @@ function CookieBody({ kind }: { kind: CookieKind }) {
                 className="flex w-full flex-col items-center gap-1 rounded-lg border-2 border-dashed px-4 py-5 text-sm transition hover:border-primary/60 hover:bg-accent/40 disabled:opacity-50">
                 <UploadIcon className="size-5 text-primary" />
                 <strong>Chọn file cookie .json</strong>
-                <span className="text-xs text-muted-foreground">JSON export từ Cookie-Editor · tối đa 256 KiB</span>
+                <span className="text-xs text-muted-foreground">Tối đa 256 KiB</span>
               </button>
               <input ref={fileInput} type="file" className="sr-only" accept=".json,application/json" aria-label={`Chọn file cookie ${label} JSON`} onChange={event => setFile(event.target.files?.[0] || null)} />
               {file && <p className="mt-1 text-xs text-muted-foreground" role="status">{file.name} · {(file.size / 1024).toFixed(1)} KiB</p>}

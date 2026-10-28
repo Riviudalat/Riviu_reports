@@ -5,7 +5,7 @@ import type { Viewer } from '@/lib/auth';
 import { CONNECTION_LOST_TEXT, CONNECTION_RECONNECTING_TEXT, canAdmin, useApp } from '@/state/app';
 import { startRiviuDataApp } from '@/state/riviuData';
 import { HistoryDialog } from '@/features/HistoryDialog';
-import { CookieDialog, ProxyDialog } from '@/features/SettingsDialogs';
+import { CookiesDialog, ProxyDialog } from '@/features/SettingsDialogs';
 import { Header } from './Header';
 import { LinkTablePanel, ReportContext } from './LinkTable';
 import { ExportDialog } from './ExportDialog';
@@ -48,8 +48,7 @@ export function RiviuDataLayout({ adminPage }: { adminPage: boolean }) {
           <>
             <ScheduleDialog />
             <ProxyDialog />
-            <CookieDialog kind="threads" />
-            <CookieDialog kind="tiktok" />
+            <CookiesDialog />
           </>
         )}
       </div>

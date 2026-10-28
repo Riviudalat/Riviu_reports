@@ -23,6 +23,8 @@ export interface RdRow {
   id: number | string;
   /** dd/mm/yyyy or '' */
   ngayAir: string;
+  /** NGƯỜI AIR (staff who posted); '' until Riviu Data fills it. */
+  nguoiAir?: string;
   channel: string;
   link: string;
   partners: string[];
@@ -73,6 +75,7 @@ function normalizeRow(raw: unknown): RdRow | null {
   return {
     id: (record.id as number | string) ?? link,
     ngayAir: String(record.ngayAir || ''),
+    nguoiAir: String(record.nguoiAir || ''),
     channel: String(record.channel || ''),
     link,
     partners: Array.isArray(record.partners) ? record.partners.map(String).filter(Boolean) : [],
@@ -135,7 +138,7 @@ export function filterRows(rows: readonly RdRow[], { search, partner }: RowFilte
   return rows.filter(row => {
     if (partner && !row.partners.includes(partner)) return false;
     if (!needle) return true;
-    const text = normalizeVietnameseKey([row.channel, row.link, row.partners.join(' '), row.ngayAir, row.status].join(' '));
+    const text = normalizeVietnameseKey([row.channel, row.nguoiAir || '', row.link, row.partners.join(' '), row.ngayAir, row.status].join(' '));
     return text.includes(needle);
   });
 }
@@ -184,6 +187,14 @@ export function lastUpdateText(rows: readonly RdRow[]): string {
 }
 
 const LINK_KINDS: Record<string, string> = { video: 'video', photo: 'ảnh', post: 'post' };
+
+export type LinkKind = 'video' | 'photo' | 'post' | '';
+
+/** What a post link points at: a TikTok video or photo post, or a Threads post. */
+export function linkKind(url: string): LinkKind {
+  const match = /\/@[^/]+\/(video|photo|post)\//.exec(url);
+  return match ? (match[1] as LinkKind) : '';
+}
 
 /** "https://www.tiktok.com/@kenh/video/7391…123456" -> { handle: "@kenh", detail: "video …123456" }. */
 export function shortLink(url: string): { handle: string; detail: string } {

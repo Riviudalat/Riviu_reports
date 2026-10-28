@@ -1,18 +1,20 @@
-import { useId, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
+import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { DownloadIcon, RefreshCwIcon, SearchIcon, XIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
-import { Input, NativeSelect, Skeleton } from '@/components/ui/misc';
+import { Input, Skeleton } from '@/components/ui/misc';
+import { Picker, type PickerOption } from '@/components/ui/picker';
 import { formatNumber, formatResultNumber } from '@/lib/format';
 import { platformConfig, type PlatformKey } from '@/lib/platforms';
 import {
-  columnTotals, filterRows, lastUpdateText, metricColumns, scanStatusView, shortLink, shortUpdate, type RdRow, type ScanStatusTone,
+  columnTotals, filterRows, lastUpdateText, linkKind, metricColumns, scanStatusView, shortLink, shortUpdate, type LinkKind, type RdRow, type ScanStatusTone,
 } from '@/lib/riviuData';
 import { scanIsBusy, viewerScanText } from '@/lib/scan';
 import { cn } from '@/lib/utils';
-import { openModal, useApp } from '@/state/app';
+import { notify, openModal, useApp } from '@/state/app';
 import { monthsOf, refreshView, selectThang } from '@/state/riviuData';
 
-// ---- Report context: which month, its freshness, the month picker and export ----------
+// ---- Report context: the month picker, its freshness and export ------------------------
 
 /** The calm read-only line while a scan runs (every visitor sees it). */
 export function ScanStatePill() {
@@ -34,20 +36,26 @@ export function ScanStatePill() {
   );
 }
 
-export function MonthSelect({ className }: { className?: string }) {
-  const id = useId();
+/** The month picker doubles as the page title. */
+export function MonthSelect() {
   const platform = useApp(state => state.activePlatform);
   const months = useApp(state => monthsOf(state));
   const thang = useApp(state => state.rd.thang[state.activePlatform]);
   const loaded = useApp(state => state.rd.months[state.activePlatform] !== null);
+  const options = useMemo<PickerOption[]>(() => months.map(month => ({ value: month.thang, label: month.label, hint: `${formatNumber(month.rows)} link` })), [months]);
   return (
-    <div className={cn('flex min-w-0 flex-col gap-1.5', className)}>
-      <label htmlFor={id} className="text-xs font-medium text-muted-foreground">Tháng</label>
-      <NativeSelect id={id} className="md:w-60" value={thang} disabled={!months.length} onChange={event => void selectThang(event.target.value)} aria-label={`Tháng báo cáo ${platformConfig(platform).label}`} data-testid="month-select">
-        {!months.length && <option value="">{loaded ? 'Chưa có tháng nào' : 'Đang tải…'}</option>}
-        {months.map(month => <option key={month.thang} value={month.thang}>{month.label} · {formatNumber(month.rows)} link</option>)}
-      </NativeSelect>
-    </div>
+    <Picker
+      value={thang}
+      onChange={value => void selectThang(value)}
+      options={options}
+      placeholder={loaded ? 'Chưa có tháng nào' : 'Đang tải…'}
+      disabled={!months.length}
+      searchable={false}
+      aria-label={`Tháng báo cáo ${platformConfig(platform).label}`}
+      data-testid="month-select"
+      triggerClassName="-ml-2 h-10 rounded-lg px-2 text-xl font-semibold tracking-tight hover:bg-muted sm:text-[22px]"
+      contentClassName="w-64"
+    />
   );
 }
 
@@ -60,22 +68,14 @@ export function ReportContext() {
   const rows = table.state === 'ready' ? table.rows : null;
   const updated = useMemo(() => (rows ? lastUpdateText(rows) : ''), [rows]);
   return (
-    <section className="flex flex-col gap-4 pb-4 pt-5 md:flex-row md:items-end md:justify-between md:gap-6 md:pt-7" aria-labelledby="report-title">
-      <div className="min-w-0">
-        <p className="text-xs font-semibold uppercase tracking-wider text-primary">Báo cáo {platformConfig(platform).label}</p>
-        <h1 id="report-title" className="mt-1 text-2xl font-semibold tracking-tight sm:text-[26px]">{month?.label || (thang ? thang : 'Chưa có dữ liệu')}</h1>
-        <p className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5 text-sm text-muted-foreground">
-          {rows && <span><b className="font-semibold text-foreground">{formatNumber(rows.length)}</b> link</span>}
-          {updated && <span data-testid="last-update">{updated}</span>}
-          <ScanStatePill />
-        </p>
-      </div>
-      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2.5 md:flex md:shrink-0">
-        <MonthSelect />
-        <Button className="h-9" onClick={() => openModal('export')} disabled={!thang} data-testid="open-export">
-          <DownloadIcon /> Xuất báo cáo
-        </Button>
-      </div>
+    <section className="flex flex-wrap items-center gap-x-4 gap-y-1.5 py-3" aria-labelledby="report-title">
+      <h1 id="report-title" className="sr-only">Báo cáo {platformConfig(platform).label} · {month?.label || thang || 'Chưa có dữ liệu'}</h1>
+      <MonthSelect />
+      {updated && <span className="text-sm text-muted-foreground" data-testid="last-update">{updated}</span>}
+      <ScanStatePill />
+      <Button className="ml-auto h-9" onClick={() => openModal('export')} disabled={!thang} data-testid="open-export">
+        <DownloadIcon /> Xuất báo cáo
+      </Button>
     </section>
   );
 }
@@ -89,44 +89,104 @@ const STATUS_TONE: Record<ScanStatusTone, string> = {
   muted: 'bg-muted text-muted-foreground',
 };
 
-const th = 'sticky top-0 z-10 whitespace-nowrap border-b bg-card px-3 py-2.5 text-left text-xs font-medium text-muted-foreground';
-const td = 'border-b border-border/60 px-3 py-2 align-middle';
+const KIND_TAGS: Record<Exclude<LinkKind, ''>, { label: string; className: string }> = {
+  video: { label: 'Video', className: 'bg-sky-500/12 text-sky-700 dark:text-sky-300' },
+  photo: { label: 'Ảnh', className: 'bg-violet-500/12 text-violet-700 dark:text-violet-300' },
+  post: { label: 'Bài viết', className: 'bg-slate-500/12 text-slate-700 dark:text-slate-300' },
+};
+
+const tag = 'inline-flex shrink-0 items-center rounded px-1.5 py-px text-[11px] font-semibold leading-4';
+const th = 'sticky top-0 z-10 truncate border-b bg-card px-2.5 py-2.5 text-left text-xs font-medium text-muted-foreground';
+const td = 'border-b border-border/60 px-2.5 py-2 align-middle';
 
 function Partners({ names }: { names: string[] }) {
   if (!names.length) return null;
-  const shown = names.slice(0, 2);
+  const chips = (
+    <span className="flex min-w-0 gap-1" tabIndex={0} aria-label={`Đối tác: ${names.join(', ')}`}>
+      <span className="min-w-0 truncate whitespace-nowrap rounded-md bg-muted px-1.5 py-0.5 text-xs text-foreground/80">{names[0]}</span>
+      {names.length > 1 && <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-xs font-medium text-muted-foreground">+{names.length - 1}</span>}
+    </span>
+  );
   return (
-    <span className="flex max-w-80 gap-1" title={names.join(', ')}>
-      {shown.map(name => <span key={name} className="min-w-0 max-w-36 truncate whitespace-nowrap rounded-md bg-muted px-1.5 py-0.5 text-xs text-foreground/80">{name}</span>)}
-      {names.length > shown.length && <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-xs text-muted-foreground">+{names.length - shown.length}</span>}
+    <TooltipPrimitive.Root delayDuration={150}>
+      <TooltipPrimitive.Trigger asChild>{chips}</TooltipPrimitive.Trigger>
+      <TooltipPrimitive.Portal>
+        <TooltipPrimitive.Content side="left" sideOffset={6} className="z-50 max-w-xs rounded-lg border bg-popover p-2.5 text-popover-foreground shadow-lg animate-in fade-in-0 zoom-in-95">
+          <p className="mb-1.5 text-xs font-medium text-muted-foreground">{names.length} đối tác</p>
+          <ul className="flex flex-wrap gap-1">
+            {names.map(name => <li key={name} className="rounded-md bg-muted px-1.5 py-0.5 text-xs">{name}</li>)}
+          </ul>
+        </TooltipPrimitive.Content>
+      </TooltipPrimitive.Portal>
+    </TooltipPrimitive.Root>
+  );
+}
+
+function openLink(url: string) {
+  window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+function copyLink(url: string) {
+  if (!navigator.clipboard) {
+    notify('Trình duyệt không cho sao chép; bấm chuột phải → Sao chép địa chỉ liên kết.', 'warn');
+    return;
+  }
+  navigator.clipboard.writeText(url).then(() => notify('Đã sao chép link', 'success'), () => notify('Không sao chép được link', 'error'));
+}
+
+/** One click selects, a double click opens, Ctrl/⌘ + click or Ctrl/⌘ + C copies; right-click keeps the browser's own link menu. */
+function LinkCell({ url, exclusive }: { url: string; exclusive: boolean }) {
+  const { handle } = shortLink(url);
+  const kind = linkKind(url);
+  return (
+    <span className="flex min-w-0 items-center gap-1.5">
+      <a
+        href={url}
+        target="_blank"
+        rel="noopener noreferrer"
+        title={`${url}\nBấm đúp để mở · Ctrl + C để sao chép`}
+        data-testid="post-link"
+        className="min-w-0 select-none truncate rounded-sm font-medium text-primary outline-none hover:underline focus:bg-primary/10 focus:ring-2 focus:ring-primary/40"
+        onClick={event => {
+          event.preventDefault();
+          if (event.ctrlKey || event.metaKey) copyLink(url);
+          else event.currentTarget.focus();
+        }}
+        onDoubleClick={() => openLink(url)}
+        onKeyDown={event => {
+          if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'c') {
+            event.preventDefault();
+            copyLink(url);
+          } else if (event.key === 'Enter') {
+            event.preventDefault();
+            openLink(url);
+          }
+        }}
+      >
+        {handle}
+      </a>
+      {kind && <span className={cn(tag, KIND_TAGS[kind].className)}>{KIND_TAGS[kind].label}</span>}
+      {exclusive && <span className={cn(tag, 'bg-primary/12 text-primary')} data-testid="exclusive-tag">Độc quyền</span>}
     </span>
   );
 }
 
-function LinkCell({ url }: { url: string }) {
-  const { handle, detail } = shortLink(url);
-  return (
-    <a href={url} target="_blank" rel="noopener noreferrer" title={url} className="whitespace-nowrap font-medium text-primary hover:underline">
-      {handle}{detail && <span className="hidden font-normal text-muted-foreground sm:inline"> · {detail}</span>}
-    </a>
-  );
-}
-
-function Row({ row, platform }: { row: RdRow; platform: PlatformKey }) {
+function Row({ row, platform, showNguoiAir }: { row: RdRow; platform: PlatformKey; showNguoiAir: boolean }) {
   const status = scanStatusView(row);
   return (
     <tr className="hover:bg-muted/40" data-testid="link-row">
-      <td className={cn(td, 'whitespace-nowrap tabular-nums text-muted-foreground')}>{row.ngayAir}</td>
-      <td className={cn(td, 'max-w-40 truncate')} title={row.channel}>{row.channel}</td>
-      <td className={td}><LinkCell url={row.link} /></td>
-      <td className={td}><Partners names={row.partners} /></td>
+      <td className={cn(td, 'whitespace-nowrap pl-4 tabular-nums text-muted-foreground')}>{row.ngayAir}</td>
+      {showNguoiAir && <td className={cn(td, 'truncate')} title={row.nguoiAir}>{row.nguoiAir}</td>}
+      <td className={cn(td, 'truncate')} title={row.channel}>{row.channel}</td>
+      <td className={td}><LinkCell url={row.link} exclusive={row.partners.length === 1} /></td>
       {metricColumns(platform).map(column => (
         <td key={column.key} className={cn(td, 'text-right font-medium tabular-nums')} data-metric={column.key}>{formatResultNumber(row[column.key])}</td>
       ))}
+      <td className={td}><Partners names={row.partners} /></td>
       <td className={td}>
-        <span className={cn('inline-flex whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-semibold', STATUS_TONE[status.tone])} title={status.title}>{status.label}</span>
+        <span className={cn('inline-flex max-w-full truncate whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-semibold', STATUS_TONE[status.tone])} title={status.title}>{status.label}</span>
       </td>
-      <td className={cn(td, 'whitespace-nowrap text-xs tabular-nums text-muted-foreground')} title={row.updatedAt}>{shortUpdate(row.updatedAt)}</td>
+      <td className={cn(td, 'whitespace-nowrap pr-4 text-xs tabular-nums text-muted-foreground')} title={row.updatedAt}>{shortUpdate(row.updatedAt)}</td>
     </tr>
   );
 }
@@ -138,14 +198,27 @@ export function LinkTablePanel({ className }: { className?: string }) {
   const platform = useApp(state => state.activePlatform);
   const [search, setSearch] = useState('');
   const [partnerFilter, setPartnerFilter] = useState('');
-  const partners = useMemo(() => (table.state === 'ready' ? [...table.partners].sort((a, b) => a.localeCompare(b, 'vi')) : []), [table]);
-  const partner = partners.includes(partnerFilter) ? partnerFilter : '';
-  const rows = useMemo(() => (table.state === 'ready' ? filterRows(table.rows, { search, partner }) : []), [table, search, partner]);
+  const allRows = useMemo(() => (table.state === 'ready' ? table.rows : []), [table]);
+  const partnerOptions = useMemo<PickerOption[]>(() => {
+    if (table.state !== 'ready') return [];
+    const counts = new Map<string, number>();
+    for (const row of table.rows) for (const name of row.partners) counts.set(name, (counts.get(name) || 0) + 1);
+    const names = [...table.partners].sort((a, b) => a.localeCompare(b, 'vi'));
+    return [
+      { value: '', label: 'Tất cả đối tác', hint: formatNumber(table.rows.length) },
+      ...names.map(name => ({ value: name, label: name, hint: formatNumber(counts.get(name) || 0) })),
+    ];
+  }, [table]);
+  const partner = partnerOptions.some(option => option.value && option.value === partnerFilter) ? partnerFilter : '';
+  const rows = useMemo(() => filterRows(allRows, { search, partner }), [allRows, search, partner]);
   const totals = useMemo(() => columnTotals(rows, platform), [rows, platform]);
-  const total = table.state === 'ready' ? table.rows.length : 0;
+  // Người air shows once Riviu Data stores it (migration 0013), so an empty column never takes space.
+  const showNguoiAir = useMemo(() => allRows.some(row => row.nguoiAir), [allRows]);
+  const total = allRows.length;
   const filtered = Boolean(search.trim() || partner);
   const columns = metricColumns(platform);
-  const colSpan = 6 + columns.length;
+  const leading = showNguoiAir ? 4 : 3;
+  const colSpan = leading + columns.length + 3;
   return (
     <section className={cn('flex min-h-[24rem] min-w-0 flex-col overflow-hidden rounded-xl border bg-card shadow-xs', className)} aria-labelledby="links-title">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2.5 px-4 py-3">
@@ -156,10 +229,19 @@ export function LinkTablePanel({ className }: { className?: string }) {
           </span>
         </h2>
         <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 sm:flex sm:w-auto">
-          <NativeSelect className="min-w-0 sm:w-48" value={partner} onChange={event => setPartnerFilter(event.target.value)} aria-label="Lọc theo đối tác" disabled={!partners.length}>
-            <option value="">Tất cả đối tác</option>
-            {partners.map(name => <option key={name} value={name}>{name}</option>)}
-          </NativeSelect>
+          <Picker
+            className="w-full sm:w-56"
+            value={partner}
+            onChange={setPartnerFilter}
+            options={partnerOptions}
+            placeholder="Tất cả đối tác"
+            searchable
+            searchPlaceholder="Tìm đối tác…"
+            aria-label="Lọc theo đối tác"
+            disabled={partnerOptions.length <= 1}
+            align="end"
+            contentClassName="w-72"
+          />
           <div className="relative col-span-2 row-start-1 min-w-0 sm:w-64">
             <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input type="search" className="pl-8 pr-8" placeholder="Tìm kênh, link, đối tác…" value={search} onChange={event => setSearch(event.target.value)} aria-label="Tìm trong danh sách link" />
@@ -174,20 +256,32 @@ export function LinkTablePanel({ className }: { className?: string }) {
           </Button>
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto border-t md:max-h-[calc(100dvh-14rem)]" data-testid="link-table-scroll">
+      <div className="min-h-0 flex-1 overflow-auto border-t md:max-h-[calc(100dvh-12rem)]" data-testid="link-table-scroll">
         {table.state === 'loading' && <div className="space-y-2 p-4">{Array.from({ length: 8 }, (_, i) => <Skeleton key={i} className="h-8 w-full" />)}</div>}
         {table.state === 'error' && <p className="px-4 py-16 text-center text-sm text-destructive" role="alert">{table.text}</p>}
         {table.state === 'empty' && <p className="px-4 py-16 text-center text-sm text-muted-foreground">Chưa có tháng nào có link {platformConfig(platform).label}.</p>}
         {table.state === 'ready' && (
-          <table className="w-full border-separate border-spacing-0 text-[13px]" data-testid="link-table">
+          // Fixed layout: every column fits the page width (no sideways scrolling from about 1100px up).
+          <table className="w-full min-w-[1080px] table-fixed border-separate border-spacing-0 text-[13px]" data-testid="link-table">
+            <colgroup>
+              <col className="w-[100px]" />
+              {showNguoiAir && <col className="w-[96px]" />}
+              <col className="w-[14%]" />
+              <col className="w-[21%]" />
+              {columns.map(column => <col key={column.key} className={column.key === 'views' ? 'w-[84px]' : 'w-[74px]'} />)}
+              <col />
+              <col className="w-[104px]" />
+              <col className="w-[96px]" />
+            </colgroup>
             <thead>
               <tr>
-                <th className={cn(th, 'pl-4')}>Ngày air</th>
+                <th className={cn(th, 'pl-4')}>Ngày đăng</th>
+                {showNguoiAir && <th className={th}>Người đăng</th>}
                 <th className={th}>Tên kênh</th>
                 <th className={th}>Link</th>
-                <th className={th}>Đối tác</th>
                 {columns.map(column => <th key={column.key} className={cn(th, 'text-right')}>{column.label}</th>)}
-                <th className={th}>Trạng thái quét</th>
+                <th className={th}>Đối tác</th>
+                <th className={th}>Trạng thái</th>
                 <th className={cn(th, 'pr-4')}>Cập nhật</th>
               </tr>
             </thead>
@@ -197,16 +291,16 @@ export function LinkTablePanel({ className }: { className?: string }) {
                   {total ? 'Không có link nào khớp với bộ lọc.' : `Tháng này chưa có link ${platformConfig(platform).label}.`}
                 </td></tr>
               )}
-              {rows.slice(0, ROW_RENDER_LIMIT).map(row => <Row key={row.id} row={row} platform={platform} />)}
+              {rows.slice(0, ROW_RENDER_LIMIT).map(row => <Row key={row.id} row={row} platform={platform} showNguoiAir={showNguoiAir} />)}
             </tbody>
             {rows.length > 0 && (
               <tfoot>
                 <tr className="font-semibold" data-testid="totals-row">
-                  <td colSpan={4} className="sticky bottom-0 border-t bg-muted px-3 py-2.5 pl-4">Tổng{filtered ? ' (đang lọc)' : ''}</td>
+                  <td colSpan={leading} className="sticky bottom-0 border-t bg-muted px-2.5 py-2.5 pl-4">Tổng{filtered ? ' (đang lọc)' : ''}</td>
                   {columns.map(column => (
-                    <td key={column.key} className="sticky bottom-0 border-t bg-muted px-3 py-2.5 text-right tabular-nums" data-testid={`total-${column.key}`}>{formatResultNumber(totals[column.key])}</td>
+                    <td key={column.key} className="sticky bottom-0 border-t bg-muted px-2.5 py-2.5 text-right tabular-nums" data-testid={`total-${column.key}`}>{formatResultNumber(totals[column.key])}</td>
                   ))}
-                  <td colSpan={2} className="sticky bottom-0 border-t bg-muted px-3 py-2.5" />
+                  <td colSpan={3} className="sticky bottom-0 border-t bg-muted px-2.5 py-2.5" />
                 </tr>
               </tfoot>
             )}

@@ -170,7 +170,8 @@ def _report_query(platform):
         metrics, links = "c.luot_xem, c.tim, c.binh_luan, c.repost, c.chia_se", ""
     return (
         f"SELECT v.id, v.ngay_air, c.ten_kenh, v.link_air, v.doi_tac, {metrics}, "
-        f"c.cap_nhat_lan_cuoi, c.trang_thai_quet{links} "
+        # Read through jsonb so the query also works before Riviu Data adds nguoi_air (0013).
+        f"c.cap_nhat_lan_cuoi, c.trang_thai_quet, to_jsonb(v) ->> 'nguoi_air' AS nguoi_air{links} "
         + _MONTH_FROM.format(t=table)
         + " ORDER BY v.id"
     )
@@ -279,7 +280,7 @@ class PostgresStore:
 
     async def report_rows(self, thang, *, conn=None, with_ids=False):
         """The month's report rows (same dict keys as the workbook path), from v_<platform>;
-        `with_ids` adds each post's id as `_id` (the web app's table)."""
+        `with_ids` adds each post's id as `_id` and its Người air as `_nguoiAir` (the web app's table)."""
         from riviu.workbook.platforms import get_platform
 
         spec = get_platform(self.platform)
@@ -296,7 +297,7 @@ class PostgresStore:
         for record in records:
             row = rules.report_row(spec, record, thang)
             if row is not None:
-                rows.append({**row, "_id": record["id"]} if with_ids else row)
+                rows.append({**row, "_id": record["id"], "_nguoiAir": clean_text(record["nguoi_air"])} if with_ids else row)
         return SheetReportRows(rows=tuple(rows), partners=rules.report_partner_names(records))
 
 

@@ -15,7 +15,7 @@ import { closeModal, notify, useApp } from '@/state/app';
 
 async function fetchSchedule(): Promise<ScheduleOverview> {
   const { response, data } = await getJson<Record<string, unknown>>('/schedule', { cache: 'no-store' });
-  if (!response.ok) throw new Error(String(data.error || 'Không tải được lịch tự động.'));
+  if (!response.ok) throw new Error(String(data.error || 'Không tải được hẹn giờ tự động.'));
   return normalizeOverview(data);
 }
 
@@ -62,14 +62,14 @@ function ScheduleBody() {
     setSaving(true);
     try {
       const { response, data } = await postJson<Record<string, unknown>>('/schedule', draft);
-      if (!response.ok) throw new Error(String(data.error || 'Không lưu được lịch tự động.'));
+      if (!response.ok) throw new Error(String(data.error || 'Không lưu được hẹn giờ tự động.'));
       const overview = normalizeOverview(data);
       client.setQueryData(['schedule'], overview);
       setDraft(overview.schedule);
       setProblem('');
-      notify('Đã lưu lịch tự động.', 'success');
+      notify('Đã lưu hẹn giờ tự động.', 'success');
     } catch (error) {
-      setProblem(errorMessage(error, 'Không lưu được lịch tự động.'));
+      setProblem(errorMessage(error, 'Không lưu được hẹn giờ tự động.'));
     } finally {
       setSaving(false);
     }
@@ -80,13 +80,13 @@ function ScheduleBody() {
   return (
     <>
       <DialogHeader>
-        <DialogTitle><CalendarClockIcon className="size-4 text-primary" /> Lịch tự động</DialogTitle>
+        <DialogTitle><CalendarClockIcon className="size-4 text-primary" /> Hẹn giờ tự động</DialogTitle>
         <DialogDescription>
           Mỗi ngày đến giờ đã đặt, máy chủ tự quét tháng mới nhất của nền tảng. Giờ theo {overview?.timezone || 'Asia/Ho_Chi_Minh (UTC+7)'}.
         </DialogDescription>
       </DialogHeader>
       <DialogBody className="flex flex-col gap-5">
-        {query.isPending && <p className="py-10 text-center text-sm text-muted-foreground">Đang tải lịch tự động…</p>}
+        {query.isPending && <p className="py-10 text-center text-sm text-muted-foreground">Đang tải hẹn giờ tự động…</p>}
         {query.isError && <p className="py-10 text-center text-sm text-destructive">{query.error.message}</p>}
         {draft && current && (
           <>

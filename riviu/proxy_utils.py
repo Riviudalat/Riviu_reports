@@ -12,6 +12,10 @@ from urllib.parse import quote, unquote, urlparse
 PROXY_LIST_FILENAME = "proxy_list.txt"
 PROXY_TEST_BUILD = "7"
 IP_CHECK_URL = "https://api.ipify.org?format=json"
+# Exit-IP location for the proxy test (looked up from the server, not through the proxy).
+IP_LOCATION_URL = "https://ipinfo.io/{ip}/json"
+_IP_LOCATIONS = {}
+_IP_LOCATIONS_LOCK = threading.Lock()
 # Link mẫu ổn định — probe phải giống luồng quét (trang chủ TikTok thường không có số liệu).
 TIKTOK_PROBE_URL = "https://www.tiktok.com/@demo/photo/764002"
 TIKTOK_PROBE_HEADERS = {
@@ -509,6 +513,29 @@ def fetch_ip_via_config(config, timeout=25, retries=2):
     raise urllib.error.URLError(last_error or "Không lấy được IP")
 
 
+def ip_location(ip, timeout=5):
+    """'City, CC' for a public IP ('' when unknown); cached for the process."""
+    ip = str(ip or "").strip()
+    if not re.fullmatch(r"[0-9a-fA-F:.]{3,45}", ip):
+        return ""
+    with _IP_LOCATIONS_LOCK:
+        if ip in _IP_LOCATIONS:
+            return _IP_LOCATIONS[ip]
+    location = ""
+    try:
+        request = urllib.request.Request(IP_LOCATION_URL.format(ip=ip), headers={"User-Agent": "Mozilla/5.0", "Accept": "application/json"})
+        with _direct_opener().open(request, timeout=timeout) as response:
+            payload = json.loads(response.read(65536).decode("utf-8"))
+        city = str(payload.get("city") or payload.get("region") or "").strip()
+        country = str(payload.get("country") or "").strip()
+        location = ", ".join(part for part in (city, country) if part)
+    except Exception:
+        return ""
+    with _IP_LOCATIONS_LOCK:
+        _IP_LOCATIONS[ip] = location
+    return location
+
+
 def tiktok_html_looks_valid(body):
     text = str(body or "")
     if len(text) < 500:
@@ -550,6 +577,7 @@ def test_proxy_config(config, timeout=8, *, check_tiktok=False):
         "port": config.get("port"),
         "ok": False,
         "ip": "",
+        "location": "",
         "tiktokOk": False,
         "tiktokError": "",
         "error": "",
@@ -560,6 +588,8 @@ def test_proxy_config(config, timeout=8, *, check_tiktok=False):
     except Exception as error:
         result["error"] = str(error)
         return result
+    if result["ok"]:
+        result["location"] = ip_location(result["ip"])
 
     if not result["ok"] or not check_tiktok:
         return result

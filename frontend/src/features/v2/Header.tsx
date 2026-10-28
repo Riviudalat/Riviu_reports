@@ -1,5 +1,5 @@
 import {
-  CalendarClockIcon, CookieIcon, HistoryIcon, LayoutDashboardIcon, LogInIcon, LogOutIcon, MonitorCogIcon, NetworkIcon, Settings2Icon, ShieldCheckIcon, UserIcon,
+  CalendarClockIcon, CookieIcon, HistoryIcon, LayoutDashboardIcon, LogInIcon, LogOutIcon, MonitorCogIcon, NetworkIcon, Settings2Icon, ShieldCheckIcon,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import {
@@ -7,7 +7,6 @@ import {
 } from '@/components/ui/dropdown-menu';
 import { ThemeToggle } from '@/components/theme';
 import { PlatformIcon } from '@/components/common';
-import { ROLE_LABELS } from '@/lib/auth';
 import { PLATFORMS, PLATFORM_KEYS } from '@/lib/platforms';
 import { cn } from '@/lib/utils';
 import { canAdmin, openModal, useApp } from '@/state/app';
@@ -15,9 +14,9 @@ import { selectRdPlatform } from '@/state/riviuData';
 
 export function Brand() {
   return (
-    <a href="/" className="flex shrink-0 flex-col items-start gap-0.5 border-l-[3px] border-primary pl-2.5 leading-none" aria-label="Riviu Reports — trang báo cáo">
-      <img src={`${import.meta.env.BASE_URL}logo.png`} alt="Riviu" className="h-6 w-auto sm:h-7" />
-      <span className="text-[13px] font-extrabold tracking-tight text-foreground sm:text-sm">Reports</span>
+    <a href="/" className="flex shrink-0 items-center gap-2 leading-none" aria-label="Riviu Reports — trang báo cáo">
+      <img src={`${import.meta.env.BASE_URL}logo.png`} alt="Riviu" className="h-7 w-auto sm:h-8" />
+      <span className="text-base font-extrabold tracking-tight text-foreground sm:text-lg">Reports</span>
     </a>
   );
 }
@@ -57,33 +56,12 @@ export function logout() {
   form.submit();
 }
 
-function LogoutItem() {
-  return <DropdownMenuItem onSelect={logout} data-testid="logout"><LogOutIcon /> Đăng xuất</DropdownMenuItem>;
-}
-
-function AccountMenu() {
-  const viewer = useApp(state => state.viewer);
-  const admin = useApp(state => canAdmin(state));
-  const name = viewer.username || (admin ? 'Quản trị' : 'Tài khoản');
+function LogoutButton() {
+  const name = useApp(state => state.viewer.username);
   return (
-    <DropdownMenu>
-      <DropdownMenuTrigger asChild>
-        <Button variant="ghost" size="sm" className="max-w-44 gap-1.5 px-2" aria-label={`Tài khoản: ${name}`} data-testid="account-menu">
-          <span className={cn('flex size-6 shrink-0 items-center justify-center rounded-full', admin ? 'bg-accent text-accent-foreground' : 'bg-muted text-muted-foreground')}>
-            {admin ? <ShieldCheckIcon className="size-3.5" /> : <UserIcon className="size-3.5" />}
-          </span>
-          <span className="hidden truncate xl:inline">{name}</span>
-        </Button>
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="min-w-52">
-        <DropdownMenuLabel className="flex flex-col gap-0.5">
-          <span className="truncate text-sm font-semibold text-foreground" data-testid="account-name">{name}</span>
-          <span>{ROLE_LABELS[viewer.role]}</span>
-        </DropdownMenuLabel>
-        <DropdownMenuSeparator />
-        <LogoutItem />
-      </DropdownMenuContent>
-    </DropdownMenu>
+    <Button variant="ghost" size="sm" onClick={logout} title={name ? `Đăng xuất (${name})` : 'Đăng xuất'} data-testid="logout">
+      <LogOutIcon /> Đăng xuất
+    </Button>
   );
 }
 
@@ -92,8 +70,8 @@ function AdminActions({ scheduleAvailable }: { scheduleAvailable: boolean }) {
   return (
     <>
       {scheduleAvailable && (
-        <Button variant="ghost" size="sm" onClick={() => openModal('schedule')} aria-label="Lịch tự động" title="Lịch tự động">
-          <CalendarClockIcon /><span className="hidden lg:inline">Lịch tự động</span>
+        <Button variant="ghost" size="sm" onClick={() => openModal('schedule')} aria-label="Hẹn giờ tự động" title="Hẹn giờ tự động">
+          <CalendarClockIcon /><span className="hidden lg:inline">Hẹn giờ tự động</span>
         </Button>
       )}
       <DropdownMenu>
@@ -105,8 +83,7 @@ function AdminActions({ scheduleAvailable }: { scheduleAvailable: boolean }) {
         <DropdownMenuContent align="end" className="min-w-56">
           <DropdownMenuLabel>Cấu hình quét</DropdownMenuLabel>
           <DropdownMenuItem onSelect={() => openModal('proxy')}><NetworkIcon /> Proxy xoay</DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => openModal('threadsCookie')}><CookieIcon /> Cookie Threads</DropdownMenuItem>
-          <DropdownMenuItem onSelect={() => openModal('tiktokCookie')}><CookieIcon /> Cookie TikTok</DropdownMenuItem>
+          <DropdownMenuItem onSelect={() => openModal('tiktokCookie')}><CookieIcon /> Cookie TikTok / Threads</DropdownMenuItem>
           <DropdownMenuSeparator />
           <DropdownMenuItem onSelect={() => openModal('history')}><HistoryIcon /> Lịch sử quét</DropdownMenuItem>
           {serverMode && (
@@ -136,7 +113,7 @@ function ViewerActions() {
           <a href="/admin" data-testid="admin-link"><ShieldCheckIcon /><span className="hidden sm:inline">Quản trị</span></a>
         </Button>
       )}
-      {viewer.serverMode && viewer.authenticated && !admin && <AccountMenu />}
+      {viewer.serverMode && viewer.authenticated && !admin && <LogoutButton />}
       {viewer.serverMode && !viewer.authenticated && (
         <Button variant="outline" size="sm" asChild>
           <a href="/admin" title="Đăng nhập quản trị" data-testid="login-link"><LogInIcon /> Đăng nhập</a>
@@ -158,7 +135,7 @@ export function Header({ adminPage, scheduleAvailable }: { adminPage: boolean; s
             <>
               <AdminActions scheduleAvailable={scheduleAvailable} />
               <ThemeToggle />
-              {serverMode && <AccountMenu />}
+              {serverMode && <LogoutButton />}
             </>
           ) : <ViewerActions />}
         </nav>

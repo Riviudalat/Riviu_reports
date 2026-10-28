@@ -277,3 +277,36 @@ def test_cookie_session_and_redirect_validator_are_exclusive(monkeypatch):
     # urllib runs only one redirect_request, so one of the two guards would be skipped.
     with pytest.raises(ValueError, match="redirect_validator"):
         proxy_utils.urlopen_with_config(request, None, cookiejar=CookieJar(), redirect_validator=lambda _url: True)
+
+
+def test_proxy_test_reports_exit_ip_location(monkeypatch):
+    class FakeResponse:
+        def __init__(self, body):
+            self.body = body
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, *_):
+            return self.body
+
+    looked_up = []
+
+    class FakeOpener:
+        def open(self, request, timeout=None):
+            looked_up.append(request.full_url)
+            return FakeResponse(json.dumps({"ip": "14.187.181.121", "city": "Ho Chi Minh City", "country": "VN"}).encode())
+
+    monkeypatch.setattr(proxy_utils, "fetch_ip_via_config", lambda *a, **k: "14.187.181.121")
+    monkeypatch.setattr(proxy_utils, "_direct_opener", FakeOpener)
+    monkeypatch.setattr(proxy_utils, "_IP_LOCATIONS", {})
+    config = {"type": "http", "host": "proxy.invalid", "port": 3128, "username": "synthetic-user", "password": "synthetic-password"}
+
+    result = proxy_utils.test_proxy_config(config)
+    again = proxy_utils.test_proxy_config(config)
+
+    assert result["location"] == again["location"] == "Ho Chi Minh City, VN"
+    assert looked_up == ["https://ipinfo.io/14.187.181.121/json"]  # looked up once, never through the proxy
