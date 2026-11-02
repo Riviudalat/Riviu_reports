@@ -16,11 +16,9 @@ Environment (postgres only):
     RIVIU_SCAN_TOKEN_FILE     bearer tokens for POST /internal/scan, one per line:
                               "<token> [scope,scope]" (scopes default to scan:run), or
                               "sha256:<hex digest of the token> [scopes]"; # starts a comment
-    RIVIU_SCAN_TIKTOK_MODE    request | browser | hybrid (default hybrid)
-    RIVIU_SCAN_TIKTOK_WORKERS default 10
-    RIVIU_SCAN_THREADS_MODE   request | browser | hybrid (default hybrid)
-    RIVIU_SCAN_THREADS_WORKERS default 3
-    RIVIU_SCAN_USE_PROXY      1 to use the saved proxy list (data dir), default off
+
+A scan requested through /internal/scan uses the admin's scan options (the schedule's: workers,
+mode, proxy, cookie session), like a timed scan; there are no scan settings in the environment.
 """
 
 from __future__ import annotations
@@ -38,7 +36,6 @@ BACKENDS = ("workbook", "postgres")
 SCANNER_ROLE = "riviu_scanner"
 SCAN_SCOPE = "scan:run"
 MIN_TOKEN_LENGTH = 32
-SCAN_MODES = ("request", "browser", "hybrid")
 
 
 class StoreConfigError(RuntimeError):
@@ -56,11 +53,6 @@ class StoreConfig:
     backend: str = "workbook"
     database_url: str = field(default="", repr=False)
     scan_tokens: tuple = field(default=(), repr=False)
-    tiktok_mode: str = "hybrid"
-    tiktok_workers: int = 10
-    threads_mode: str = "hybrid"
-    threads_workers: int = 3
-    use_proxy: bool = False
 
     @property
     def postgres(self) -> bool:
@@ -118,25 +110,6 @@ def database_user(dsn: str) -> str:
     return unquote(parts.username or "")
 
 
-def _int_setting(env, name: str, default: int, low: int, high: int) -> int:
-    text = str(env.get(name, "")).strip()
-    if not text:
-        return default
-    try:
-        value = int(text)
-    except ValueError:
-        raise StoreConfigError(f"{name} phải là số.") from None
-    if not low <= value <= high:
-        raise StoreConfigError(f"{name} phải trong khoảng {low}-{high}.")
-    return value
-
-
-def _mode_setting(env, name: str, default: str) -> str:
-    value = str(env.get(name, "")).strip().lower() or default
-    if value not in SCAN_MODES:
-        raise StoreConfigError(f"{name} phải là một trong: {', '.join(SCAN_MODES)}.")
-    return value
-
 
 def load_config(env=None) -> StoreConfig:
     env = os.environ if env is None else env
@@ -166,11 +139,6 @@ def load_config(env=None) -> StoreConfig:
         backend="postgres",
         database_url=dsn,
         scan_tokens=tokens,
-        tiktok_mode=_mode_setting(env, "RIVIU_SCAN_TIKTOK_MODE", "hybrid"),
-        tiktok_workers=_int_setting(env, "RIVIU_SCAN_TIKTOK_WORKERS", 10, 1, 50),
-        threads_mode=_mode_setting(env, "RIVIU_SCAN_THREADS_MODE", "hybrid"),
-        threads_workers=_int_setting(env, "RIVIU_SCAN_THREADS_WORKERS", 3, 1, 10),
-        use_proxy=str(env.get("RIVIU_SCAN_USE_PROXY", "")).strip().lower() in server_mode.TRUE_VALUES,
     )
 
 

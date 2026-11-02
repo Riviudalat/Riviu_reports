@@ -113,6 +113,39 @@ describe('public viewer page (/)', () => {
     expect(screen.getAllByTestId('link-row')).toHaveLength(1);
   });
 
+  it('shows partner names in full, up to three, then +N', () => {
+    renderAs(ANON, false);
+    const second = screen.getAllByTestId('link-row')[1];
+    expect([...within(second).getByTestId('partner-chips').children].map(chip => chip.textContent)).toEqual(['Spa', 'Cafe Mây']);
+    act(() => appStore.set(state => ({ rd: { ...state.rd, table: { state: 'ready', platform: 'tiktok', thang: '2026-10', partners: [], rows: [
+      { ...ROWS[0], partners: ['Một', 'Hai', 'Ba', 'Bốn', 'Năm'] },
+    ] } } })));
+    expect([...screen.getByTestId('partner-chips').children].map(chip => chip.textContent)).toEqual(['Một', 'Hai', 'Ba', '+2']);
+  });
+
+  it('shows the per-partner Tổng kết to visitors, with month totals counting each link once', async () => {
+    renderAs(ANON, false);
+    await userEvent.click(screen.getByRole('tab', { name: /Tổng kết/ }));
+    const rows = screen.getAllByTestId('summary-row');
+    // Sorted by views (most first); a partner whose links are all unknown sinks to the bottom.
+    expect(rows.map(item => within(item).getAllByRole('cell')[1].textContent)).toEqual(['Cafe Mây', 'Spa']);
+    expect(rows[0].querySelector('[data-metric="links"]')).toHaveTextContent('2');
+    expect(rows[0].querySelector('[data-metric="views"]')).toHaveTextContent('349');
+    expect(rows[1].querySelector('[data-metric="views"]')).toHaveTextContent(/^$/);
+    expect(screen.getByTestId('summary-total-links')).toHaveTextContent('2');
+    expect(screen.getByTestId('summary-total-views')).toHaveTextContent('349');
+    await userEvent.type(screen.getByLabelText('Tìm đối tác trong tổng kết'), 'spa');
+    expect(screen.getAllByTestId('summary-row')).toHaveLength(1);
+    expect(screen.getByTestId('summary-count')).toHaveTextContent('1 / 2');
+  });
+
+  it('gives the admin the same Tổng kết tab', async () => {
+    renderAs(ADMIN, true);
+    await userEvent.click(screen.getByRole('tab', { name: /Tổng kết/ }));
+    expect(screen.getByTestId('summary-table')).toBeInTheDocument();
+    expect(screen.getAllByTestId('summary-row')).toHaveLength(2);
+  });
+
   it('shows Người đăng, the post type and an exclusive tag for a single partner', () => {
     renderAs(ANON, false);
     expect(screen.getAllByRole('columnheader').map(cell => cell.textContent)).toEqual([

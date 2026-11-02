@@ -37,9 +37,6 @@ pure functions (`partner_link_counts`, `group_rows_by_partner`, `render_export_p
 | `RIVIU_DATABASE_URL_FILE` | File with the DSN `postgresql://riviu_scanner:<pw>@<host>:<port>/riviu_data` (preferred). |
 | `RIVIU_DATABASE_URL` | The DSN itself, if no file. The user **must** be `riviu_scanner`; the store also checks `current_user` at every connect. |
 | `RIVIU_SCAN_TOKEN_FILE` | Bearer tokens for `/internal/scan`, one per line: `<token> [scope,scope]` (default scope `scan:run`, token ≥ 32 chars) or `sha256:<hex of the token> [scopes]`. `#` starts a comment. Only SHA-256 digests are kept in memory. |
-| `RIVIU_SCAN_TIKTOK_MODE` / `_WORKERS` | `request`/`browser`/`hybrid` (default `hybrid`) / 1–50 (default 10) |
-| `RIVIU_SCAN_THREADS_MODE` / `_WORKERS` | default `hybrid` / 1–10 (default 3) |
-| `RIVIU_SCAN_USE_PROXY` | `1` uses the saved proxy list in the data dir (TikTok round-robin; Threads per `docs/threads-scanning.md`). Default off. |
 
 Generate a token with `python -c "import secrets; print(secrets.token_urlsafe(32))"`; give the same
 value to Riviu Data (`RDA_SCAN_SECRET`) and to the timer (`RIVIU_SCAN_TOKEN_FILE` of
@@ -184,7 +181,11 @@ workbook file and sheet:
   busy. A source or cookie change still waits for every lane (`scan_state.source_mutation_blocked`).
   The web app keeps the scan of the platform not shown in `parkedScans` and swaps it in on a switch.
   Workbook storage keeps the single scan (`SCRAPE_TASK`) and runs scheduled platforms one after the other.
-- `POST /internal/scan` keeps its own path (`riviu/internal_scan.py`, options from the environment). Both
+- `POST /internal/scan` keeps its own path (`riviu/internal_scan.py`) but takes the platform's options from the
+  schedule (`scheduler.load_schedule`, which falls back to the saved scan settings): workers, mode, proxy and
+  the cookie session (Threads: the stored session on its fixed route; TikTok: Cookie TikTok), exactly as a timed
+  slot scans. A requested Threads scan therefore never runs anonymously from the server IP when the slots use
+  a session. Both
   paths share the advisory lock and the in-process scan gate, so they never overlap.
 - `deploy/server/compose.v2.yaml` runs this next to V1 (own checkout, data dir `/srv/riviu-v2/data`, env
   and secrets in `/etc/riviu-v2`, port 18111, Docker network `riviu-data` to reach `riviu-data-db:5432`).

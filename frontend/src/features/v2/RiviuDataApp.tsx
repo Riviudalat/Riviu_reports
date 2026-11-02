@@ -1,8 +1,9 @@
 import { useEffect, useRef } from 'react';
-import { WifiOffIcon } from 'lucide-react';
+import { ChartColumnIcon, Rows3Icon, WifiOffIcon } from 'lucide-react';
 import { TooltipProvider } from '@/components/ui/misc';
 import type { Viewer } from '@/lib/auth';
-import { CONNECTION_LOST_TEXT, CONNECTION_RECONNECTING_TEXT, canAdmin, useApp } from '@/state/app';
+import { cn } from '@/lib/utils';
+import { CONNECTION_LOST_TEXT, CONNECTION_RECONNECTING_TEXT, canAdmin, setWorkspaceTab, useApp } from '@/state/app';
 import { startRiviuDataApp } from '@/state/riviuData';
 import { HistoryDialog } from '@/features/HistoryDialog';
 import { CookiesDialog, ProxyDialog } from '@/features/SettingsDialogs';
@@ -11,6 +12,7 @@ import { LinkTablePanel, ReportContext } from './LinkTable';
 import { ExportDialog } from './ExportDialog';
 import { AdminWorkspace, ScanCard } from './ScanPanel';
 import { ScheduleDialog } from './ScheduleDialog';
+import { SummaryPanel } from './SummaryPanel';
 
 function ConnectionBanner() {
   const state = useApp(s => s.connection);
@@ -19,6 +21,43 @@ function ConnectionBanner() {
     <div role="alert" className="flex items-center justify-center gap-2 bg-warning/15 px-4 py-1.5 text-center text-xs font-medium text-warning">
       <WifiOffIcon className="size-3.5 shrink-0" />
       {state === 'lost' ? CONNECTION_LOST_TEXT : CONNECTION_RECONNECTING_TEXT}
+    </div>
+  );
+}
+
+const VIEWER_TABS = [
+  { key: 'sheet', label: 'Danh sách link', icon: <Rows3Icon /> },
+  { key: 'summary', label: 'Tổng kết', icon: <ChartColumnIcon /> },
+] as const;
+
+/** The read-only page: the link list or the per-partner Tổng kết, for staff and visitors alike. */
+function ViewerWorkspace() {
+  const stored = useApp(state => state.workspaceTab);
+  const tab = stored === 'summary' ? 'summary' : 'sheet';
+  return (
+    <div className="flex min-w-0 flex-1 flex-col gap-3">
+      <nav className="-mx-1 flex gap-1 overflow-x-auto px-1 pb-0.5" role="tablist" aria-label="Các vùng dữ liệu">
+        {VIEWER_TABS.map(item => {
+          const selected = item.key === tab;
+          return (
+            <button
+              key={item.key}
+              type="button"
+              role="tab"
+              aria-selected={selected}
+              onClick={() => setWorkspaceTab(item.key)}
+              className={cn(
+                'flex h-9 shrink-0 items-center gap-2 rounded-md px-3 text-sm font-medium transition [&_svg]:size-4',
+                selected ? 'bg-card text-foreground shadow-sm ring-1 ring-border' : 'text-muted-foreground hover:bg-muted hover:text-foreground',
+              )}
+            >
+              {item.icon}
+              {item.label}
+            </button>
+          );
+        })}
+      </nav>
+      {tab === 'summary' ? <SummaryPanel /> : <LinkTablePanel />}
     </div>
   );
 }
@@ -40,7 +79,7 @@ export function RiviuDataLayout({ adminPage }: { adminPage: boolean }) {
               <ScanCard />
               <AdminWorkspace />
             </>
-          ) : <LinkTablePanel />}
+          ) : <ViewerWorkspace />}
         </main>
         <ExportDialog />
         <HistoryDialog />

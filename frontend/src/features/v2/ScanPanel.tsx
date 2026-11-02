@@ -1,6 +1,6 @@
 import { useEffect, useId, useMemo, useState, type ReactNode } from 'react';
 import {
-  CircleStopIcon, CookieIcon, CopyIcon, DownloadIcon, EyeOffIcon, FileWarningIcon, GaugeIcon, Loader2Icon, NetworkIcon, PlayIcon, RadioIcon,
+  ChartColumnIcon, CircleStopIcon, CookieIcon, CopyIcon, DownloadIcon, EyeOffIcon, FileWarningIcon, GaugeIcon, Loader2Icon, NetworkIcon, PlayIcon, RadioIcon,
   Rows3Icon, Settings2Icon, SkipForwardIcon, SlidersHorizontalIcon, TerminalIcon, Trash2Icon, CopyPlusIcon,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -18,6 +18,7 @@ import {
 import { monthsOf, startRdScan } from '@/state/riviuData';
 import { DuplicatesPanel, FailurePanel, LivePanel, LogsPanel } from '@/features/Workspace';
 import { LinkTablePanel } from './LinkTable';
+import { SummaryPanel } from './SummaryPanel';
 
 const COOKIE_STATE_TONE: Record<string, string> = {
   valid: 'bg-success', expired: 'bg-warning', invalid: 'bg-destructive', checkpoint: 'bg-warning', storage_unavailable: 'bg-destructive',
@@ -223,10 +224,11 @@ export function ScanCard() {
 
 // ---- Admin workspace: the link table plus the live scan views ------------------------
 
-type AdminTab = Extract<WorkspaceTab, 'sheet' | 'live' | 'nostats' | 'errors' | 'duplicates' | 'logs'>;
+type AdminTab = Extract<WorkspaceTab, 'sheet' | 'summary' | 'live' | 'nostats' | 'errors' | 'duplicates' | 'logs'>;
 
 const TABS: Array<{ key: AdminTab; label: string; icon: ReactNode; tone?: string }> = [
   { key: 'sheet', label: 'Danh sách link', icon: <Rows3Icon /> },
+  { key: 'summary', label: 'Tổng kết', icon: <ChartColumnIcon /> },
   { key: 'live', label: 'Kết quả quét', icon: <RadioIcon /> },
   { key: 'nostats', label: 'Không số liệu', icon: <EyeOffIcon />, tone: 'text-warning' },
   { key: 'errors', label: 'Lỗi quét', icon: <FileWarningIcon />, tone: 'text-destructive' },
@@ -240,6 +242,7 @@ function useTabCounts(): Record<AdminTab, number | null> {
   const rows = useApp(state => (state.rd.table.state === 'ready' ? state.rd.table.rows.length : null));
   return useMemo(() => ({
     sheet: rows,
+    summary: null,
     live: scan.rows.length ? new Set(scan.rows.map(row => row.key)).size : 0,
     nostats: failedLinksForKind(scan.failed, 'nostats').length,
     errors: failedLinksForKind(scan.failed, 'errors').length,
@@ -311,7 +314,7 @@ export function AdminWorkspace() {
           );
         })}
       </nav>
-      {tab === 'sheet' ? <LinkTablePanel /> : (
+      {tab === 'sheet' ? <LinkTablePanel /> : tab === 'summary' ? <SummaryPanel /> : (
         <section className="flex min-h-[26rem] min-w-0 flex-col overflow-hidden rounded-xl border bg-card shadow-xs md:max-h-[calc(100dvh-12rem)]">
           {tab !== 'live' && (
             <div className="flex flex-wrap items-center justify-end gap-1.5 border-b px-3 py-2"><TabActions tab={tab} /></div>

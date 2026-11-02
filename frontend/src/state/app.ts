@@ -48,7 +48,7 @@ import { createStore, useStoreSelector } from './store';
 
 // ---- Types ----------------------------------------------------------------------------
 
-export type WorkspaceTab = 'sheet' | 'live' | 'success' | 'nostats' | 'errors' | 'duplicates' | 'logs';
+export type WorkspaceTab = 'sheet' | 'summary' | 'live' | 'success' | 'nostats' | 'errors' | 'duplicates' | 'logs';
 
 export interface FileEntry {
   id: string;

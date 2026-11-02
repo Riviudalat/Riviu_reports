@@ -426,3 +426,69 @@ def test_internal_scan_refuses_while_a_scan_runs(internal_api):
     scan_state.lane("tiktok").manager.running = True  # the other platform's lane does not block Threads
     assert _post(client, {"platform": "threads", "trigger": "timer"}).status_code == 200
     assert state["scans"] == ["2026-10"]
+
+
+def _schedule_options(monkeypatch, platform, **options):
+    from riviu import scheduler
+
+    base = {"workers": 10, "scrapeMode": "request", "useProxy": True, "useSession": True, "retryFailed": True}
+    monkeypatch.setattr(scheduler, "load_schedule", lambda: {"platforms": {platform: {"slots": [], "options": {**base, **options}}}})
+
+
+def test_requested_threads_scan_uses_the_schedules_session_route_not_an_anonymous_direct_one(monkeypatch):
+    from riviu import scan_service
+
+    _schedule_options(monkeypatch, "threads", workers=7)
+    route = {"threads_cookies": {"sessionid": "synthetic"}, "threads_proxies": [{"server": "http://proxy.example:8080"}]}
+    seen = {}
+
+    async def usable():
+        return "gen-1"
+
+    async def overrides(options, generation):
+        seen["route_request"] = (options, generation)
+        return route
+
+    async def fake_scraper(label, events, **kwargs):
+        seen["kwargs"] = kwargs
+
+    monkeypatch.setattr(scan_service, "usable_threads_session", usable)
+    monkeypatch.setattr(scan_service, "threads_session_overrides", overrides)
+    monkeypatch.setattr(threads, "run_threads_scraper", fake_scraper)
+    asyncio.run(internal_scan.scan_threads(type("S", (), {"label": "2026-09"})(), Events()))
+    assert seen["route_request"] == ({"proxy_text": "", "scrape_mode": "request", "use_proxy": True}, "gen-1")
+    kwargs = seen["kwargs"]
+    assert (kwargs["worker_count"], kwargs["mode"], kwargs["use_proxy"]) == (7, "request", True)
+    assert kwargs["session_cookies"] == route["threads_cookies"] and kwargs["proxy_configs"] == route["threads_proxies"]
+
+
+def test_requested_threads_scan_fails_instead_of_scanning_anonymously_without_a_usable_session(monkeypatch):
+    from riviu import scan_service
+
+    _schedule_options(monkeypatch, "threads")
+    called = []
+
+    async def unusable():
+        return None
+
+    async def fake_scraper(*args, **kwargs):
+        called.append(kwargs)
+
+    monkeypatch.setattr(scan_service, "usable_threads_session", unusable)
+    monkeypatch.setattr(threads, "run_threads_scraper", fake_scraper)
+    with pytest.raises(RuntimeError, match="Cookie Threads"):
+        asyncio.run(internal_scan.scan_threads(type("S", (), {"label": "2026-09"})(), Events()))
+    assert called == []
+
+
+def test_requested_tiktok_scan_uses_the_schedules_workers_mode_and_proxy(monkeypatch):
+    _schedule_options(monkeypatch, "tiktok", workers=15, scrapeMode="hybrid", useSession=False)
+    seen = {}
+
+    async def fake_scraper(label, events, **kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr(scraper, "run_scraper", fake_scraper)
+    asyncio.run(internal_scan.scan_tiktok(type("S", (), {"label": "2026-10"})(), Events()))
+    assert (seen["worker_count"], seen["use_request"], seen["browser_fallback"], seen["use_proxy"]) == (15, True, True, True)
+    assert "session_cookies" not in seen

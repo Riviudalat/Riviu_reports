@@ -19,7 +19,12 @@ import {
 } from '@/state/app';
 import type { PreviewRow } from '@/lib/links';
 
-const VIEW_META: Record<WorkspaceTab, { title: string; subtitle: string }> = {
+// The workbook workspace has no Tổng kết tab (that one is the Riviu Data pages', features/v2).
+type ClassicTab = Exclude<WorkspaceTab, 'summary'>;
+
+const classicTab = (tab: WorkspaceTab): ClassicTab => (tab === 'summary' ? 'sheet' : tab);
+
+const VIEW_META: Record<ClassicTab, { title: string; subtitle: string }> = {
   sheet: { title: 'Dữ liệu sheet hiện tại', subtitle: 'Xem và chuyển sheet trong cùng một vùng làm việc' },
   live: { title: 'Kết quả đang quét', subtitle: 'Kết quả mới nhất nằm ở đầu danh sách' },
   success: { title: 'Đọc số liệu thành công', subtitle: 'Chỉ hiển thị các link đã đọc được số liệu' },
@@ -52,7 +57,7 @@ function useCounts() {
   }, [scan, active, sheetLinkCount, logCount]);
 }
 
-const TABS: Array<{ key: WorkspaceTab; label: string; icon: React.ReactNode; tone?: string }> = [
+const TABS: Array<{ key: ClassicTab; label: string; icon: React.ReactNode; tone?: string }> = [
   { key: 'sheet', label: 'Dữ liệu sheet', icon: <Rows3Icon /> },
   { key: 'live', label: 'Live', icon: <RadioIcon /> },
   { key: 'success', label: 'Thành công', icon: <CheckCircle2Icon />, tone: 'text-success' },
@@ -63,7 +68,7 @@ const TABS: Array<{ key: WorkspaceTab; label: string; icon: React.ReactNode; ton
 ];
 
 export function WorkspaceTabs() {
-  const tab = useApp(state => state.workspaceTab);
+  const tab = useApp(state => classicTab(state.workspaceTab));
   const counts = useCounts();
   return (
     <nav className="-mx-1 flex gap-1 overflow-x-auto px-1 pb-1" role="tablist" aria-label="Các vùng dữ liệu">
@@ -471,7 +476,7 @@ export function LogsPanel() {
 
 // ---- Panel frame ----------------------------------------------------------------------
 
-function PanelActions({ tab }: { tab: WorkspaceTab }) {
+function PanelActions({ tab }: { tab: ClassicTab }) {
   const admin = useIsAdmin();
   const hasFile = useApp(state => Boolean(activeSource(state).fileId));
   if (tab === 'sheet') {
@@ -520,7 +525,7 @@ function failureNote(state: AppState): string {
 }
 
 export function WorkspacePanel() {
-  const tab = useApp(state => state.workspaceTab);
+  const tab = useApp(state => classicTab(state.workspaceTab));
   const note = useApp(state => (state.workspaceTab === 'duplicates'
     ? (state.scan.duplicateRowCount > 0 ? `(${state.scan.duplicateRowCount} dòng được gộp)` : '')
     : state.workspaceTab === 'nostats' || state.workspaceTab === 'errors' ? failureNote(state) : ''));

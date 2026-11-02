@@ -148,6 +148,51 @@ export function columnTotals(rows: readonly RdRow[], platform: PlatformKey): Rec
   return Object.fromEntries(metricColumns(platform).map(column => [column.key, sumKnown(rows.map(row => row[column.key]))]));
 }
 
+// ---- Tổng kết: totals per partner ---------------------------------------------------------
+
+export interface PartnerSummaryRow {
+  partner: string;
+  /** Links of the month tagged with this partner (a link with two partners counts for both). */
+  links: number;
+  /** Per metric: the sum of the known values, null when none of the partner's links is known. */
+  totals: Record<string, number | null>;
+  /** The newest "dd/mm/yyyy-HH:MM" among the partner's links, or ''. */
+  updatedAt: string;
+}
+
+/** The V1 "Tổng kết" rules over the month's rows: one line per partner (case-insensitive), sorted by name. */
+export function partnerSummary(rows: readonly RdRow[], platform: PlatformKey): PartnerSummaryRow[] {
+  const columns = metricColumns(platform);
+  const groups = new Map<string, { partner: string; rows: RdRow[] }>();
+  for (const row of rows) {
+    const seen = new Set<string>();
+    for (const name of row.partners) {
+      const partner = name.replace(/\s+/g, ' ').trim();
+      const key = partner.toLocaleLowerCase('vi');
+      if (!partner || seen.has(key)) continue;
+      seen.add(key);
+      const group = groups.get(key) ?? { partner, rows: [] };
+      group.rows.push(row);
+      groups.set(key, group);
+    }
+  }
+  return [...groups.values()]
+    .map(({ partner, rows: own }) => {
+      let updated = { stamp: 0, text: '' };
+      for (const row of own) {
+        const stamp = updateStamp(row.updatedAt);
+        if (stamp > updated.stamp) updated = { stamp, text: row.updatedAt };
+      }
+      return {
+        partner,
+        links: own.length,
+        totals: Object.fromEntries(columns.map(column => [column.key, sumKnown(own.map(row => row[column.key]))])),
+        updatedAt: updated.text,
+      };
+    })
+    .sort((a, b) => a.partner.localeCompare(b.partner, 'vi'));
+}
+
 export type ScanStatusTone = 'success' | 'warning' | 'error' | 'muted';
 
 /** TRẠNG THÁI QUÉT: a short label, its tone and the full status for the tooltip. */

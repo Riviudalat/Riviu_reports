@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { columnTotals, filterRows, lastUpdateText, metricColumns, scanStatusView, shortLink, type RdRow } from './riviuData';
+import { columnTotals, filterRows, lastUpdateText, metricColumns, partnerSummary, scanStatusView, shortLink, type RdRow } from './riviuData';
 import { addSlot, formatScheduleTime, normalizeOverview, runCountsText } from './schedule';
 import { isAdminPage, parseVersion } from './version';
 
@@ -26,6 +26,25 @@ describe('totals keep unknown apart from zero', () => {
     expect(metricColumns('threads').map(column => column.key)).toEqual(['views', 'likes', 'comments', 'reposts', 'shares']);
     expect(metricColumns('tiktok').map(column => column.key)).toEqual(['views', 'likes', 'comments', 'saves', 'shares']);
     expect(columnTotals([row({ reposts: 3 }), row({ reposts: 4 })], 'threads').reposts).toBe(7);
+  });
+});
+
+describe('partner summary (Tổng kết)', () => {
+  it('counts a link for each of its partners, merges partner case, keeps unknown apart from zero', () => {
+    const summary = partnerSummary([
+      row({ id: 1, partners: ['Cafe Mây'], views: 100, likes: 0, updatedAt: '28/10/2026-12:30' }),
+      row({ id: 2, partners: ['cafe mây', 'Spa'], views: 50, likes: null, updatedAt: '29/10/2026-08:15' }),
+      row({ id: 3, partners: ['Spa'], views: null, likes: null }),
+      row({ id: 4, partners: [] , views: 999 }),
+    ], 'tiktok');
+    expect(summary.map(item => [item.partner, item.links, item.totals.views, item.totals.likes, item.totals.comments, item.updatedAt])).toEqual([
+      ['Cafe Mây', 2, 150, 0, null, '29/10/2026-08:15'],
+      ['Spa', 2, 50, null, null, '29/10/2026-08:15'],
+    ]);
+  });
+
+  it('sums REPOST on Threads', () => {
+    expect(partnerSummary([row({ partners: ['A'], reposts: 2 }), row({ partners: ['A'], reposts: 5 })], 'threads')[0].totals.reposts).toBe(7);
   });
 });
 

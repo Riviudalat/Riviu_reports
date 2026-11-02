@@ -98,12 +98,17 @@ const tag = 'inline-flex shrink-0 items-center rounded px-1.5 py-px text-[11px] 
 const th = 'sticky top-0 z-10 truncate border-b bg-card px-2.5 py-2.5 text-left text-xs font-medium text-muted-foreground';
 const td = 'border-b border-border/60 px-2.5 py-2 align-middle';
 
+// Names shown in the cell; more than this collapse into "+N" (the tooltip lists every one).
+const PARTNER_CHIPS = 3;
+
 function Partners({ names }: { names: string[] }) {
   if (!names.length) return null;
+  const shown = names.slice(0, PARTNER_CHIPS);
   const chips = (
-    <span className="flex min-w-0 gap-1" tabIndex={0} aria-label={`Đối tác: ${names.join(', ')}`}>
-      <span className="min-w-0 truncate whitespace-nowrap rounded-md bg-muted px-1.5 py-0.5 text-xs text-foreground/80">{names[0]}</span>
-      {names.length > 1 && <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-xs font-medium text-muted-foreground">+{names.length - 1}</span>}
+    // Full names, wrapping onto a second line rather than being cut off.
+    <span className="flex min-w-0 flex-wrap gap-1" tabIndex={0} aria-label={`Đối tác: ${names.join(', ')}`} data-testid="partner-chips">
+      {shown.map(name => <span key={name} className="max-w-full break-words rounded-md bg-muted px-1.5 py-0.5 text-xs leading-4 text-foreground/80">{name}</span>)}
+      {names.length > shown.length && <span className="shrink-0 rounded-md bg-muted px-1.5 py-0.5 text-xs font-medium leading-4 text-muted-foreground">+{names.length - shown.length}</span>}
     </span>
   );
   return (
@@ -265,8 +270,8 @@ export function LinkTablePanel({ className }: { className?: string }) {
             <colgroup>
               <col className="w-[100px]" />
               {showNguoiAir && <col className="w-[96px]" />}
-              <col className="w-[14%]" />
-              <col className="w-[21%]" />
+              <col className="w-[12%]" />
+              <col className="w-[17%]" />
               {columns.map(column => <col key={column.key} className={column.key === 'views' ? 'w-[84px]' : 'w-[74px]'} />)}
               <col />
               <col className="w-[104px]" />

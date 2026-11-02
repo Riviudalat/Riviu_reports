@@ -77,26 +77,50 @@ def make_store(platform):
     return postgres.PostgresStore(platform, store_config.ACTIVE.database_url)
 
 
+async def scan_options(platform):
+    """The platform's scan options as the schedule keeps them (falling back to the saved scan
+    settings): a scan Riviu Data requests uses the same workers, mode, proxy and cookie session as
+    a timed slot, so it never runs anonymously from the server IP when the slots use a session."""
+    from riviu import scheduler
+
+    return (await asyncio.to_thread(scheduler.load_schedule))["platforms"][platform]["options"]
+
+
 async def scan_tiktok(session, events):
     from riviu.platforms.tiktok import run_scraper
 
-    config = store_config.ACTIVE
+    options = await scan_options("tiktok")
+    mode = options["scrapeMode"]
+    extra = {}
+    if options["useSession"]:
+        # Same as a timed slot with Cookie TikTok on: a missing or unreadable cookie fails the scan.
+        extra["session_cookies"] = await context.complete_blocking(context.tiktok_session_manager().snapshot)
     await run_scraper(
-        session.label, events, worker_count=config.tiktok_workers, base_dir=context.EXCEL_DIR,
+        session.label, events, worker_count=options["workers"], base_dir=context.EXCEL_DIR,
         file_label=f"Riviu Data {session.label}", sheet_name=session.label,
-        use_request=config.tiktok_mode != "browser", browser_fallback=config.tiktok_mode == "hybrid",
-        use_proxy=config.use_proxy, proxy_text="", store_session=session,
+        use_request=mode != "browser", browser_fallback=mode == "hybrid",
+        use_proxy=options["useProxy"], proxy_text="", store_session=session, **extra,
     )
 
 
 async def scan_threads(session, events):
+    from riviu import scan_service
     from riviu.platforms.threads import run_threads_scraper
 
-    config = store_config.ACTIVE
+    options = await scan_options("threads")
+    extra = {}
+    if options["useSession"]:
+        generation = await scan_service.usable_threads_session()
+        if generation is None:
+            raise RuntimeError(scan_service.cookie_problem_message("threads", ""))
+        route = await scan_service.threads_session_overrides(
+            {"proxy_text": "", "scrape_mode": options["scrapeMode"], "use_proxy": options["useProxy"]}, generation,
+        )
+        extra = {"session_cookies": route["threads_cookies"], "proxy_configs": route["threads_proxies"]}
     await run_threads_scraper(
-        session.label, events, worker_count=config.threads_workers, sheet_name=session.label,
-        mode=config.threads_mode, base_dir=context.EXCEL_DIR, use_proxy=config.use_proxy, proxy_text="",
-        store_session=session,
+        session.label, events, worker_count=options["workers"], sheet_name=session.label,
+        mode=options["scrapeMode"], base_dir=context.EXCEL_DIR, use_proxy=options["useProxy"], proxy_text="",
+        store_session=session, **extra,
     )
 
 

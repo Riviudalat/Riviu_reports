@@ -400,10 +400,12 @@ def test_a_real_threads_scan_through_the_endpoint_writes_rows_and_records_the_ru
     monkeypatch.setattr(threads, "fetch_threads_http", lambda _url: {
         "channel": "miri_viu", "metrics": {"views": 372, "likes": 0, "comments": None, "reposts": 1, "shares": 2}, "error": "",
     })
-    monkeypatch.setattr(store_config, "ACTIVE", store_config.StoreConfig(
-        backend="postgres", database_url=db["scanner"], threads_mode="request",
-        scan_tokens=store_config.ACTIVE.scan_tokens,
-    ))
+    from riviu import scheduler
+
+    # A requested scan uses the schedule's options: plain HTTP, no proxy, no cookie session.
+    monkeypatch.setattr(scheduler, "load_schedule", lambda: {"platforms": {"threads": {"slots": [], "options": {
+        "workers": 3, "scrapeMode": "request", "useProxy": False, "useSession": False, "retryFailed": True,
+    }}}})
     response = _post(api, {"platform": "threads", "thang": "2026-10", "trigger": "timer"})
     assert response.status_code == 200, response.text
     summary = response.json()
