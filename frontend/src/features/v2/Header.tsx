@@ -117,9 +117,7 @@ function ViewerActions() {
   const admin = useApp(state => canAdmin(state));
   return (
     <>
-      <Button variant="ghost" size="sm" onClick={() => openModal('history')} aria-label="Lịch sử quét" title="Lịch sử quét">
-        <HistoryIcon /><span className="hidden sm:inline">Lịch sử quét</span>
-      </Button>
+      {/* Lịch sử quét is for admins only (owner's call, 2026-11); staff see the update time on the page. */}
       <ThemeToggle />
       {viewer.serverMode && admin && (
         <Button variant="outline" size="sm" asChild>

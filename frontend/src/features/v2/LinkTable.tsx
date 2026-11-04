@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { CopyIcon, DownloadIcon, RefreshCwIcon, SearchIcon, XIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -10,7 +10,9 @@ import {
   columnTotals, filterRows, lastUpdateText, linkKind, metricColumns, scanStatusView, shortLink, shortUpdate, type LinkKind, type RdRow, type ScanStatusTone,
 } from '@/lib/riviuData';
 import { scanIsBusy, viewerScanText } from '@/lib/scan';
+import { DESKTOP_QUERY, useMediaQuery } from '@/lib/useMedia';
 import { cn } from '@/lib/utils';
+import { MetricGrid } from './MetricGrid';
 import { notify, openModal, platformScanBusy, useApp } from '@/state/app';
 import { monthsOf, refreshView, selectThang } from '@/state/riviuData';
 
@@ -144,8 +146,8 @@ function LinkCell({ url, resolved, exclusive }: { url: string; resolved?: string
   const shown = !linkKind(url) && resolved && linkKind(resolved) ? resolved : url;
   const { head, tail } = shortLink(shown);
   const kind = linkKind(shown);
-  // Shown on hover or keyboard focus only, so it never squeezes the link text.
-  const icon = 'hidden shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:inline-flex group-hover:inline-flex group-focus-within:inline-flex';
+  // Shown on hover or keyboard focus only, so it never squeezes the link text; always on touch screens.
+  const icon = 'hidden shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:inline-flex group-hover:inline-flex group-focus-within:inline-flex pointer-coarse:inline-flex';
   return (
     // A container: the cell decides from its own width whether the link head fits.
     <span className="@container/link group flex min-w-0 items-center gap-1.5">
@@ -186,8 +188,16 @@ function LinkCell({ url, resolved, exclusive }: { url: string; resolved?: string
   );
 }
 
-function Row({ row, platform, showNguoiAir, showUpdated }: { row: RdRow; platform: PlatformKey; showNguoiAir: boolean; showUpdated: boolean }) {
+function StatusPill({ row }: { row: RdRow }) {
   const status = scanStatusView(row);
+  return (
+    <span className={cn('inline-flex max-w-full shrink-0 truncate whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-semibold', STATUS_TONE[status.tone])} title={status.title}>
+      {status.label}
+    </span>
+  );
+}
+
+function Row({ row, platform, showNguoiAir, showUpdated }: { row: RdRow; platform: PlatformKey; showNguoiAir: boolean; showUpdated: boolean }) {
   return (
     <tr className="hover:bg-muted/40" data-testid="link-row">
       <td className={cn(td, 'whitespace-nowrap pl-4 tabular-nums text-muted-foreground')}>{row.ngayAir}</td>
@@ -198,9 +208,7 @@ function Row({ row, platform, showNguoiAir, showUpdated }: { row: RdRow; platfor
         <td key={column.key} className={cn(td, 'text-right font-medium tabular-nums')} data-metric={column.key}>{formatResultNumber(row[column.key])}</td>
       ))}
       <td className={td}><Partners names={row.partners} /></td>
-      <td className={td}>
-        <span className={cn('inline-flex max-w-full truncate whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-semibold', STATUS_TONE[status.tone])} title={status.title}>{status.label}</span>
-      </td>
+      <td className={td}><StatusPill row={row} /></td>
       {showUpdated && <td className={cn(td, 'whitespace-nowrap pr-4 text-xs tabular-nums text-muted-foreground')} title={row.updatedAt}>{shortUpdate(row.updatedAt)}</td>}
     </tr>
   );
@@ -212,16 +220,49 @@ const ROW_RENDER_LIMIT = 3000;
 // to Đối tác (the page header already says when the numbers were last updated).
 const WIDE_QUERY = '(min-width: 1280px)';
 
-function useWide() {
-  const [wide, setWide] = useState(() => (typeof window.matchMedia === 'function' ? window.matchMedia(WIDE_QUERY).matches : true));
-  useEffect(() => {
-    if (typeof window.matchMedia !== 'function') return;
-    const media = window.matchMedia(WIDE_QUERY);
-    const listener = () => setWide(media.matches);
-    media.addEventListener?.('change', listener);
-    return () => media.removeEventListener?.('change', listener);
-  }, []);
-  return wide;
+// Phones get cards a page at a time ("Xem thêm"), so a month of links never builds thousands at once.
+const CARD_STEP = 100;
+
+function LinkCard({ row, platform }: { row: RdRow; platform: PlatformKey }) {
+  return (
+    <li className="px-4 py-3" data-testid="link-card">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="truncate font-semibold">{row.channel || '—'}</p>
+          <p className="text-xs tabular-nums text-muted-foreground">{[row.ngayAir, row.nguoiAir].filter(Boolean).join(' · ')}</p>
+        </div>
+        <StatusPill row={row} />
+      </div>
+      <div className="mt-1.5"><LinkCell url={row.link} resolved={row.resolvedLink} exclusive={row.partners.length === 1} /></div>
+      <MetricGrid values={row} platform={platform} className="mt-2.5 rounded-lg bg-muted/50 px-1 py-1.5" />
+      {row.partners.length > 0 && <div className="mt-2"><Partners names={row.partners} /></div>}
+    </li>
+  );
+}
+
+function LinkCards({ rows, platform, totals, filtered, emptyText }: {
+  rows: RdRow[]; platform: PlatformKey; totals: Record<string, number | null>; filtered: boolean; emptyText: string;
+}) {
+  const [limit, setLimit] = useState(CARD_STEP);
+  if (!rows.length) return <p className="px-4 py-14 text-center text-sm text-muted-foreground">{emptyText}</p>;
+  const more = Math.min(CARD_STEP, rows.length - limit);
+  return (
+    <>
+      <ul className="divide-y divide-border/60" data-testid="link-cards">
+        {rows.slice(0, limit).map(row => <LinkCard key={row.id} row={row} platform={platform} />)}
+      </ul>
+      {more > 0 && (
+        <div className="border-t px-4 py-3 text-center">
+          <Button variant="outline" size="sm" onClick={() => setLimit(value => value + CARD_STEP)} data-testid="show-more">Xem thêm {formatNumber(more)} link</Button>
+          <p className="mt-1.5 text-xs text-muted-foreground">Đang hiện {formatNumber(limit)} / {formatNumber(rows.length)} link</p>
+        </div>
+      )}
+      <div className="sticky bottom-0 border-t bg-muted px-3 py-2" data-testid="totals-row">
+        <p className="px-1 text-xs font-semibold">Tổng{filtered ? ' (đang lọc)' : ''} · {formatNumber(rows.length)} link</p>
+        <MetricGrid values={totals} platform={platform} className="mt-1" testPrefix="total-" />
+      </div>
+    </>
+  );
 }
 
 export function LinkTablePanel({ className }: { className?: string }) {
@@ -244,7 +285,8 @@ export function LinkTablePanel({ className }: { className?: string }) {
   const rows = useMemo(() => filterRows(allRows, { search, partner }), [allRows, search, partner]);
   const totals = useMemo(() => columnTotals(rows, platform), [rows, platform]);
   // Người air shows once Riviu Data stores it (migration 0013), so an empty column never takes space.
-  const wide = useWide();
+  const desktop = useMediaQuery(DESKTOP_QUERY);
+  const wide = useMediaQuery(WIDE_QUERY);
   const hasNguoiAir = useMemo(() => allRows.some(row => row.nguoiAir), [allRows]);
   const showNguoiAir = wide && hasNguoiAir;
   const showUpdated = wide;
@@ -291,13 +333,24 @@ export function LinkTablePanel({ className }: { className?: string }) {
           </Button>
         </div>
       </div>
-      <div className="min-h-0 flex-1 border-t max-lg:overflow-x-auto" data-testid="link-table-scroll">
+      <div className="min-h-0 flex-1 border-t" data-testid="link-table-scroll">
         {table.state === 'loading' && <div className="space-y-2 p-4">{Array.from({ length: 8 }, (_, i) => <Skeleton key={i} className="h-8 w-full" />)}</div>}
         {table.state === 'error' && <p className="px-4 py-16 text-center text-sm text-destructive" role="alert">{table.text}</p>}
         {table.state === 'empty' && <p className="px-4 py-16 text-center text-sm text-muted-foreground">Chưa có tháng nào có link {platformConfig(platform).label}.</p>}
-        {table.state === 'ready' && (
+        {table.state === 'ready' && !desktop && (
+          <LinkCards
+            // A new filter starts again from the first page of cards.
+            key={`${platform}:${search}:${partner}`}
+            rows={rows}
+            platform={platform}
+            totals={totals}
+            filtered={filtered}
+            emptyText={total ? 'Không có link nào khớp với bộ lọc.' : `Tháng này chưa có link ${platformConfig(platform).label}.`}
+          />
+        )}
+        {table.state === 'ready' && desktop && (
           // Fixed layout: every column fits the page width; the page itself scrolls (no inner scroll box).
-          <table className="w-full table-fixed max-lg:min-w-[1000px] border-separate border-spacing-0 text-[13px]" data-testid="link-table">
+          <table className="w-full table-fixed border-separate border-spacing-0 text-[13px]" data-testid="link-table">
             <colgroup>
               <col className="w-[92px]" />
               {showNguoiAir && <col className="w-[88px]" />}
@@ -343,7 +396,7 @@ export function LinkTablePanel({ className }: { className?: string }) {
           </table>
         )}
       </div>
-      {rows.length > ROW_RENDER_LIMIT && (
+      {desktop && rows.length > ROW_RENDER_LIMIT && (
         <p className="border-t px-4 py-2 text-xs text-muted-foreground">Đang hiện {formatNumber(ROW_RENDER_LIMIT)} link đầu; dùng tìm kiếm hoặc lọc đối tác để thu hẹp. Tổng vẫn tính trên mọi link khớp.</p>
       )}
     </section>

@@ -123,18 +123,47 @@ describe('public viewer page (/)', () => {
     expect([...screen.getByTestId('partner-chips').children].map(chip => chip.textContent)).toEqual(['Một', 'Hai', 'Ba', '+2']);
   });
 
-  it('gives Người đăng and Cập nhật room to Đối tác below 1280px', () => {
+  /** Renders with only the min-width queries up to `width` matching. */
+  function atWidth(width: number, run: () => void) {
     const real = window.matchMedia;
-    window.matchMedia = ((query: string) => ({ ...real(query), matches: false })) as typeof window.matchMedia;
+    window.matchMedia = ((query: string) => {
+      const min = /min-width:\s*(\d+)px/.exec(query);
+      return { ...real(query), matches: min ? Number(min[1]) <= width : false };
+    }) as typeof window.matchMedia;
     try {
+      run();
+    } finally {
+      window.matchMedia = real;
+    }
+  }
+
+  it('gives Người đăng and Cập nhật room to Đối tác below 1280px', () => {
+    atWidth(1100, () => {
       renderAs(ANON, false);
       const headers = screen.getAllByRole('columnheader').map(cell => cell.textContent);
       expect(headers).toContain('Đối tác');
       expect(headers).not.toContain('Người đăng');
       expect(headers).not.toContain('Cập nhật');
-    } finally {
-      window.matchMedia = real;
-    }
+    });
+  });
+
+  it('shows phones cards instead of tables, with the month totals', () => {
+    atWidth(390, () => {
+      renderAs(ANON, false);
+      expect(screen.queryByTestId('link-table')).not.toBeInTheDocument();
+      const cards = screen.getAllByTestId('link-card');
+      expect(cards).toHaveLength(2);
+      expect(within(cards[0]).getByText('kenh6')).toBeInTheDocument();
+      expect(cards[0].querySelector('[data-metric="views"]')).toHaveTextContent('349');
+      // Unknown stays blank (a dash), never 0.
+      expect(cards[1].querySelector('[data-metric="views"]')).toHaveTextContent('–');
+      expect(screen.getByTestId('total-views')).toHaveTextContent('349');
+    });
+  });
+
+  it('has no Lịch sử quét button for staff', () => {
+    renderAs(ANON, false);
+    expect(screen.queryByRole('button', { name: 'Lịch sử quét' })).not.toBeInTheDocument();
   });
 
   it('labels links by kind and post id, and a short link by the post it led to', () => {

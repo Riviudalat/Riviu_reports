@@ -1,11 +1,13 @@
 import { Fragment, useMemo, useState } from 'react';
 import { ArrowDownIcon, ArrowUpIcon, SearchIcon, XIcon } from 'lucide-react';
-import { Input, Skeleton } from '@/components/ui/misc';
+import { Input, NativeSelect, Skeleton } from '@/components/ui/misc';
 import { formatNumber, formatResultNumber, normalizeVietnameseKey } from '@/lib/format';
 import { platformConfig } from '@/lib/platforms';
 import { columnTotals, metricColumns, partnerSummary, shortUpdate, type PartnerSummaryRow } from '@/lib/riviuData';
+import { DESKTOP_QUERY, useMediaQuery } from '@/lib/useMedia';
 import { cn } from '@/lib/utils';
 import { useApp } from '@/state/app';
+import { MetricGrid } from './MetricGrid';
 
 type SortKey = 'partner' | 'links' | string;
 
@@ -26,6 +28,7 @@ export function SummaryPanel({ className }: { className?: string }) {
   const [search, setSearch] = useState('');
   const [sort, setSort] = useState<{ key: SortKey; desc: boolean }>({ key: 'views', desc: true });
   const columns = metricColumns(platform);
+  const desktop = useMediaQuery(DESKTOP_QUERY);
   const rows = useMemo(() => (table.state === 'ready' ? table.rows : []), [table]);
   const summary = useMemo(() => partnerSummary(rows, platform), [rows, platform]);
   const shown = useMemo(() => {
@@ -67,6 +70,23 @@ export function SummaryPanel({ className }: { className?: string }) {
             {table.state === 'ready' ? (search.trim() ? `${formatNumber(shown.length)} / ${formatNumber(summary.length)}` : formatNumber(summary.length)) : ''}
           </span>
         </h2>
+        {!desktop && (
+          // Phones have no column headers to tap, so the sort is a select.
+          <NativeSelect
+            className="w-full"
+            value={`${sort.key}:${sort.desc ? 'desc' : 'asc'}`}
+            onChange={event => {
+              const [key, direction] = event.target.value.split(':');
+              setSort({ key, desc: direction === 'desc' });
+            }}
+            aria-label="Sắp xếp tổng kết"
+            data-testid="summary-sort"
+          >
+            {columns.map(column => <option key={column.key} value={`${column.key}:desc`}>{column.label} nhiều nhất</option>)}
+            <option value="links:desc">Số link nhiều nhất</option>
+            <option value="partner:asc">Tên đối tác A → Z</option>
+          </NativeSelect>
+        )}
         <div className="relative w-full min-w-0 sm:w-64">
           <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
           <Input type="search" className="pl-8 pr-8" placeholder="Tìm đối tác…" value={search} onChange={event => setSearch(event.target.value)} aria-label="Tìm đối tác trong tổng kết" />
@@ -77,12 +97,38 @@ export function SummaryPanel({ className }: { className?: string }) {
           )}
         </div>
       </div>
-      <div className="min-h-0 flex-1 border-t max-lg:overflow-x-auto">
+      <div className="min-h-0 flex-1 border-t">
         {table.state === 'loading' && <div className="space-y-2 p-4">{Array.from({ length: 8 }, (_, i) => <Skeleton key={i} className="h-8 w-full" />)}</div>}
         {table.state === 'error' && <p className="px-4 py-16 text-center text-sm text-destructive" role="alert">{table.text}</p>}
         {table.state === 'empty' && <p className="px-4 py-16 text-center text-sm text-muted-foreground">Chưa có tháng nào có link {platformConfig(platform).label}.</p>}
-        {table.state === 'ready' && (
-          <table className="w-full table-fixed max-lg:min-w-[860px] border-separate border-spacing-0 text-[13px]" data-testid="summary-table">
+        {table.state === 'ready' && !desktop && (
+          shown.length === 0 ? (
+            <p className="px-4 py-14 text-center text-sm text-muted-foreground">{summary.length ? 'Không có đối tác nào khớp.' : 'Tháng này chưa có link nào gắn đối tác.'}</p>
+          ) : (
+            <>
+              <ol className="divide-y divide-border/60" data-testid="summary-cards">
+                {shown.map((row, index) => (
+                  <li key={row.partner} className="px-4 py-3" data-testid="summary-card">
+                    <div className="flex items-baseline gap-2">
+                      <span className="w-6 shrink-0 text-xs tabular-nums text-muted-foreground">{index + 1}</span>
+                      <p className="min-w-0 flex-1 break-words font-semibold">{row.partner}</p>
+                      <span className="shrink-0 text-xs tabular-nums text-muted-foreground">{formatNumber(row.links)} link</span>
+                    </div>
+                    <MetricGrid values={row.totals} platform={platform} className="mt-2 rounded-lg bg-muted/50 px-1 py-1.5" />
+                  </li>
+                ))}
+              </ol>
+              {rows.length > 0 && (
+                <div className="sticky bottom-0 border-t bg-muted px-3 py-2" data-testid="summary-totals">
+                  <p className="px-1 text-xs font-semibold">Tổng cả tháng · {formatNumber(rows.length)} link <span className="font-normal text-muted-foreground">(mỗi link tính một lần)</span></p>
+                  <MetricGrid values={monthTotals} platform={platform} className="mt-1" testPrefix="summary-total-" />
+                </div>
+              )}
+            </>
+          )
+        )}
+        {table.state === 'ready' && desktop && (
+          <table className="w-full table-fixed border-separate border-spacing-0 text-[13px]" data-testid="summary-table">
             <colgroup>
               <col className="w-[52px]" />
               <col />
