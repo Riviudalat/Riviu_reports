@@ -177,7 +177,7 @@ function LinkCell({ url, resolved, exclusive }: { url: string; resolved?: string
         }}
       >
         {/* Narrow cells show only the post id, rather than a stub like "t…". */}
-        <span className={cn('min-w-0 truncate', tail && 'hidden @[17rem]/link:inline')}>{head}</span>
+        <span className={cn('min-w-0 truncate', tail && 'hidden @[24rem]/link:inline')}>{head}</span>
         {tail && <span className="shrink-0 tabular-nums">{tail}</span>}
       </a>
       <button type="button" className={icon} onClick={() => copyLink(url)} title="Sao chép link" aria-label="Sao chép link" data-testid="copy-link">
