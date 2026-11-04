@@ -245,21 +245,20 @@ export function linkKind(url: string): LinkKind {
 }
 
 /**
- * The text shown for a post link: the post id when the URL names one (its last digits "…0015838",
- * "D000000000x"), otherwise host + path ("vt.tiktok.com/ZSxQ4KHvk"). The channel has its own
- * column, so the handle is only returned for the tooltip.
+ * A post link as shown in the table, without "https://", "www." or the query:
+ * "tiktok.com/@kenh/photo/" + "7400000000000015838". The table lets `head` shrink with an
+ * ellipsis and always shows `tail`, the post id (empty for links without one, such as vt./vm.).
  */
-export function shortLink(url: string): { handle: string; label: string } {
-  const cut = (text: string, max = 30) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
+export function shortLink(url: string): { head: string; tail: string } {
   try {
     const parsed = new URL(url);
-    const parts = parsed.pathname.split('/').filter(Boolean);
+    const host = parsed.hostname.replace(/^www\./, '');
+    const parts = parsed.pathname.split('/').filter(Boolean).map(part => decodeURIComponent(part));
     const handleIndex = parts.findIndex(part => part.startsWith('@'));
     const id = handleIndex >= 0 && LINK_KINDS[parts[handleIndex + 1]] ? parts[handleIndex + 2] || '' : '';
-    const handle = handleIndex >= 0 ? decodeURIComponent(parts[handleIndex]) : '';
-    if (id) return { handle, label: id.length > 12 ? `…${id.slice(-7)}` : id };
-    return { handle, label: cut(parsed.hostname.replace(/^www\./, '') + parsed.pathname.replace(/\/$/, '')) };
+    if (id) return { head: `${host}/${parts.slice(0, handleIndex + 2).join('/')}/`, tail: id };
+    return { head: [host, ...parts].join('/'), tail: '' };
   } catch {
-    return { handle: '', label: cut(url) };
+    return { head: url, tail: '' };
   }
 }

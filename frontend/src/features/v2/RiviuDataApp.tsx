@@ -72,7 +72,7 @@ export function RiviuDataLayout({ adminPage }: { adminPage: boolean }) {
       <div className="flex min-h-full flex-col" data-page={showAdmin ? 'admin' : 'viewer'}>
         <Header adminPage={showAdmin} scheduleAvailable={showAdmin && serverMode} />
         <ConnectionBanner />
-        <main className="mx-auto flex w-full min-w-0 max-w-[1440px] flex-1 flex-col gap-3 px-4 pb-8 sm:px-6">
+        <main className="flex w-full min-w-0 flex-1 flex-col gap-3 px-4 pb-8 sm:px-6">
           <ReportContext />
           {showAdmin ? (
             <>

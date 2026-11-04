@@ -125,13 +125,13 @@ describe('public viewer page (/)', () => {
 
   it('labels links by kind and post id, and a short link by the post it led to', () => {
     renderAs(ANON, false);
-    expect(screen.getAllByTestId('post-link').map(link => link.textContent)).toEqual(['…0015838', '…0071271']);
+    expect(screen.getAllByTestId('post-link').map(link => link.textContent)).toEqual(['tiktok.com/@kenh6/video/7400000000000015838', 'tiktok.com/@kenh27/photo/7400000000000071271']);
     act(() => appStore.set(state => ({ rd: { ...state.rd, table: { state: 'ready', platform: 'tiktok', thang: '2026-10', partners: [], rows: [
       { ...ROWS[0], link: 'https://vt.tiktok.com/ZSxQ4KHvk/', resolvedLink: 'https://www.tiktok.com/@kenh6/photo/7644157834795519253' },
       { ...ROWS[1], id: 3, link: 'https://vm.tiktok.com/ZP8GTPPoA/' },
     ] } } })));
     const [resolved, unresolved] = screen.getAllByTestId('link-row');
-    expect(within(resolved).getByTestId('post-link')).toHaveTextContent('…5519253');
+    expect(within(resolved).getByTestId('post-link')).toHaveTextContent('tiktok.com/@kenh6/photo/7644157834795519253');
     expect(within(resolved).getByTestId('post-link')).toHaveAttribute('href', 'https://vt.tiktok.com/ZSxQ4KHvk/');
     expect(within(resolved).getByText('Ảnh')).toBeInTheDocument();
     expect(within(unresolved).getByTestId('post-link')).toHaveTextContent('vm.tiktok.com/ZP8GTPPoA');

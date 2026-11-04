@@ -9,7 +9,7 @@ import { useApp } from '@/state/app';
 
 type SortKey = 'partner' | 'links' | string;
 
-const th = 'sticky top-0 z-10 border-b bg-card px-2.5 py-2.5 text-xs font-medium text-muted-foreground';
+const th = 'sticky top-[var(--app-header-h,0px)] z-10 border-b bg-card px-2.5 py-2.5 text-xs font-medium text-muted-foreground';
 const td = 'border-b border-border/60 px-2.5 py-2 align-middle';
 const foot = 'sticky bottom-0 border-t bg-muted px-2.5 py-2.5';
 
@@ -59,7 +59,7 @@ export function SummaryPanel({ className }: { className?: string }) {
   };
 
   return (
-    <section className={cn('flex min-h-[24rem] min-w-0 flex-col overflow-hidden rounded-xl border bg-card shadow-xs', className)} aria-labelledby="summary-title" data-testid="summary-panel">
+    <section className={cn('flex min-h-[24rem] min-w-0 flex-col overflow-clip rounded-xl border bg-card shadow-xs', className)} aria-labelledby="summary-title" data-testid="summary-panel">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2.5 px-4 py-3">
         <h2 id="summary-title" className="mr-auto whitespace-nowrap text-[15px] font-semibold">
           Tổng kết theo đối tác{' '}
@@ -77,12 +77,12 @@ export function SummaryPanel({ className }: { className?: string }) {
           )}
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto border-t md:max-h-[calc(100dvh-12rem)]">
+      <div className="min-h-0 flex-1 border-t max-lg:overflow-x-auto">
         {table.state === 'loading' && <div className="space-y-2 p-4">{Array.from({ length: 8 }, (_, i) => <Skeleton key={i} className="h-8 w-full" />)}</div>}
         {table.state === 'error' && <p className="px-4 py-16 text-center text-sm text-destructive" role="alert">{table.text}</p>}
         {table.state === 'empty' && <p className="px-4 py-16 text-center text-sm text-muted-foreground">Chưa có tháng nào có link {platformConfig(platform).label}.</p>}
         {table.state === 'ready' && (
-          <table className="w-full min-w-[860px] table-fixed border-separate border-spacing-0 text-[13px]" data-testid="summary-table">
+          <table className="w-full table-fixed max-lg:min-w-[860px] border-separate border-spacing-0 text-[13px]" data-testid="summary-table">
             <colgroup>
               <col className="w-[52px]" />
               <col />

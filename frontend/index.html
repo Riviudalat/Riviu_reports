@@ -9,8 +9,8 @@
     <script>
       // Apply the saved theme before first paint to avoid a light flash in dark mode.
       try {
-        var t = localStorage.getItem('riviuTheme');
-        var dark = t === 'dark' || ((!t || t === 'system') && window.matchMedia('(prefers-color-scheme: dark)').matches);
+        var t = localStorage.getItem('riviuTheme.v2');
+        var dark = t === 'dark' || (t === 'system' && window.matchMedia('(prefers-color-scheme: dark)').matches);
         if (dark) document.documentElement.classList.add('dark');
       } catch (e) {}
     </script>

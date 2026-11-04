@@ -95,7 +95,7 @@ const KIND_TAGS: Record<Exclude<LinkKind, ''>, { label: string; className: strin
 };
 
 const tag = 'inline-flex shrink-0 items-center rounded px-1.5 py-px text-[11px] font-semibold leading-4';
-const th = 'sticky top-0 z-10 truncate border-b bg-card px-2.5 py-2.5 text-left text-xs font-medium text-muted-foreground';
+const th = 'sticky top-[var(--app-header-h,0px)] z-10 truncate border-b bg-card px-2.5 py-2.5 text-left text-xs font-medium text-muted-foreground';
 const td = 'border-b border-border/60 px-2.5 py-2 align-middle';
 
 // Names shown in the cell; more than this collapse into "+N" (the tooltip lists every one).
@@ -142,7 +142,7 @@ function copyLink(url: string) {
 function LinkCell({ url, resolved, exclusive }: { url: string; resolved?: string; exclusive: boolean }) {
   // A short vt./vm. link shows the post it led to on its last scan; it still opens and copies as entered.
   const shown = !linkKind(url) && resolved && linkKind(resolved) ? resolved : url;
-  const { label } = shortLink(shown);
+  const { head, tail } = shortLink(shown);
   const kind = linkKind(shown);
   // Shown on hover or keyboard focus only, so it never squeezes the link text.
   const icon = 'hidden shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:inline-flex group-hover:inline-flex group-focus-within:inline-flex';
@@ -156,7 +156,7 @@ function LinkCell({ url, resolved, exclusive }: { url: string; resolved?: string
         rel="noopener noreferrer"
         title={`${url}${shown !== url ? `\n→ ${shown}` : ''}\nBấm đúp để mở · Ctrl + C để sao chép`}
         data-testid="post-link"
-        className="min-w-0 select-none truncate rounded-sm font-mono text-xs font-medium tabular-nums text-primary outline-none hover:underline focus:bg-primary/10 focus:ring-2 focus:ring-primary/40"
+        className="flex min-w-0 select-none rounded-sm font-medium text-primary outline-none hover:underline focus:bg-primary/10 focus:ring-2 focus:ring-primary/40"
         onClick={event => {
           event.preventDefault();
           if (event.ctrlKey || event.metaKey) copyLink(url);
@@ -173,7 +173,8 @@ function LinkCell({ url, resolved, exclusive }: { url: string; resolved?: string
           }
         }}
       >
-        {label}
+        <span className="min-w-0 truncate">{head}</span>
+        {tail && <span className="shrink-0 tabular-nums">{tail}</span>}
       </a>
       <button type="button" className={icon} onClick={() => copyLink(url)} title="Sao chép link" aria-label="Sao chép link" data-testid="copy-link">
         <CopyIcon className="size-3.5" />
@@ -232,7 +233,7 @@ export function LinkTablePanel({ className }: { className?: string }) {
   const leading = showNguoiAir ? 4 : 3;
   const colSpan = leading + columns.length + 3;
   return (
-    <section className={cn('flex min-h-[24rem] min-w-0 flex-col overflow-hidden rounded-xl border bg-card shadow-xs', className)} aria-labelledby="links-title">
+    <section className={cn('flex min-h-[24rem] min-w-0 flex-col overflow-clip rounded-xl border bg-card shadow-xs', className)} aria-labelledby="links-title">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2.5 px-4 py-3">
         <h2 id="links-title" className="mr-auto whitespace-nowrap text-[15px] font-semibold">
           Danh sách link{' '}
@@ -268,18 +269,18 @@ export function LinkTablePanel({ className }: { className?: string }) {
           </Button>
         </div>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto border-t md:max-h-[calc(100dvh-12rem)]" data-testid="link-table-scroll">
+      <div className="min-h-0 flex-1 border-t max-lg:overflow-x-auto" data-testid="link-table-scroll">
         {table.state === 'loading' && <div className="space-y-2 p-4">{Array.from({ length: 8 }, (_, i) => <Skeleton key={i} className="h-8 w-full" />)}</div>}
         {table.state === 'error' && <p className="px-4 py-16 text-center text-sm text-destructive" role="alert">{table.text}</p>}
         {table.state === 'empty' && <p className="px-4 py-16 text-center text-sm text-muted-foreground">Chưa có tháng nào có link {platformConfig(platform).label}.</p>}
         {table.state === 'ready' && (
-          // Fixed layout: every column fits the page width (no sideways scrolling from about 1100px up).
-          <table className="w-full min-w-[1080px] table-fixed border-separate border-spacing-0 text-[13px]" data-testid="link-table">
+          // Fixed layout: every column fits the page width; the page itself scrolls (no inner scroll box).
+          <table className="w-full table-fixed max-lg:min-w-[1000px] border-separate border-spacing-0 text-[13px]" data-testid="link-table">
             <colgroup>
               <col className="w-[100px]" />
               {showNguoiAir && <col className="w-[96px]" />}
-              <col className="w-[12%]" />
-              <col className="w-[18%]" />
+              <col className="w-[11%]" />
+              <col className="w-[26%]" />
               {columns.map(column => <col key={column.key} className={column.key === 'views' ? 'w-[84px]' : 'w-[74px]'} />)}
               <col />
               <col className="w-[104px]" />

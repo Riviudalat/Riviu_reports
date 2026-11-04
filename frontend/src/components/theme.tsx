@@ -4,14 +4,16 @@ import { Button } from '@/components/ui/button';
 import { DropdownMenu, DropdownMenuContent, DropdownMenuRadioGroup, DropdownMenuRadioItem, DropdownMenuTrigger } from '@/components/ui/dropdown-menu';
 
 type Theme = 'light' | 'dark' | 'system';
-const THEME_KEY = 'riviuTheme';
+// v2: the old key held 'system' for everyone (it was saved on load), so light could not become the default.
+const THEME_KEY = 'riviuTheme.v2';
 
 function readTheme(): Theme {
   try {
     const value = localStorage.getItem(THEME_KEY);
-    return value === 'light' || value === 'dark' ? value : 'system';
+    // Light unless the visitor picked dark or "theo hệ thống" (owner's default since 2026-11).
+    return value === 'dark' || value === 'system' ? value : 'light';
   } catch {
-    return 'system';
+    return 'light';
   }
 }
 

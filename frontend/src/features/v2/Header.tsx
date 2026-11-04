@@ -1,3 +1,4 @@
+import { useEffect, useRef } from 'react';
 import {
   CalendarClockIcon, CookieIcon, HistoryIcon, LayoutDashboardIcon, LogInIcon, LogOutIcon, MonitorCogIcon, NetworkIcon, Settings2Icon, ShieldCheckIcon,
 } from 'lucide-react';
@@ -135,11 +136,26 @@ function ViewerActions() {
   );
 }
 
+/** Publishes the header's height as --app-header-h, so table headers stick right below it. */
+function useHeaderHeight() {
+  const ref = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const element = ref.current;
+    if (!element || typeof ResizeObserver === 'undefined') return;
+    const root = document.documentElement;
+    const observer = new ResizeObserver(() => root.style.setProperty('--app-header-h', `${element.offsetHeight}px`));
+    observer.observe(element);
+    return () => { observer.disconnect(); root.style.removeProperty('--app-header-h'); };
+  }, []);
+  return ref;
+}
+
 export function Header({ adminPage, scheduleAvailable }: { adminPage: boolean; scheduleAvailable: boolean }) {
   const serverMode = useApp(state => state.viewer.serverMode);
+  const ref = useHeaderHeight();
   return (
-    <header className="sticky top-0 z-30 border-b bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/85">
-      <div className="mx-auto flex max-w-[1440px] flex-wrap items-center gap-x-5 gap-y-2.5 px-4 py-2.5 sm:px-6">
+    <header ref={ref} className="sticky top-0 z-30 border-b bg-card/95 backdrop-blur supports-[backdrop-filter]:bg-card/85">
+      <div className="flex flex-wrap items-center gap-x-5 gap-y-2.5 px-4 py-2.5 sm:px-6">
         <Brand />
         <PlatformSwitch className="order-last w-full md:order-none md:w-auto" />
         <nav className="ml-auto flex min-w-0 items-center gap-1" aria-label={adminPage ? 'Quản trị' : 'Liên kết'}>
