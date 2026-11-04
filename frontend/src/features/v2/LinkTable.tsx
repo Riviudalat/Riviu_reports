@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
-import { DownloadIcon, RefreshCwIcon, SearchIcon, XIcon } from 'lucide-react';
+import { CopyIcon, DownloadIcon, RefreshCwIcon, SearchIcon, XIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input, Skeleton } from '@/components/ui/misc';
 import { Picker, type PickerOption } from '@/components/ui/picker';
@@ -139,18 +139,24 @@ function copyLink(url: string) {
 }
 
 /** One click selects, a double click opens, Ctrl/⌘ + click or Ctrl/⌘ + C copies; right-click keeps the browser's own link menu. */
-function LinkCell({ url, exclusive }: { url: string; exclusive: boolean }) {
-  const { handle } = shortLink(url);
-  const kind = linkKind(url);
+function LinkCell({ url, resolved, exclusive }: { url: string; resolved?: string; exclusive: boolean }) {
+  // A short vt./vm. link shows the post it led to on its last scan; it still opens and copies as entered.
+  const shown = !linkKind(url) && resolved && linkKind(resolved) ? resolved : url;
+  const { label } = shortLink(shown);
+  const kind = linkKind(shown);
+  // Shown on hover or keyboard focus only, so it never squeezes the link text.
+  const icon = 'hidden shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:inline-flex group-hover:inline-flex group-focus-within:inline-flex';
   return (
-    <span className="flex min-w-0 items-center gap-1.5">
+    <span className="group flex min-w-0 items-center gap-1.5">
+      {/* The kind tag leads, so every row's link text starts in the same place. */}
+      <span className={cn(tag, kind ? KIND_TAGS[kind].className : 'bg-muted text-muted-foreground')} title={kind ? undefined : 'Link rút gọn, chưa quét được nên chưa biết là video hay ảnh'}>{kind ? KIND_TAGS[kind].label : 'Link gọn'}</span>
       <a
         href={url}
         target="_blank"
         rel="noopener noreferrer"
-        title={`${url}\nBấm đúp để mở · Ctrl + C để sao chép`}
+        title={`${url}${shown !== url ? `\n→ ${shown}` : ''}\nBấm đúp để mở · Ctrl + C để sao chép`}
         data-testid="post-link"
-        className="min-w-0 select-none truncate rounded-sm font-medium text-primary outline-none hover:underline focus:bg-primary/10 focus:ring-2 focus:ring-primary/40"
+        className="min-w-0 select-none truncate rounded-sm font-mono text-xs font-medium tabular-nums text-primary outline-none hover:underline focus:bg-primary/10 focus:ring-2 focus:ring-primary/40"
         onClick={event => {
           event.preventDefault();
           if (event.ctrlKey || event.metaKey) copyLink(url);
@@ -167,9 +173,11 @@ function LinkCell({ url, exclusive }: { url: string; exclusive: boolean }) {
           }
         }}
       >
-        {handle}
+        {label}
       </a>
-      {kind && <span className={cn(tag, KIND_TAGS[kind].className)}>{KIND_TAGS[kind].label}</span>}
+      <button type="button" className={icon} onClick={() => copyLink(url)} title="Sao chép link" aria-label="Sao chép link" data-testid="copy-link">
+        <CopyIcon className="size-3.5" />
+      </button>
       {exclusive && <span className={cn(tag, 'bg-primary/12 text-primary')} data-testid="exclusive-tag">Độc quyền</span>}
     </span>
   );
@@ -182,7 +190,7 @@ function Row({ row, platform, showNguoiAir }: { row: RdRow; platform: PlatformKe
       <td className={cn(td, 'whitespace-nowrap pl-4 tabular-nums text-muted-foreground')}>{row.ngayAir}</td>
       {showNguoiAir && <td className={cn(td, 'truncate')} title={row.nguoiAir}>{row.nguoiAir}</td>}
       <td className={cn(td, 'truncate')} title={row.channel}>{row.channel}</td>
-      <td className={td}><LinkCell url={row.link} exclusive={row.partners.length === 1} /></td>
+      <td className={td}><LinkCell url={row.link} resolved={row.resolvedLink} exclusive={row.partners.length === 1} /></td>
       {metricColumns(platform).map(column => (
         <td key={column.key} className={cn(td, 'text-right font-medium tabular-nums')} data-metric={column.key}>{formatResultNumber(row[column.key])}</td>
       ))}
@@ -271,7 +279,7 @@ export function LinkTablePanel({ className }: { className?: string }) {
               <col className="w-[100px]" />
               {showNguoiAir && <col className="w-[96px]" />}
               <col className="w-[12%]" />
-              <col className="w-[17%]" />
+              <col className="w-[18%]" />
               {columns.map(column => <col key={column.key} className={column.key === 'views' ? 'w-[84px]' : 'w-[74px]'} />)}
               <col />
               <col className="w-[104px]" />

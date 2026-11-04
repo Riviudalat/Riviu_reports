@@ -27,6 +27,8 @@ export interface RdRow {
   nguoiAir?: string;
   channel: string;
   link: string;
+  /** TikTok: the full post link a short vt./vm. link led to when it was last scanned, or ''. */
+  resolvedLink?: string;
   partners: string[];
   views: number | null;
   likes: number | null;
@@ -78,6 +80,7 @@ function normalizeRow(raw: unknown): RdRow | null {
     nguoiAir: String(record.nguoiAir || ''),
     channel: String(record.channel || ''),
     link,
+    resolvedLink: String(record.resolvedLink || '').trim(),
     partners: Array.isArray(record.partners) ? record.partners.map(String).filter(Boolean) : [],
     views: nullableNumber(record.views),
     likes: nullableNumber(record.likes),
@@ -241,22 +244,22 @@ export function linkKind(url: string): LinkKind {
   return match ? (match[1] as LinkKind) : '';
 }
 
-/** "https://www.tiktok.com/@kenh/video/7391…123456" -> { handle: "@kenh", detail: "video …123456" }. */
-export function shortLink(url: string): { handle: string; detail: string } {
+/**
+ * The text shown for a post link: the post id when the URL names one (its last digits "…0015838",
+ * "D000000000x"), otherwise host + path ("vt.tiktok.com/ZSxQ4KHvk"). The channel has its own
+ * column, so the handle is only returned for the tooltip.
+ */
+export function shortLink(url: string): { handle: string; label: string } {
+  const cut = (text: string, max = 30) => (text.length > max ? `${text.slice(0, max - 1)}…` : text);
   try {
     const parsed = new URL(url);
     const parts = parsed.pathname.split('/').filter(Boolean);
     const handleIndex = parts.findIndex(part => part.startsWith('@'));
-    if (handleIndex >= 0) {
-      const kind = LINK_KINDS[parts[handleIndex + 1]] || '';
-      const id = parts[handleIndex + 2] || '';
-      const shortId = id.length > 10 ? `…${id.slice(-6)}` : id;
-      const handle = decodeURIComponent(parts[handleIndex]);
-      return { handle: handle.length > 22 ? `${handle.slice(0, 21)}…` : handle, detail: [kind, shortId].filter(Boolean).join(' ') };
-    }
-    const text = parsed.hostname.replace(/^www\./, '') + parsed.pathname.replace(/\/$/, '');
-    return { handle: text.length > 34 ? `${text.slice(0, 33)}…` : text, detail: '' };
+    const id = handleIndex >= 0 && LINK_KINDS[parts[handleIndex + 1]] ? parts[handleIndex + 2] || '' : '';
+    const handle = handleIndex >= 0 ? decodeURIComponent(parts[handleIndex]) : '';
+    if (id) return { handle, label: id.length > 12 ? `…${id.slice(-7)}` : id };
+    return { handle, label: cut(parsed.hostname.replace(/^www\./, '') + parsed.pathname.replace(/\/$/, '')) };
   } catch {
-    return { handle: url.length > 34 ? `${url.slice(0, 33)}…` : url, detail: '' };
+    return { handle: '', label: cut(url) };
   }
 }

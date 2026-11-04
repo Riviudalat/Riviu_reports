@@ -85,6 +85,8 @@ def table_row(row, platform):
         "nguoiAir": row.get("_nguoiAir", ""),
         "channel": row["TÊN KÊNH"],
         "link": row["LINK AIR"],
+        # TikTok's full post link a short vt./vm. link led to on its last successful scan, or "".
+        "resolvedLink": row.get("_resolvedUrl") or "",
         "partners": list(row["partners"]),
         # None = unknown (never scanned or failed), 0 = a confirmed zero.
         **{METRIC_KEYS[metric]: row[metric] for metric in ALL_REPORT_METRICS if metric in REPORT_METRIC_COLUMNS[platform]},

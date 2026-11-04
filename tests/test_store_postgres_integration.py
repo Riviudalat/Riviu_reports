@@ -463,6 +463,7 @@ def test_months_and_rows_list_the_month_sheets_and_keep_unknown_metrics_blank(ap
     assert set(by_id) == {known, unscanned}
     assert (by_id[known]["views"], by_id[known]["likes"], by_id[known]["saves"], by_id[known]["status"]) == (0, 7, None, "Success")
     assert by_id[unscanned]["views"] is None and by_id[unscanned]["ngayAir"] == "03/10/2026"
+    assert by_id[unscanned]["resolvedLink"] == ""
     assert "reposts" not in by_id[known] and rows["partners"] == ["Cafe A", "Cafe B"]
 
 

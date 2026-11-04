@@ -63,9 +63,11 @@ describe('table helpers', () => {
     expect(scanStatusView(row({ status: 'Ẩn số liệu' })).tone).toBe('warning');
   });
 
-  it('shortens links to the handle and post id', () => {
-    expect(shortLink('https://www.tiktok.com/@kenh6/video/7400000000000015838')).toEqual({ handle: '@kenh6', detail: 'video …015838' });
-    expect(shortLink('https://www.threads.com/@kenh22/post/D000000000x').handle).toBe('@kenh22');
+  it('shortens links to the post id, or host and path for short links', () => {
+    expect(shortLink('https://www.tiktok.com/@kenh6/video/7400000000000015838')).toEqual({ handle: '@kenh6', label: '…0015838' });
+    expect(shortLink('https://www.tiktok.com/@kenh6/photo/7400000000000015839?is_from_webapp=1').label).toBe('…0015839');
+    expect(shortLink('https://www.threads.com/@kenh22/post/D000000000x')).toEqual({ handle: '@kenh22', label: 'D000000000x' });
+    expect(shortLink('https://vt.tiktok.com/ZSxQ4KHvk/').label).toBe('vt.tiktok.com/ZSxQ4KHvk');
   });
 
   it('reports the newest update of the month', () => {
