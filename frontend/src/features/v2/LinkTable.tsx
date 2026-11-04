@@ -147,7 +147,8 @@ function LinkCell({ url, resolved, exclusive }: { url: string; resolved?: string
   // Shown on hover or keyboard focus only, so it never squeezes the link text.
   const icon = 'hidden shrink-0 rounded p-0.5 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:inline-flex group-hover:inline-flex group-focus-within:inline-flex';
   return (
-    <span className="group flex min-w-0 items-center gap-1.5">
+    // A container: the cell decides from its own width whether the link head fits.
+    <span className="@container/link group flex min-w-0 items-center gap-1.5">
       {/* The kind tag leads, so every row's link text starts in the same place. */}
       <span className={cn(tag, kind ? KIND_TAGS[kind].className : 'bg-muted text-muted-foreground')} title={kind ? undefined : 'Link rút gọn, chưa quét được nên chưa biết là video hay ảnh'}>{kind ? KIND_TAGS[kind].label : 'Link gọn'}</span>
       <a
@@ -173,7 +174,8 @@ function LinkCell({ url, resolved, exclusive }: { url: string; resolved?: string
           }
         }}
       >
-        <span className="min-w-0 truncate">{head}</span>
+        {/* Narrow cells show only the post id, rather than a stub like "t…". */}
+        <span className={cn('min-w-0 truncate', tail && 'hidden @[17rem]/link:inline')}>{head}</span>
         {tail && <span className="shrink-0 tabular-nums">{tail}</span>}
       </a>
       <button type="button" className={icon} onClick={() => copyLink(url)} title="Sao chép link" aria-label="Sao chép link" data-testid="copy-link">
