@@ -277,14 +277,15 @@ export function LinkTablePanel({ className }: { className?: string }) {
           // Fixed layout: every column fits the page width; the page itself scrolls (no inner scroll box).
           <table className="w-full table-fixed max-lg:min-w-[1000px] border-separate border-spacing-0 text-[13px]" data-testid="link-table">
             <colgroup>
-              <col className="w-[100px]" />
-              {showNguoiAir && <col className="w-[96px]" />}
-              <col className="w-[11%]" />
-              <col className="w-[26%]" />
-              {columns.map(column => <col key={column.key} className={column.key === 'views' ? 'w-[84px]' : 'w-[74px]'} />)}
+              <col className="w-[92px]" />
+              {showNguoiAir && <col className="w-[88px]" />}
+              <col className="w-[10%]" />
+              <col className="w-[21%]" />
+              {columns.map(column => <col key={column.key} className={column.key === 'views' ? 'w-[76px]' : 'w-[66px]'} />)}
+              {/* Đối tác takes what is left (about a fifth of the table at 1440px). */}
               <col />
-              <col className="w-[104px]" />
-              <col className="w-[96px]" />
+              <col className="w-[84px]" />
+              <col className="w-[88px]" />
             </colgroup>
             <thead>
               <tr>
