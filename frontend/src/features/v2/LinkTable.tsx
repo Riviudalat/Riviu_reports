@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
 import { CopyIcon, DownloadIcon, RefreshCwIcon, SearchIcon, XIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -184,7 +184,7 @@ function LinkCell({ url, resolved, exclusive }: { url: string; resolved?: string
   );
 }
 
-function Row({ row, platform, showNguoiAir }: { row: RdRow; platform: PlatformKey; showNguoiAir: boolean }) {
+function Row({ row, platform, showNguoiAir, showUpdated }: { row: RdRow; platform: PlatformKey; showNguoiAir: boolean; showUpdated: boolean }) {
   const status = scanStatusView(row);
   return (
     <tr className="hover:bg-muted/40" data-testid="link-row">
@@ -199,12 +199,28 @@ function Row({ row, platform, showNguoiAir }: { row: RdRow; platform: PlatformKe
       <td className={td}>
         <span className={cn('inline-flex max-w-full truncate whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-semibold', STATUS_TONE[status.tone])} title={status.title}>{status.label}</span>
       </td>
-      <td className={cn(td, 'whitespace-nowrap pr-4 text-xs tabular-nums text-muted-foreground')} title={row.updatedAt}>{shortUpdate(row.updatedAt)}</td>
+      {showUpdated && <td className={cn(td, 'whitespace-nowrap pr-4 text-xs tabular-nums text-muted-foreground')} title={row.updatedAt}>{shortUpdate(row.updatedAt)}</td>}
     </tr>
   );
 }
 
 const ROW_RENDER_LIMIT = 3000;
+
+// From 1280px wide the table also shows Người đăng and Cập nhật; narrower, those give their room
+// to Đối tác (the page header already says when the numbers were last updated).
+const WIDE_QUERY = '(min-width: 1280px)';
+
+function useWide() {
+  const [wide, setWide] = useState(() => (typeof window.matchMedia === 'function' ? window.matchMedia(WIDE_QUERY).matches : true));
+  useEffect(() => {
+    if (typeof window.matchMedia !== 'function') return;
+    const media = window.matchMedia(WIDE_QUERY);
+    const listener = () => setWide(media.matches);
+    media.addEventListener?.('change', listener);
+    return () => media.removeEventListener?.('change', listener);
+  }, []);
+  return wide;
+}
 
 export function LinkTablePanel({ className }: { className?: string }) {
   const table = useApp(state => state.rd.table);
@@ -226,12 +242,16 @@ export function LinkTablePanel({ className }: { className?: string }) {
   const rows = useMemo(() => filterRows(allRows, { search, partner }), [allRows, search, partner]);
   const totals = useMemo(() => columnTotals(rows, platform), [rows, platform]);
   // Người air shows once Riviu Data stores it (migration 0013), so an empty column never takes space.
-  const showNguoiAir = useMemo(() => allRows.some(row => row.nguoiAir), [allRows]);
+  const wide = useWide();
+  const hasNguoiAir = useMemo(() => allRows.some(row => row.nguoiAir), [allRows]);
+  const showNguoiAir = wide && hasNguoiAir;
+  const showUpdated = wide;
   const total = allRows.length;
   const filtered = Boolean(search.trim() || partner);
   const columns = metricColumns(platform);
   const leading = showNguoiAir ? 4 : 3;
-  const colSpan = leading + columns.length + 3;
+  const trailing = showUpdated ? 3 : 2;
+  const colSpan = leading + columns.length + trailing;
   return (
     <section className={cn('flex min-h-[24rem] min-w-0 flex-col overflow-clip rounded-xl border bg-card shadow-xs', className)} aria-labelledby="links-title">
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2.5 px-4 py-3">
@@ -282,10 +302,10 @@ export function LinkTablePanel({ className }: { className?: string }) {
               <col className="w-[10%]" />
               <col className="w-[21%]" />
               {columns.map(column => <col key={column.key} className={column.key === 'views' ? 'w-[76px]' : 'w-[66px]'} />)}
-              {/* Đối tác takes what is left (about a fifth of the table at 1440px). */}
-              <col />
+              {/* Đối tác takes what is left, never less than about a fifth of the table. */}
+              <col className="w-[20%]" />
               <col className="w-[84px]" />
-              <col className="w-[88px]" />
+              {showUpdated && <col className="w-[88px]" />}
             </colgroup>
             <thead>
               <tr>
@@ -296,7 +316,7 @@ export function LinkTablePanel({ className }: { className?: string }) {
                 {columns.map(column => <th key={column.key} className={cn(th, 'text-right')}>{column.label}</th>)}
                 <th className={th}>Đối tác</th>
                 <th className={th}>Trạng thái</th>
-                <th className={cn(th, 'pr-4')}>Cập nhật</th>
+                {showUpdated && <th className={cn(th, 'pr-4')}>Cập nhật</th>}
               </tr>
             </thead>
             <tbody>
@@ -305,7 +325,7 @@ export function LinkTablePanel({ className }: { className?: string }) {
                   {total ? 'Không có link nào khớp với bộ lọc.' : `Tháng này chưa có link ${platformConfig(platform).label}.`}
                 </td></tr>
               )}
-              {rows.slice(0, ROW_RENDER_LIMIT).map(row => <Row key={row.id} row={row} platform={platform} showNguoiAir={showNguoiAir} />)}
+              {rows.slice(0, ROW_RENDER_LIMIT).map(row => <Row key={row.id} row={row} platform={platform} showNguoiAir={showNguoiAir} showUpdated={showUpdated} />)}
             </tbody>
             {rows.length > 0 && (
               <tfoot>
@@ -314,7 +334,7 @@ export function LinkTablePanel({ className }: { className?: string }) {
                   {columns.map(column => (
                     <td key={column.key} className="sticky bottom-0 border-t bg-muted px-2.5 py-2.5 text-right tabular-nums" data-testid={`total-${column.key}`}>{formatResultNumber(totals[column.key])}</td>
                   ))}
-                  <td colSpan={3} className="sticky bottom-0 border-t bg-muted px-2.5 py-2.5" />
+                  <td colSpan={trailing} className="sticky bottom-0 border-t bg-muted px-2.5 py-2.5" />
                 </tr>
               </tfoot>
             )}

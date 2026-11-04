@@ -123,6 +123,20 @@ describe('public viewer page (/)', () => {
     expect([...screen.getByTestId('partner-chips').children].map(chip => chip.textContent)).toEqual(['Một', 'Hai', 'Ba', '+2']);
   });
 
+  it('gives Người đăng and Cập nhật room to Đối tác below 1280px', () => {
+    const real = window.matchMedia;
+    window.matchMedia = ((query: string) => ({ ...real(query), matches: false })) as typeof window.matchMedia;
+    try {
+      renderAs(ANON, false);
+      const headers = screen.getAllByRole('columnheader').map(cell => cell.textContent);
+      expect(headers).toContain('Đối tác');
+      expect(headers).not.toContain('Người đăng');
+      expect(headers).not.toContain('Cập nhật');
+    } finally {
+      window.matchMedia = real;
+    }
+  });
+
   it('labels links by kind and post id, and a short link by the post it led to', () => {
     renderAs(ANON, false);
     expect(screen.getAllByTestId('post-link').map(link => link.textContent)).toEqual(['tiktok.com/@kenh6/video/7400000000000015838', 'tiktok.com/@kenh27/photo/7400000000000071271']);

@@ -4,10 +4,11 @@ import { cleanup } from '@testing-library/react';
 
 afterEach(() => cleanup());
 
-// jsdom lacks these browser APIs that Radix and the theme toggle touch.
+// jsdom lacks these browser APIs that Radix and the theme toggle touch. The stub window is a
+// desktop one: min-width queries match, everything else (prefers-color-scheme: dark) does not.
 if (!window.matchMedia) {
   window.matchMedia = (query: string) => ({
-    matches: false, media: query, onchange: null,
+    matches: query.includes('min-width'), media: query, onchange: null,
     addListener: () => {}, removeListener: () => {}, addEventListener: () => {}, removeEventListener: () => {}, dispatchEvent: () => false,
   }) as MediaQueryList;
 }
