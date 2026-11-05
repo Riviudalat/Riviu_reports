@@ -311,14 +311,14 @@ describe('public viewer page (/)', () => {
     const dialog = screen.getByRole('dialog');
     expect(within(within(dialog).getByTestId('export-platform')).getAllByRole('tab').map(tab => tab.textContent)).toEqual(['TikTok', 'Threads']);
     await userEvent.click(await within(dialog).findByRole('checkbox', { name: 'Cafe Mây' }));
-    await userEvent.click(within(dialog).getByRole('tab', { name: /Theo người đăng/ }));
+    await userEvent.click(within(dialog).getByRole('tab', { name: /Người đăng/ }));
     await userEvent.click(await within(dialog).findByRole('checkbox', { name: 'Phát' }));
     expect(calls.some(call => call.url === '/riviu-data/report-posters?platform=tiktok&thang=2026-10&apply_min_views=true&min_views=100')).toBe(true);
     // Back and forth: each tab still has what was ticked in it.
-    await userEvent.click(within(dialog).getByRole('tab', { name: /Theo đối tác/ }));
+    await userEvent.click(within(dialog).getByRole('tab', { name: /^Đối tác$/ }));
     expect(await within(dialog).findByRole('checkbox', { name: 'Cafe Mây' })).toBeChecked();
     expect(within(dialog).getByRole('checkbox', { name: 'Spa' })).not.toBeChecked();
-    await userEvent.click(within(dialog).getByRole('tab', { name: /Theo người đăng/ }));
+    await userEvent.click(within(dialog).getByRole('tab', { name: /Người đăng/ }));
     expect(await within(dialog).findByRole('checkbox', { name: 'Phát' })).toBeChecked();
     await userEvent.click(within(dialog).getByTestId('export-report'));
     await vi.waitFor(() => expect(calls.some(call => call.url === '/riviu-data/export-report')).toBe(true));

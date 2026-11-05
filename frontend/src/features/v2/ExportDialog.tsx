@@ -15,8 +15,8 @@ import { closeModal, notify, useApp } from '@/state/app';
 import { monthsOf, selectRdPlatform } from '@/state/riviuData';
 
 const SUBJECTS: Record<ExportSubject, { tab: string; noun: string; icon: ReactNode; path: string; key: 'partners' | 'posters' }> = {
-  partner: { tab: 'Theo đối tác', noun: 'đối tác', icon: <HandshakeIcon />, path: '/riviu-data/report-partners', key: 'partners' },
-  poster: { tab: 'Theo người đăng', noun: 'người đăng', icon: <UserRoundIcon />, path: '/riviu-data/report-posters', key: 'posters' },
+  partner: { tab: 'Đối tác', noun: 'đối tác', icon: <HandshakeIcon />, path: '/riviu-data/report-partners', key: 'partners' },
+  poster: { tab: 'Người đăng', noun: 'người đăng', icon: <UserRoundIcon />, path: '/riviu-data/report-posters', key: 'posters' },
 };
 
 async function fetchReportNames(subject: ExportSubject, platform: PlatformKey, thang: string, applyMinViews: boolean, minViews: number): Promise<ReportPartner[]> {
@@ -52,7 +52,7 @@ function Segmented<T extends string>({ value, onChange, items, label, testId }: 
             aria-selected={selected}
             onClick={() => onChange(item.value)}
             className={cn(
-              'flex h-8 min-w-0 items-center justify-center gap-2 rounded-md px-3 text-sm font-medium transition [&_svg]:size-4',
+              'flex h-8 min-w-0 items-center justify-center gap-2 whitespace-nowrap rounded-md px-3 text-sm font-medium transition [&_svg]:size-4',
               selected ? 'bg-card text-foreground shadow-sm ring-1 ring-border/70' : 'text-muted-foreground hover:bg-card/60 hover:text-foreground',
             )}
           >
