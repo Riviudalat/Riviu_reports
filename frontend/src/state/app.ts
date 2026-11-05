@@ -48,7 +48,7 @@ import { createStore, useStoreSelector } from './store';
 
 // ---- Types ----------------------------------------------------------------------------
 
-export type WorkspaceTab = 'sheet' | 'summary' | 'live' | 'success' | 'nostats' | 'errors' | 'duplicates' | 'logs';
+export type WorkspaceTab = 'sheet' | 'posters' | 'summary' | 'live' | 'success' | 'nostats' | 'errors' | 'duplicates' | 'logs';
 
 export interface FileEntry {
   id: string;
@@ -284,8 +284,9 @@ function updateSource(platform: PlatformKey, patch: Partial<SourceSlot> | ((slot
 const MAX_LOG_LINES = 5000;
 let logSeq = 0;
 
-export function addLog(message: string, options: { level?: string; details?: LogDetails | null } = {}) {
-  const now = new Date();
+export function addLog(message: string, options: { level?: string; details?: LogDetails | null; at?: string } = {}) {
+  const sent = options.at ? new Date(options.at) : null;
+  const now = sent && !Number.isNaN(sent.getTime()) ? sent : new Date();
   const level = detectLogLevel(message, options.level);
   logSeq += 1;
   const entry: LogEntry = {
@@ -308,6 +309,19 @@ export function notify(message: string, level: NotifyLevel = 'info') {
   else if (level === 'error') toast.error(message);
   else if (level === 'warn') toast.warning(message);
   else toast.info(message);
+}
+
+// Server log lines already shown, so a reconnect's snapshot does not repeat them.
+const shownLogSeqs = new Set<number>();
+
+/** A server log line, once: live, or replayed from a snapshot by a page that opened later. */
+function addServerLog(message: SocketMessage, label = '') {
+  if (typeof message.seq === 'number') {
+    if (shownLogSeqs.has(message.seq)) return;
+    if (shownLogSeqs.size > MAX_LOG_LINES * 2) shownLogSeqs.clear();
+    shownLogSeqs.add(message.seq);
+  }
+  addLog(`${label ? `[${label}] ` : ''}${message.message || ''}`, { level: message.level || '', details: message.details || null, at: message.at });
 }
 
 export function clearLogs() {
@@ -976,6 +990,7 @@ export function handleSessionSnapshot(session: SessionSnapshot) {
   const state = get();
   const { state: scan, follow } = applySessionSnapshot(state.scan, session, viewContext(state));
   set({ scan });
+  for (const line of session.logs || []) addServerLog(line);
   if (follow) showRunSource(session);
   if (session.running) set({ workspaceTab: 'live' });
 }
@@ -992,11 +1007,13 @@ function handleParkedMessage(platform: PlatformKey, message: SocketMessage) {
   const label = PLATFORMS[platform].label;
   let scan = get().parkedScans[platform] ?? initialScanState();
   if (message.type === 'session') {
-    scan = applySessionSnapshot(scan, (message.data || {}) as SessionSnapshot, { activePlatform: platform, currentFileId: RIVIU_DATA_FILE_ID }).state;
+    const session = (message.data || {}) as SessionSnapshot;
+    scan = applySessionSnapshot(scan, session, { activePlatform: platform, currentFileId: RIVIU_DATA_FILE_ID }).state;
+    for (const line of session.logs || []) addServerLog(line, label);
   } else {
     if (shouldApplyRunContext(message)) scan = applyRunContextPure(scan, message).state;
     if (message.type === 'log') {
-      addLog(`[${label}] ${message.message || ''}`, { level: message.level || '', details: message.details || null });
+      addServerLog(message, label);
     } else if (message.type === 'status') {
       const { state: next, finished } = applyStatus(scan, (message.data || {}) as ProgressData);
       scan = next;
@@ -1044,7 +1061,7 @@ export function handleSocketMessage(message: SocketMessage) {
   if (isStaleTerminalEvent(message, viewContext(state), state.scan.runContext?.runId || '')) return;
   if (shouldApplyRunContext(message)) applyRunContext(message);
   if (message.type === 'log') {
-    addLog(message.message || '', { level: message.level || '', details: message.details || null });
+    addServerLog(message);
   } else if (message.type === 'status') {
     const data = (message.data || {}) as ProgressData;
     const previousWait = get().scan.retryWait;

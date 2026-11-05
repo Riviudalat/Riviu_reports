@@ -20,9 +20,9 @@ import {
 import type { PreviewRow } from '@/lib/links';
 
 // The workbook workspace has no Tổng kết tab (that one is the Riviu Data pages', features/v2).
-type ClassicTab = Exclude<WorkspaceTab, 'summary'>;
+type ClassicTab = Exclude<WorkspaceTab, 'summary' | 'posters'>;
 
-const classicTab = (tab: WorkspaceTab): ClassicTab => (tab === 'summary' ? 'sheet' : tab);
+const classicTab = (tab: WorkspaceTab): ClassicTab => (tab === 'summary' || tab === 'posters' ? 'sheet' : tab);
 
 const VIEW_META: Record<ClassicTab, { title: string; subtitle: string }> = {
   sheet: { title: 'Dữ liệu sheet hiện tại', subtitle: 'Xem và chuyển sheet trong cùng một vùng làm việc' },

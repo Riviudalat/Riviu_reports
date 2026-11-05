@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import type { Viewer } from '@/lib/auth';
 import type { RdRow } from '@/lib/riviuData';
 import { appStore, handleSocketMessage, openModal, resetAppState, setSocketForTests } from '@/state/app';
-import { installRiviuDataHooks, resetRiviuDataModule } from '@/state/riviuData';
+import { installRiviuDataHooks, resetRiviuDataModule, selectThang } from '@/state/riviuData';
 import { RiviuDataLayout } from './RiviuDataApp';
 
 const ADMIN: Viewer = { authenticated: true, username: 'quantri', role: 'admin', serverMode: true };
@@ -321,5 +321,51 @@ describe('admin page (/admin)', () => {
     const body = JSON.parse(String(calls.find(call => call.init?.method === 'POST' && call.url === '/schedule')?.init?.body));
     expect(body.platforms.tiktok.slots).toEqual([{ time: '08:30', enabled: true, months: ['latest'] }, { time: '21:00', enabled: true, months: ['latest', '2026-10'] }]);
     expect(body.platforms.threads.options.scrapeMode).toBe('hybrid');
+  });
+
+  it("reports the month by poster, with each poster's link count, unknown posters last", async () => {
+    renderAs(ADMIN, true);
+    const tabs = screen.getAllByRole('tab').map(tab => tab.textContent?.replace(/\d+$/, ''));
+    expect(tabs.indexOf('Báo cáo người đăng')).toBe(tabs.indexOf('Tổng kết') - 1);
+    await userEvent.click(screen.getByRole('tab', { name: /Báo cáo người đăng/ }));
+    const table = screen.getByTestId('poster-table');
+    expect(within(table).getAllByRole('columnheader').map(cell => cell.textContent)).toEqual([
+      'Ngày đăng', 'Người đăng', 'Link', 'Lượt xem', 'Tim', 'Bình luận', 'Lượt lưu', 'Chia sẻ', 'Đối tác', 'Trạng thái', 'Tổng link', 'Cập nhật',
+    ]);
+    const rows = screen.getAllByTestId('poster-row');
+    expect(rows.map(row => row.cells[1].textContent)).toEqual(['Phát', 'Chưa rõ người đăng']);
+    expect(screen.getAllByTestId('poster-links').map(cell => cell.textContent)).toEqual(['1', '1']);
+    expect(screen.getByTestId('poster-count')).toHaveTextContent('2 người · 2 link');
+    expect(screen.getByTestId('poster-total-links')).toHaveTextContent('2');
+  });
+
+  it("shows a reloaded page the last scan's logs once, and how much of the scan is listed", async () => {
+    renderAs(ADMIN, true);
+    const log = { type: 'log', ...ctx, message: 'Bắt đầu quét 900 link', seq: 7001, at: '2026-10-28T02:00:05+00:00' };
+    const session = {
+      ...ctx, running: false,
+      status: { ...ctx, phase: 'completed', done: true, total: 900, processed: 900, success: 900 },
+      results: [{ ...ctx, id: 1, url: ROWS[0].link, status: 'Success', views: 349 }],
+      logs: [log],
+    };
+    act(() => handleSocketMessage({ type: 'session', ...ctx, data: session }));
+    // A reconnect sends the same snapshot again: its lines are not repeated.
+    act(() => handleSocketMessage({ type: 'session', ...ctx, data: session }));
+    act(() => handleSocketMessage(log));
+    expect(appStore.get().logs.filter(line => line.message === 'Bắt đầu quét 900 link')).toHaveLength(1);
+    // The run scanned 900 links; the server kept the newest results only.
+    await userEvent.click(screen.getByRole('tab', { name: /Kết quả quét/ }));
+    expect(screen.getByTestId('count-live')).toHaveTextContent('900');
+    expect(screen.getByTestId('last-scan-note')).toHaveTextContent('Lần quét gần nhất: Tháng 10/2026 · 900 link đã quét · dưới đây là 1 kết quả mới nhất');
+  });
+
+  it("gives another month's last scan no count", () => {
+    renderAs(ADMIN, true);
+    const other = { ...ctx, runId: 'run-9', sheetName: '2026-09' };
+    act(() => handleSocketMessage({ type: 'session', ...other, data: { ...other, running: false, status: { ...other, phase: 'completed', done: true, processed: 500 }, results: [] } }));
+    // The page opens on the last scan's month; on any other month that scan has no count.
+    expect(screen.getByTestId('count-live')).toHaveTextContent('500');
+    act(() => { void selectThang('2026-10'); });
+    expect(screen.queryByTestId('count-live')).not.toBeInTheDocument();
   });
 });

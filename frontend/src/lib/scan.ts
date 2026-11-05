@@ -86,6 +86,8 @@ export interface SessionSnapshot extends RunContext {
   running?: boolean;
   status?: ProgressData;
   results?: ResultRow[];
+  /** The run's log lines so far (the server keeps the last 2000). */
+  logs?: SocketMessage[];
 }
 
 export interface SocketMessage extends RunContext {
@@ -95,6 +97,9 @@ export interface SocketMessage extends RunContext {
   message?: string;
   level?: string;
   details?: LogDetails | null;
+  /** Log lines: process-wide sequence number and server time (ISO). */
+  seq?: number;
+  at?: string;
 }
 
 export interface LogDetails {

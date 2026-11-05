@@ -10,10 +10,12 @@ cookie changes) must not overlap any scan. Read and write these names through th
 `riviu.app` see one value.
 """
 
+import itertools
 import secrets
 import sys
 from collections import deque
 from contextlib import contextmanager
+from datetime import datetime, timezone
 
 from fastapi import WebSocket
 
@@ -39,15 +41,24 @@ class Hub:
                 self.disconnect(connection)
 
 
+# Every log line gets a process-wide sequence number, so a page that reconnects and replays a
+# snapshot's logs can skip the lines it already showed.
+LOG_SEQUENCE = itertools.count(1)
+# Results and log lines one channel keeps for pages that open (or reload) after they were sent.
+MAX_KEPT_RESULTS = 500
+MAX_KEPT_LOGS = 2000
+
+
 class ConnectionManager:
-    """One run channel: the run context every event carries, its last status and results."""
+    """One run channel: the run context every event carries, its last status, results and logs."""
 
     def __init__(self, hub=None):
         self.hub = hub if hub is not None else Hub()
         self.context = {}
         self.running = False
         self.last_status = {}
-        self.results = deque(maxlen=500)
+        self.results = deque(maxlen=MAX_KEPT_RESULTS)
+        self.logs = deque(maxlen=MAX_KEPT_LOGS)
 
     @property
     def active_connections(self):
@@ -58,10 +69,14 @@ class ConnectionManager:
         self.running = True
         self.last_status = {"total": 0, "processed": 0, "success": 0, "error": 0, "hidden": 0, "done": False, "phase": "running"}
         self.results.clear()
+        self.logs.clear()
         return dict(self.context)
 
     def snapshot(self):
-        return {**self.context, "running": self.running, "status": {**self.last_status, **self.context}, "results": list(self.results)}
+        return {
+            **self.context, "running": self.running, "status": {**self.last_status, **self.context},
+            "results": list(self.results), "logs": list(self.logs),
+        }
 
     def session_message(self):
         return {"type": "session", "data": self.snapshot(), **self.context}
@@ -80,11 +95,15 @@ class ConnectionManager:
         await self.hub.send_all(payload)
 
     async def broadcast_log(self, message: str, *, level: str = "", details=None):
-        payload = {"type": "log", "message": message, **self.context}
+        payload = {
+            "type": "log", "message": message, "seq": next(LOG_SEQUENCE),
+            "at": datetime.now(timezone.utc).isoformat(timespec="seconds"), **self.context,
+        }
         if level:
             payload["level"] = level
         if details:
             payload["details"] = details
+        self.logs.append(payload)
         await self._send_all(payload)
 
     async def broadcast_status(self, status: dict):

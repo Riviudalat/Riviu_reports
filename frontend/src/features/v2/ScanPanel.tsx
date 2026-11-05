@@ -1,7 +1,7 @@
 import { useEffect, useId, useMemo, useState, type ReactNode } from 'react';
 import {
   ChartColumnIcon, CircleStopIcon, CookieIcon, CopyIcon, DownloadIcon, EyeOffIcon, FileWarningIcon, GaugeIcon, Loader2Icon, NetworkIcon, PlayIcon, RadioIcon,
-  Rows3Icon, Settings2Icon, SkipForwardIcon, SlidersHorizontalIcon, TerminalIcon, Trash2Icon, CopyPlusIcon,
+  Rows3Icon, Settings2Icon, UserRoundIcon, SkipForwardIcon, SlidersHorizontalIcon, TerminalIcon, Trash2Icon, CopyPlusIcon,
 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Badge, NativeSelect, Progress, Switch, Tip } from '@/components/ui/misc';
@@ -18,6 +18,7 @@ import {
 import { monthsOf, startRdScan } from '@/state/riviuData';
 import { DuplicatesPanel, FailurePanel, LivePanel, LogsPanel } from '@/features/Workspace';
 import { LinkTablePanel } from './LinkTable';
+import { PosterPanel } from './PosterPanel';
 import { SummaryPanel } from './SummaryPanel';
 
 const COOKIE_STATE_TONE: Record<string, string> = {
@@ -224,10 +225,11 @@ export function ScanCard() {
 
 // ---- Admin workspace: the link table plus the live scan views ------------------------
 
-type AdminTab = Extract<WorkspaceTab, 'sheet' | 'summary' | 'live' | 'nostats' | 'errors' | 'duplicates' | 'logs'>;
+type AdminTab = Extract<WorkspaceTab, 'sheet' | 'posters' | 'summary' | 'live' | 'nostats' | 'errors' | 'duplicates' | 'logs'>;
 
 const TABS: Array<{ key: AdminTab; label: string; icon: ReactNode; tone?: string }> = [
   { key: 'sheet', label: 'Danh sách link', icon: <Rows3Icon /> },
+  { key: 'posters', label: 'Báo cáo người đăng', icon: <UserRoundIcon /> },
   { key: 'summary', label: 'Tổng kết', icon: <ChartColumnIcon /> },
   { key: 'live', label: 'Kết quả quét', icon: <RadioIcon /> },
   { key: 'nostats', label: 'Không số liệu', icon: <EyeOffIcon />, tone: 'text-warning' },
@@ -236,19 +238,54 @@ const TABS: Array<{ key: AdminTab; label: string; icon: ReactNode; tone?: string
   { key: 'logs', label: 'Nhật ký', icon: <TerminalIcon /> },
 ];
 
+// The server keeps the newest results of a run (riviu/scan_state.py MAX_KEPT_RESULTS) for pages
+// opened after them; a longer run shows those and says how many links it scanned in all.
+function monthLabel(thang: string) {
+  const [year, month] = thang.split('-');
+  return year && month ? `Tháng ${Number(month)}/${year}` : thang;
+}
+
+/** The last scan this page knows of: its month, whether it is the month shown, and how much of it is listed. */
+function useLastScan() {
+  const scan = useApp(state => state.scan);
+  const shownMonth = useApp(state => state.rd.thang[state.activePlatform]);
+  return useMemo(() => {
+    const month = scan.runContext?.sheetName || '';
+    const listed = scan.rows.length ? new Set(scan.rows.map(row => row.key)).size : 0;
+    const scanned = Math.max(scan.progress?.processed ?? 0, listed);
+    const busy = scanIsBusy(scan.phase);
+    return { month, listed, scanned, busy, sameMonth: busy || !month || month === shownMonth };
+  }, [scan, shownMonth]);
+}
+
+function LastScanNote() {
+  const last = useLastScan();
+  if (!last.month || !last.scanned) return null;
+  const parts = [`${last.busy ? 'Đang quét' : 'Lần quét gần nhất'}: ${monthLabel(last.month)}`, `${formatNumber(last.scanned)} link đã quét`];
+  if (last.listed < last.scanned) parts.push(`dưới đây là ${formatNumber(last.listed)} kết quả mới nhất`);
+  return (
+    <p className={cn('border-b px-3 py-2 text-xs', last.sameMonth ? 'text-muted-foreground' : 'bg-warning/10 text-foreground')} data-testid="last-scan-note">
+      {parts.join(' · ')}{!last.sameMonth && ' (không phải tháng đang xem)'}
+    </p>
+  );
+}
+
 function useTabCounts(): Record<AdminTab, number | null> {
   const scan = useApp(state => state.scan);
   const logCount = useApp(state => state.logs.length);
   const rows = useApp(state => (state.rd.table.state === 'ready' ? state.rd.table.rows.length : null));
+  const last = useLastScan();
   return useMemo(() => ({
     sheet: rows,
+    posters: null,
     summary: null,
-    live: scan.rows.length ? new Set(scan.rows.map(row => row.key)).size : 0,
+    // Links the run scanned in all (not only those still listed); none for another month's run.
+    live: last.sameMonth ? last.scanned : null,
     nostats: failedLinksForKind(scan.failed, 'nostats').length,
     errors: failedLinksForKind(scan.failed, 'errors').length,
     duplicates: scan.duplicates.length,
     logs: logCount,
-  }), [scan, logCount, rows]);
+  }), [scan, logCount, rows, last]);
 }
 
 function TabActions({ tab }: { tab: AdminTab }) {
@@ -314,12 +351,12 @@ export function AdminWorkspace() {
           );
         })}
       </nav>
-      {tab === 'sheet' ? <LinkTablePanel /> : tab === 'summary' ? <SummaryPanel /> : (
+      {tab === 'sheet' ? <LinkTablePanel /> : tab === 'posters' ? <PosterPanel /> : tab === 'summary' ? <SummaryPanel /> : (
         <section className="flex min-h-[26rem] min-w-0 flex-col overflow-hidden rounded-xl border bg-card shadow-xs md:max-h-[calc(100dvh-12rem)]">
           {tab !== 'live' && (
             <div className="flex flex-wrap items-center justify-end gap-1.5 border-b px-3 py-2"><TabActions tab={tab} /></div>
           )}
-          {tab === 'live' && <LivePanel onlySuccess={false} hideSheet />}
+          {tab === 'live' && <><LastScanNote /><LivePanel onlySuccess={false} hideSheet /></>}
           {(tab === 'nostats' || tab === 'errors') && <FailurePanel kind={tab} />}
           {tab === 'duplicates' && <DuplicatesPanel />}
           {tab === 'logs' && <LogsPanel />}

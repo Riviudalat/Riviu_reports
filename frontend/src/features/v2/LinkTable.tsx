@@ -97,13 +97,13 @@ const KIND_TAGS: Record<Exclude<LinkKind, ''>, { label: string; className: strin
 };
 
 const tag = 'inline-flex shrink-0 items-center rounded px-1.5 py-px text-[11px] font-semibold leading-4';
-const th = 'sticky top-[var(--app-header-h,0px)] z-10 truncate border-b bg-card px-2.5 py-2.5 text-left text-xs font-medium text-muted-foreground';
-const td = 'border-b border-border/60 px-2.5 py-2 align-middle';
+export const th = 'sticky top-[var(--app-header-h,0px)] z-10 truncate border-b bg-card px-2.5 py-2.5 text-left text-xs font-medium text-muted-foreground';
+export const td = 'border-b border-border/60 px-2.5 py-2 align-middle';
 
 // Names shown in the cell; more than this collapse into "+N" (the tooltip lists every one).
 const PARTNER_CHIPS = 3;
 
-function Partners({ names }: { names: string[] }) {
+export function Partners({ names }: { names: string[] }) {
   if (!names.length) return null;
   const shown = names.slice(0, PARTNER_CHIPS);
   const chips = (
@@ -141,7 +141,7 @@ function copyLink(url: string) {
 }
 
 /** One click selects, a double click opens, Ctrl/⌘ + click or Ctrl/⌘ + C copies; right-click keeps the browser's own link menu. */
-function LinkCell({ url, resolved, exclusive }: { url: string; resolved?: string; exclusive: boolean }) {
+export function LinkCell({ url, resolved, exclusive }: { url: string; resolved?: string; exclusive: boolean }) {
   // A short vt./vm. link shows the post it led to on its last scan; it still opens and copies as entered.
   const shown = !linkKind(url) && resolved && linkKind(resolved) ? resolved : url;
   const { head, tail } = shortLink(shown);
@@ -188,7 +188,7 @@ function LinkCell({ url, resolved, exclusive }: { url: string; resolved?: string
   );
 }
 
-function StatusPill({ row }: { row: RdRow }) {
+export function StatusPill({ row }: { row: RdRow }) {
   const status = scanStatusView(row);
   return (
     <span className={cn('inline-flex max-w-full shrink-0 truncate whitespace-nowrap rounded-full px-2 py-0.5 text-xs font-semibold', STATUS_TONE[status.tone])} title={status.title}>
@@ -214,11 +214,11 @@ function Row({ row, platform, showNguoiAir, showUpdated }: { row: RdRow; platfor
   );
 }
 
-const ROW_RENDER_LIMIT = 3000;
+export const ROW_RENDER_LIMIT = 3000;
 
 // From 1280px wide the table also shows Người đăng and Cập nhật; narrower, those give their room
 // to Đối tác (the page header already says when the numbers were last updated).
-const WIDE_QUERY = '(min-width: 1280px)';
+export const WIDE_QUERY = '(min-width: 1280px)';
 
 // Phones get cards a page at a time ("Xem thêm"), so a month of links never builds thousands at once.
 const CARD_STEP = 100;
@@ -240,7 +240,7 @@ function LinkCard({ row, platform }: { row: RdRow; platform: PlatformKey }) {
   );
 }
 
-function LinkCards({ rows, platform, totals, filtered, emptyText }: {
+export function LinkCards({ rows, platform, totals, filtered, emptyText }: {
   rows: RdRow[]; platform: PlatformKey; totals: Record<string, number | null>; filtered: boolean; emptyText: string;
 }) {
   const [limit, setLimit] = useState(CARD_STEP);

@@ -140,6 +140,10 @@ def test_snapshot_metadata_and_terminal_failure(isolated_backend, monkeypatch):
     assert snapshot["status"]["phase"] == "failed"
     assert snapshot["results"][0]["platform"] == "threads"
     assert snapshot["results"][0]["views"] is None
+    # The run's log lines stay in the snapshot, so a page opened after the scan still shows them.
+    logs = snapshot["logs"]
+    assert logs and logs == [message for message in connection.messages if message["type"] == "log"]
+    assert [log["seq"] for log in logs] == sorted({log["seq"] for log in logs}) and all(log["at"] for log in logs)
     assert all(message["runId"] == snapshot["runId"] for message in connection.messages)
     assert not any(message.get("data", {}).get("phase") == "completed" for message in connection.messages)
 
