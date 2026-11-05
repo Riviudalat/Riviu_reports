@@ -146,8 +146,9 @@ export function LinkCell({ url, resolved, exclusive }: { url: string; resolved?:
   const shown = !linkKind(url) && resolved && linkKind(resolved) ? resolved : url;
   const { head, tail } = shortLink(shown);
   const kind = linkKind(shown);
-  // Shown on hover or keyboard focus only, so it never squeezes the link text; always on touch screens.
-  const icon = 'hidden shrink-0 rounded p-1 text-muted-foreground hover:bg-muted hover:text-foreground focus-visible:inline-flex group-hover:inline-flex group-focus-within:inline-flex pointer-coarse:inline-flex';
+  // Its space is always kept and only its visibility changes on hover or keyboard focus, so the link
+  // text never moves or gets cut shorter when the pointer comes in; always visible on touch screens.
+  const icon = 'inline-flex shrink-0 rounded p-1 text-muted-foreground opacity-0 transition-opacity hover:bg-muted hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100 group-focus-within:opacity-100 pointer-coarse:opacity-100';
   return (
     // A container: the cell decides from its own width whether the link head fits.
     <span className="@container/link group flex min-w-0 items-center gap-1.5">
