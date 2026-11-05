@@ -76,8 +76,7 @@ export function ReportContext() {
       <MonthSelect />
       {updated && <span className="text-sm text-muted-foreground" data-testid="last-update">{updated}</span>}
       <ScanStatePill />
-      {/* A darker orange than the brand's: white text on #ff6b00 is too faint (about 2.9:1); this is about 5:1. */}
-      <Button className="ml-auto h-9 bg-orange-700 font-semibold text-white shadow-sm hover:bg-orange-800 dark:bg-primary dark:text-primary-foreground dark:hover:bg-primary/90" onClick={() => openModal('export')} disabled={!thang} data-testid="open-export">
+      <Button className="ml-auto h-9" onClick={() => openModal('export')} disabled={!thang} data-testid="open-export">
         <DownloadIcon /> Xuất báo cáo
       </Button>
     </section>
