@@ -10,7 +10,9 @@ POST /riviu-data/export-report {"platform", "thang", "by": "poster", "posters": 
 `months` lists the month sheets (newest first) and `rows` the posts of one month with their
 metrics and scan status, for the web app's table. The report routes give the same rows,
 partner list, filters and Excel files as /report-partners and /export-report on a workbook,
-read from the soft-delete view v_<platform> for one `thang_nam` month. `report-posters` and
+read from the soft-delete view v_<platform> for one `thang_nam` month, as its last finished scan
+left it (`riviu.store.published`: links added since that scan started, and a running scan's
+numbers, appear only when a scan of the month ends). `report-posters` and
 `by: "poster"` do the same per Người đăng (nguoi_air; a blank one is "Chưa rõ người đăng"), one
 report per poster with an extra ĐỐI TÁC column. All of them are reads the public viewer makes (`security.VIEWER_GET_PATHS` / `VIEWER_POST_PATHS`).
 """
@@ -26,6 +28,7 @@ from riviu import internal_scan
 from riviu.reports import build_export_payload_from_rows, build_poster_export_payload_from_rows, poster_link_counts
 from riviu.source_files import content_disposition
 from riviu.store import config as store_config
+from riviu.store import published
 from riviu.store.rules import ALL_REPORT_METRICS, REPORT_METRIC_COLUMNS, MonthError, current_thang, parse_thang
 from riviu.workbook.constants import LAST_UPDATE_COLUMN
 from riviu.workbook.report_rows import partner_link_counts
@@ -71,7 +74,11 @@ async def riviu_data_months(platform: str = "tiktok"):
         return _unavailable(error)
     return {
         "platform": platform,
-        "months": [{"thang": thang, "label": month_label(thang), "rows": rows} for thang, rows in months],
+        # A month's count follows its published snapshot once one is kept (store/published.py).
+        "months": [
+            {"thang": thang, "label": month_label(thang), "rows": published.kept_count(platform, thang) if published.kept_count(platform, thang) is not None else rows}
+            for thang, rows in months
+        ],
         "defaultThang": default_month([thang for thang, _ in months]),
     }
 
@@ -104,7 +111,7 @@ async def riviu_data_rows(platform: str = "tiktok", thang: str = ""):
     if denied is not None:
         return denied
     try:
-        sheet_rows = await internal_scan.make_store(platform).report_rows(thang, with_ids=True)
+        sheet_rows = await published.report_rows(internal_scan.make_store(platform), thang)
     except Exception as error:  # noqa: BLE001
         return _unavailable(error)
     return {
@@ -119,7 +126,7 @@ async def riviu_data_report_partners(platform: str = "tiktok", thang: str = "", 
     if denied is not None:
         return denied
     try:
-        sheet_rows = await internal_scan.make_store(platform).report_rows(thang)
+        sheet_rows = await published.report_rows(internal_scan.make_store(platform), thang)
     except Exception as error:  # noqa: BLE001
         return _unavailable(error)
     partners = partner_link_counts(
@@ -135,7 +142,7 @@ async def riviu_data_report_posters(platform: str = "tiktok", thang: str = "", a
     if denied is not None:
         return denied
     try:
-        sheet_rows = await internal_scan.make_store(platform).report_rows(thang, with_ids=True)
+        sheet_rows = await published.report_rows(internal_scan.make_store(platform), thang)
     except Exception as error:  # noqa: BLE001
         return _unavailable(error)
     posters = poster_link_counts(sheet_rows.rows, apply_min_views=apply_min_views, min_views=max(int(min_views or 0), 0))
@@ -158,7 +165,7 @@ async def riviu_data_export_report(data: dict):
     except (TypeError, ValueError):
         min_views = 100
     try:
-        sheet_rows = await internal_scan.make_store(platform).report_rows(thang, with_ids=by_poster)
+        sheet_rows = await published.report_rows(internal_scan.make_store(platform), thang)
     except Exception as error:  # noqa: BLE001
         return _unavailable(error)
     build = build_poster_export_payload_from_rows if by_poster else build_export_payload_from_rows

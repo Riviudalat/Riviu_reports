@@ -144,6 +144,15 @@ Authorization: Bearer <token with scope scan:run>
 
 ## Reports
 
+**Published snapshot (2026-11).** Every `/riviu-data/*` report read (`rows`, `report-partners`,
+`report-posters`, `export-report`, and the `months` count once kept) goes through
+`riviu/store/published.py`: a month shows what its last finished scan (`scan_run` phase `hoan_tat`
+or `dung_som`) left, i.e. the posts added before that scan started (`v.tao_luc < started_at`), read
+once and kept in memory for that scan_run. Links staff add afterwards, and the numbers a running
+scan is writing, appear only when the next scan of the month ends (both scan paths call
+`published.refresh` after closing their scan_run). A month with no finished scan shows its rows as
+they are now. The web app has no "Làm mới" button: it reloads the month when a scan ends.
+
 `GET /riviu-data/report-partners?platform=&thang=&apply_min_views=&min_views=` and
 `POST /riviu-data/export-report {"platform","thang","partners","applyMinViews","minViews"}` return the
 same partner list and the same Excel files as `/report-partners` / `/export-report` on a workbook

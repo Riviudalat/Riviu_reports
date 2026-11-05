@@ -161,7 +161,8 @@ def _scan_query(platform):
     )
 
 
-def _report_query(platform):
+def _report_query(platform, created_before=False):
+    """created_before: also keep only posts added before $3 (the published snapshot, store/published.py)."""
     table = _table(platform)
     if platform == "tiktok":
         metrics = "c.luot_xem, c.tim, c.binh_luan, c.luot_luu, c.chia_se"
@@ -173,8 +174,18 @@ def _report_query(platform):
         # Read through jsonb so the query also works before Riviu Data adds nguoi_air (0013).
         f"c.cap_nhat_lan_cuoi, c.trang_thai_quet, to_jsonb(v) ->> 'nguoi_air' AS nguoi_air{links} "
         + _MONTH_FROM.format(t=table)
+        + (" AND v.tao_luc < $3" if created_before else "")
         + " ORDER BY v.id"
     )
+
+
+# The month's last scan that ran to its end (stopped early counts: it saved what it read), and
+# whether a scan of that month is running now.
+_LAST_FINISHED_SCAN = (
+    "SELECT id, started_at, EXISTS (SELECT 1 FROM public.scan_run WHERE platform = $1 AND thang_nam = $2 "
+    f"AND phase = '{PHASE_RUNNING}') AS running FROM public.scan_run WHERE platform = $1 AND thang_nam = $2 "
+    f"AND phase IN ('{PHASE_DONE}', '{PHASE_STOPPED}') AND finished_at IS NOT NULL ORDER BY finished_at DESC LIMIT 1"
+)
 
 
 def tiktok_scan_rows(records, label, selected_keys=None):
@@ -278,9 +289,20 @@ class PostgresStore:
             await conn.close()
         return [(f"{record['thang_nam'].year:04d}-{record['thang_nam'].month:02d}", int(record["rows"])) for record in records]
 
-    async def report_rows(self, thang, *, conn=None, with_ids=False):
+    async def last_finished_scan(self, thang):
+        """(scan_run id, started_at, a scan of the month running now) of the month's last finished scan, or None."""
+        month_start, _ = rules.parse_thang(thang)
+        conn = await self.connect()
+        try:
+            record = await conn.fetchrow(_LAST_FINISHED_SCAN, self.platform, month_start)
+        finally:
+            await conn.close()
+        return (record["id"], record["started_at"], record["running"]) if record else None
+
+    async def report_rows(self, thang, *, conn=None, with_ids=False, created_before=None):
         """The month's report rows (same dict keys as the workbook path), from v_<platform>;
-        `with_ids` adds each post's id as `_id` and its Người air as `_nguoiAir` (the web app's table)."""
+        `with_ids` adds each post's id as `_id` and its Người air as `_nguoiAir` (the web app's table);
+        `created_before` (a datetime) leaves out posts added since then."""
         from riviu.workbook.platforms import get_platform
 
         spec = get_platform(self.platform)
@@ -289,7 +311,10 @@ class PostgresStore:
         conn = conn or await self.connect()
         try:
             async with conn.transaction(isolation="repeatable_read", readonly=True):
-                records = await conn.fetch(_report_query(self.platform), month_start, month_end)
+                if created_before is None:
+                    records = await conn.fetch(_report_query(self.platform), month_start, month_end)
+                else:
+                    records = await conn.fetch(_report_query(self.platform, True), month_start, month_end, created_before)
         finally:
             if own:
                 await conn.close()

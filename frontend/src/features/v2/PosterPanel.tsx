@@ -1,6 +1,5 @@
 import { useMemo, useState } from 'react';
-import { RefreshCwIcon, SearchIcon, XIcon } from 'lucide-react';
-import { Button } from '@/components/ui/button';
+import { SearchIcon, XIcon } from 'lucide-react';
 import { Input, Skeleton } from '@/components/ui/misc';
 import { Picker, type PickerOption } from '@/components/ui/picker';
 import { formatNumber, formatResultNumber } from '@/lib/format';
@@ -9,7 +8,6 @@ import { NO_POSTER, columnTotals, comparePosters, filterRows, metricColumns, pos
 import { DESKTOP_QUERY, useMediaQuery } from '@/lib/useMedia';
 import { cn } from '@/lib/utils';
 import { useApp } from '@/state/app';
-import { refreshView } from '@/state/riviuData';
 import { LinkCards, LinkCell, Partners, ROW_RENDER_LIMIT, StatusPill, WIDE_QUERY, td, th } from './LinkTable';
 
 function PosterRow({ row, platform, links, showUpdated }: { row: RdRow; platform: PlatformKey; links: number; showUpdated: boolean }) {
@@ -65,7 +63,7 @@ export function PosterPanel({ className }: { className?: string }) {
             {table.state === 'ready' ? `${formatNumber(counts.size)} người · ${formatNumber(filtered ? rows.length : allRows.length)} link` : ''}
           </span>
         </h2>
-        <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 sm:flex sm:w-auto">
+        <div className="flex w-full min-w-0 flex-col gap-2 sm:w-auto sm:flex-row sm:items-center">
           <Picker
             className="w-full sm:w-56"
             value={poster}
@@ -79,7 +77,7 @@ export function PosterPanel({ className }: { className?: string }) {
             align="end"
             contentClassName="w-72"
           />
-          <div className="relative col-span-2 row-start-1 min-w-0 sm:w-64">
+          <div className="relative order-first min-w-0 sm:order-none sm:w-64">
             <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input type="search" className="pl-8 pr-8" placeholder="Tìm kênh, link, đối tác…" value={search} onChange={event => setSearch(event.target.value)} aria-label="Tìm trong báo cáo người đăng" />
             {search && (
@@ -88,9 +86,6 @@ export function PosterPanel({ className }: { className?: string }) {
               </button>
             )}
           </div>
-          <Button variant="outline" size="icon" onClick={() => void refreshView()} title="Tải lại số liệu mới nhất" aria-label="Làm mới">
-            <RefreshCwIcon />
-          </Button>
         </div>
       </div>
       <div className="min-h-0 flex-1 border-t">

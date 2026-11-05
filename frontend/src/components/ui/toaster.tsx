@@ -18,7 +18,7 @@ export function Toaster() {
       position="bottom-right"
       closeButton
       gap={8}
-      offset={{ bottom: 16, right: 16 }}
+      offset={{ bottom: 80, right: 24 }}
       mobileOffset={{ bottom: 12, left: 12, right: 12 }}
       icons={{
         success: icon(CircleCheckIcon, 'bg-success/15 text-success'),

@@ -31,6 +31,7 @@ from riviu.proxy_utils import resolve_proxy_configs
 from riviu.reports import build_google_push_rows
 from riviu.store import config as store_config
 from riviu.store import postgres as store_postgres
+from riviu.store import published as store_published
 from riviu.store.rules import MonthError, parse_thang
 from riviu.source_files import (
     SourceRequestError,
@@ -602,6 +603,8 @@ class StoreRun:
                 await store_postgres.release_scan_lock(conn, self.platform)
             finally:
                 await conn.close()
+        # The report pages switch to this scan's numbers now that it has ended.
+        await store_published.refresh(self.store, self.thang)
 
 
 async def run_store_passes(options, events, journal):

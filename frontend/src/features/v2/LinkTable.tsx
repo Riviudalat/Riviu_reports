@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react';
 import { Tooltip as TooltipPrimitive } from 'radix-ui';
-import { CopyIcon, DownloadIcon, RefreshCwIcon, SearchIcon, XIcon } from 'lucide-react';
+import { CopyIcon, DownloadIcon, SearchIcon, XIcon } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input, Skeleton } from '@/components/ui/misc';
 import { Picker, type PickerOption } from '@/components/ui/picker';
@@ -15,7 +15,7 @@ import { DESKTOP_QUERY, useMediaQuery } from '@/lib/useMedia';
 import { cn } from '@/lib/utils';
 import { MetricGrid } from './MetricGrid';
 import { notify, openModal, platformScanBusy, useApp } from '@/state/app';
-import { monthsOf, refreshView, selectThang } from '@/state/riviuData';
+import { monthsOf, selectThang } from '@/state/riviuData';
 
 // ---- Report context: the month picker, its freshness and export ------------------------
 
@@ -317,7 +317,7 @@ export function LinkTablePanel({ className }: { className?: string }) {
             {table.state === 'ready' ? (filtered ? `${formatNumber(rows.length)} / ${formatNumber(total)}` : formatNumber(total)) : ''}
           </span>
         </h2>
-        <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-2 sm:flex sm:w-auto">
+        <div className="grid w-full min-w-0 grid-cols-2 items-center gap-2 sm:flex sm:w-auto">
           {hasNguoiAir && (
             <Picker
               className="w-full sm:w-48"
@@ -346,7 +346,7 @@ export function LinkTablePanel({ className }: { className?: string }) {
             align="end"
             contentClassName="w-72"
           />
-          <div className="relative col-span-3 row-start-1 min-w-0 sm:w-64">
+          <div className="relative col-span-2 row-start-1 min-w-0 sm:w-64">
             <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input type="search" className="pl-8 pr-8" placeholder="Tìm kênh, link, đối tác…" value={search} onChange={event => setSearch(event.target.value)} aria-label="Tìm trong danh sách link" />
             {search && (
@@ -355,9 +355,6 @@ export function LinkTablePanel({ className }: { className?: string }) {
               </button>
             )}
           </div>
-          <Button variant="outline" size="icon" onClick={() => void refreshView()} title="Tải lại số liệu mới nhất" aria-label="Làm mới">
-            <RefreshCwIcon />
-          </Button>
         </div>
       </div>
       <div className="min-h-0 flex-1 border-t" data-testid="link-table-scroll">

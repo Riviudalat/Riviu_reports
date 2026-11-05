@@ -1,5 +1,6 @@
 import { useEffect, useRef } from 'react';
 import { ChartColumnIcon, Rows3Icon, UserRoundIcon, WifiOffIcon } from 'lucide-react';
+import { BackToTop } from '@/components/ui/back-to-top';
 import { TooltipProvider } from '@/components/ui/misc';
 import type { Viewer } from '@/lib/auth';
 import { cn } from '@/lib/utils';
@@ -83,6 +84,7 @@ export function RiviuDataLayout({ adminPage }: { adminPage: boolean }) {
             </>
           ) : <ViewerWorkspace />}
         </main>
+        <BackToTop />
         <ExportDialog />
         <HistoryDialog />
         {showAdmin && (

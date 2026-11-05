@@ -20,6 +20,7 @@ from riviu import server_context as context
 from riviu.platforms.tiktok.lifecycle import finish_pending_task
 from riviu.store import config as store_config
 from riviu.store import postgres
+from riviu.store import published
 from riviu.store.rules import current_thang, parse_thang
 
 log = logging.getLogger("riviu.internal_scan")
@@ -240,6 +241,8 @@ async def _close_scan(lock_conn, session, request, run_id, phase, stop_reason, e
                 await postgres.release_scan_lock(lock_conn, request.platform)
             finally:
                 await lock_conn.close()
+    # The report pages switch to this scan's numbers now that it has ended.
+    await published.refresh(make_store(request.platform), request.thang)
     return {
         "scan_run_id": run_id, "platform": request.platform, "thang": request.thang, "trigger": request.trigger,
         "phase": phase, "stop_reason": stop_reason, "totals": totals,

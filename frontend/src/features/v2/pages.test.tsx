@@ -126,6 +126,24 @@ describe('public viewer page (/)', () => {
     expect(screen.getByTestId('row-count')).toHaveTextContent('1 / 2');
   });
 
+  it('has no refresh button, and a back-to-top button once scrolled down', async () => {
+    const scrollTo = vi.fn();
+    vi.stubGlobal('scrollTo', scrollTo);
+    renderAs(ANON, false);
+    // The numbers change only when a scan ends, and the page reloads them then by itself.
+    expect(screen.queryByRole('button', { name: 'Làm mới' })).not.toBeInTheDocument();
+    const button = screen.getByTestId('back-to-top');
+    expect(button).toHaveAttribute('aria-hidden', 'true');
+    act(() => {
+      Object.defineProperty(window, 'scrollY', { value: 1500, configurable: true });
+      window.dispatchEvent(new Event('scroll'));
+    });
+    expect(button).toHaveAttribute('aria-hidden', 'false');
+    await userEvent.click(button);
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' });
+    Object.defineProperty(window, 'scrollY', { value: 0, configurable: true });
+  });
+
   it('shows staff the Báo cáo người đăng tab too', async () => {
     renderAs(ANON, false);
     expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Danh sách link', 'Báo cáo người đăng', 'Tổng kết']);

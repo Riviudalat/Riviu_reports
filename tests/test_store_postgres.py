@@ -492,3 +492,52 @@ def test_requested_tiktok_scan_uses_the_schedules_workers_mode_and_proxy(monkeyp
     asyncio.run(internal_scan.scan_tiktok(type("S", (), {"label": "2026-10"})(), Events()))
     assert (seen["worker_count"], seen["use_request"], seen["browser_fallback"], seen["use_proxy"]) == (15, True, True, True)
     assert "session_cookies" not in seen
+
+
+def test_report_pages_show_each_month_as_its_last_finished_scan_left_it():
+    import datetime as dt
+
+    from riviu.store import published
+    from riviu.workbook.report_rows import SheetReportRows
+
+    class Store:
+        platform = "tiktok"
+
+        def __init__(self):
+            self.last, self.reads = None, []
+
+        async def last_finished_scan(self, thang):
+            return self.last
+
+        async def report_rows(self, thang, *, with_ids=False, created_before=None):
+            self.reads.append((thang, with_ids, created_before))
+            return SheetReportRows(rows=({"n": len(self.reads)},), partners=())
+
+    published.clear()
+    store = Store()
+    started = dt.datetime(2026, 11, 5, 7, 30)
+    # A month nobody scans: the rows as they are now, every time.
+    asyncio.run(published.report_rows(store, "2026-08"))
+    assert store.reads == [("2026-08", True, None)]
+    # Scanned: only links added before that scan started, read once and kept for that scan.
+    store.last = (63, started, False)
+    first = asyncio.run(published.report_rows(store, "2026-10"))
+    assert store.reads[-1] == ("2026-10", True, started)
+    assert asyncio.run(published.report_rows(store, "2026-10")) is first and len(store.reads) == 2
+    assert published.kept_count("tiktok", "2026-10") == 1
+    # The next scan of the month is writing numbers: the page keeps the last finished one's.
+    store.last = (63, started, True)
+    assert asyncio.run(published.report_rows(store, "2026-10")) is first and len(store.reads) == 2
+    # It ended: its snapshot replaces the old one.
+    later = dt.datetime(2026, 11, 6, 7, 30)
+    store.last = (64, later, False)
+    asyncio.run(published.refresh(store, "2026-10"))
+    assert store.reads[-1] == ("2026-10", True, later)
+    assert asyncio.run(published.report_rows(store, "2026-10")) is not first and len(store.reads) == 3
+    # After a restart during a scan nothing is kept: read now (newer links still out), not kept.
+    published.clear()
+    store.last = (64, later, True)
+    asyncio.run(published.report_rows(store, "2026-10"))
+    asyncio.run(published.report_rows(store, "2026-10"))
+    assert store.reads[-2:] == [("2026-10", True, later)] * 2 and published.kept_count("tiktok", "2026-10") is None
+    published.clear()
