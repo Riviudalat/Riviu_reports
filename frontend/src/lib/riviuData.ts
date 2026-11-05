@@ -119,8 +119,13 @@ export function reportPartnersQuery(platform: PlatformKey, thang: string, applyM
   return new URLSearchParams({ platform, thang, apply_min_views: applyMinViews ? 'true' : 'false', min_views: String(minViews) }).toString();
 }
 
-export function exportBody(platform: PlatformKey, thang: string, partners: string[], applyMinViews: boolean, minViews: number) {
-  return { platform, thang, partners, applyMinViews, minViews };
+export type ExportSubject = 'partner' | 'poster';
+
+/** POST /riviu-data/export-report: one report per partner, or per Người đăng (`by: "poster"`). */
+export function exportBody(platform: PlatformKey, thang: string, names: string[], applyMinViews: boolean, minViews: number, subject: ExportSubject = 'partner') {
+  return subject === 'poster'
+    ? { platform, thang, by: 'poster', posters: names, applyMinViews, minViews }
+    : { platform, thang, partners: names, applyMinViews, minViews };
 }
 
 /** "2026-10" -> "Tháng 10/2026" (the server sends its own label; this is the fallback). */
@@ -134,12 +139,35 @@ export function monthLabel(thang: string): string {
 export interface RowFilter {
   search: string;
   partner: string;
+  /** A Người đăng name (NO_POSTER for links naming nobody); '' for every poster. */
+  poster?: string;
 }
 
-export function filterRows(rows: readonly RdRow[], { search, partner }: RowFilter): RdRow[] {
+/** Label for a link whose sheet row names no poster (the server's reports use the same text). */
+export const NO_POSTER = 'Chưa rõ người đăng';
+
+export function posterOf(row: RdRow): string {
+  return row.nguoiAir?.trim() || NO_POSTER;
+}
+
+/** A → Z with NO_POSTER last. */
+export function comparePosters(a: string, b: string): number {
+  return (a === NO_POSTER ? 1 : 0) - (b === NO_POSTER ? 1 : 0) || a.localeCompare(b, 'vi');
+}
+
+/** Links per poster over the given rows, and the rows grouped by poster (stable within a poster). */
+export function posterReport(rows: readonly RdRow[]): { counts: Map<string, number>; sorted: RdRow[] } {
+  const counts = new Map<string, number>();
+  for (const row of rows) counts.set(posterOf(row), (counts.get(posterOf(row)) || 0) + 1);
+  const sorted = [...rows].sort((a, b) => comparePosters(posterOf(a), posterOf(b)));
+  return { counts, sorted };
+}
+
+export function filterRows(rows: readonly RdRow[], { search, partner, poster }: RowFilter): RdRow[] {
   const needle = normalizeVietnameseKey(search);
   return rows.filter(row => {
     if (partner && !row.partners.includes(partner)) return false;
+    if (poster && posterOf(row) !== poster) return false;
     if (!needle) return true;
     const text = normalizeVietnameseKey([row.channel, row.nguoiAir || '', row.link, row.partners.join(' '), row.ngayAir, row.status].join(' '));
     return text.includes(needle);

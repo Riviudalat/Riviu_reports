@@ -7,7 +7,8 @@ import { Picker, type PickerOption } from '@/components/ui/picker';
 import { formatNumber, formatResultNumber } from '@/lib/format';
 import { PLATFORM_KEYS, platformConfig, type PlatformKey } from '@/lib/platforms';
 import {
-  columnTotals, filterRows, lastUpdateText, linkKind, metricColumns, scanStatusView, shortLink, shortUpdate, type LinkKind, type RdRow, type ScanStatusTone,
+  columnTotals, comparePosters, filterRows, lastUpdateText, linkKind, metricColumns, posterReport, scanStatusView, shortLink, shortUpdate,
+  type LinkKind, type RdRow, type ScanStatusTone,
 } from '@/lib/riviuData';
 import { scanIsBusy, viewerScanText } from '@/lib/scan';
 import { DESKTOP_QUERY, useMediaQuery } from '@/lib/useMedia';
@@ -54,7 +55,8 @@ export function MonthSelect() {
       searchable={false}
       aria-label={`Tháng báo cáo ${platformConfig(platform).label}`}
       data-testid="month-select"
-      triggerClassName="-ml-2 h-10 rounded-lg px-2 text-xl font-semibold tracking-tight hover:bg-muted sm:text-[22px]"
+      // Highlighted: the month decides every number on the page.
+      triggerClassName="h-10 rounded-lg border border-primary/35 bg-primary/10 px-3 text-xl font-semibold tracking-tight text-primary shadow-xs hover:bg-primary/15 sm:text-[22px] [&_svg]:text-primary"
       contentClassName="w-64"
     />
   );
@@ -74,7 +76,8 @@ export function ReportContext() {
       <MonthSelect />
       {updated && <span className="text-sm text-muted-foreground" data-testid="last-update">{updated}</span>}
       <ScanStatePill />
-      <Button className="ml-auto h-9" onClick={() => openModal('export')} disabled={!thang} data-testid="open-export">
+      {/* A darker orange than the brand's: white text on #ff6b00 is too faint (about 2.9:1); this is about 5:1. */}
+      <Button className="ml-auto h-9 bg-orange-700 font-semibold text-white shadow-sm hover:bg-orange-800 dark:bg-primary dark:text-primary-foreground dark:hover:bg-primary/90" onClick={() => openModal('export')} disabled={!thang} data-testid="open-export">
         <DownloadIcon /> Xuất báo cáo
       </Button>
     </section>
@@ -283,7 +286,15 @@ export function LinkTablePanel({ className }: { className?: string }) {
     ];
   }, [table]);
   const partner = partnerOptions.some(option => option.value && option.value === partnerFilter) ? partnerFilter : '';
-  const rows = useMemo(() => filterRows(allRows, { search, partner }), [allRows, search, partner]);
+  // Người đăng: every poster by default; links naming nobody are "Chưa rõ người đăng".
+  const [posterFilter, setPosterFilter] = useState('');
+  const posterCounts = useMemo(() => posterReport(allRows).counts, [allRows]);
+  const posterOptions = useMemo<PickerOption[]>(() => [
+    { value: '', label: 'Tất cả người đăng', hint: formatNumber(allRows.length) },
+    ...[...posterCounts.keys()].sort(comparePosters).map(name => ({ value: name, label: name, hint: formatNumber(posterCounts.get(name) || 0) })),
+  ], [posterCounts, allRows.length]);
+  const poster = posterCounts.has(posterFilter) ? posterFilter : '';
+  const rows = useMemo(() => filterRows(allRows, { search, partner, poster }), [allRows, search, partner, poster]);
   const totals = useMemo(() => columnTotals(rows, platform), [rows, platform]);
   // Người air shows once Riviu Data stores it (migration 0013), so an empty column never takes space.
   const desktop = useMediaQuery(DESKTOP_QUERY);
@@ -292,7 +303,7 @@ export function LinkTablePanel({ className }: { className?: string }) {
   const showNguoiAir = wide && hasNguoiAir;
   const showUpdated = wide;
   const total = allRows.length;
-  const filtered = Boolean(search.trim() || partner);
+  const filtered = Boolean(search.trim() || partner || poster);
   const columns = metricColumns(platform);
   const leading = showNguoiAir ? 4 : 3;
   const trailing = showUpdated ? 3 : 2;
@@ -306,9 +317,24 @@ export function LinkTablePanel({ className }: { className?: string }) {
             {table.state === 'ready' ? (filtered ? `${formatNumber(rows.length)} / ${formatNumber(total)}` : formatNumber(total)) : ''}
           </span>
         </h2>
-        <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_auto] items-center gap-2 sm:flex sm:w-auto">
+        <div className="grid w-full min-w-0 grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-2 sm:flex sm:w-auto">
+          {hasNguoiAir && (
+            <Picker
+              className="w-full sm:w-48"
+              value={poster}
+              onChange={setPosterFilter}
+              options={posterOptions}
+              placeholder="Tất cả người đăng"
+              searchable
+              searchPlaceholder="Tìm người đăng…"
+              aria-label="Lọc theo người đăng"
+              disabled={posterOptions.length <= 1}
+              align="end"
+              contentClassName="w-64"
+            />
+          )}
           <Picker
-            className="w-full sm:w-56"
+            className={cn('w-full sm:w-56', !hasNguoiAir && 'col-span-2')}
             value={partner}
             onChange={setPartnerFilter}
             options={partnerOptions}
@@ -320,7 +346,7 @@ export function LinkTablePanel({ className }: { className?: string }) {
             align="end"
             contentClassName="w-72"
           />
-          <div className="relative col-span-2 row-start-1 min-w-0 sm:w-64">
+          <div className="relative col-span-3 row-start-1 min-w-0 sm:w-64">
             <SearchIcon className="pointer-events-none absolute left-2.5 top-1/2 size-4 -translate-y-1/2 text-muted-foreground" />
             <Input type="search" className="pl-8 pr-8" placeholder="Tìm kênh, link, đối tác…" value={search} onChange={event => setSearch(event.target.value)} aria-label="Tìm trong danh sách link" />
             {search && (
@@ -341,7 +367,7 @@ export function LinkTablePanel({ className }: { className?: string }) {
         {table.state === 'ready' && !desktop && (
           <LinkCards
             // A new filter starts again from the first page of cards.
-            key={`${platform}:${search}:${partner}`}
+            key={`${platform}:${search}:${partner}:${poster}`}
             rows={rows}
             platform={platform}
             totals={totals}

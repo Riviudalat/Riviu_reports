@@ -539,3 +539,41 @@ def test_multi_partner_export_parses_the_sheet_once(tmp_path, monkeypatch):
         "Partner B": ["https://www.tiktok.com/@b/video/2", None],
         "Partner C": ["https://www.tiktok.com/@c/video/3", None],
     }
+
+
+def test_poster_export_gives_one_report_per_poster_with_its_partners():
+    import zipfile
+
+    from riviu import reports
+    from riviu.workbook.report_rows import SheetReportRows
+
+    def row(link, poster, partners, views=500):
+        return {"NGÀY AIR": "01/11/2026", "TÊN KÊNH": "Kênh", "LINK AIR": link, "LƯỢT XEM": views, "TIM": 1,
+                "BÌNH LUẬN": 0, "LƯỢT LƯU": 0, "CHIA SẺ": 0, "partners": partners, "_nguoiAir": poster}
+    rows = (
+        row("https://www.tiktok.com/@a/video/1", "Phát", ["Cafe A", "Spa B"]),
+        row("https://www.tiktok.com/@a/photo/2", "Phát", ["Cafe A"], views=20),
+        row("https://www.tiktok.com/@a/video/3", "", ["Spa B"]),
+        row("https://www.tiktok.com/@a/video/4", "Bot auto", ["Cafe A"]),
+    )
+    sheet_rows = SheetReportRows(rows=rows, partners=("Cafe A", "Spa B"))
+    # Each link counts once for its poster; a blank poster is listed last as "Chưa rõ người đăng".
+    assert reports.poster_link_counts(rows, apply_min_views=True, min_views=100) == [
+        {"name": "Bot auto", "linkCount": 1, "rawLinkCount": 1},
+        {"name": "Phát", "linkCount": 1, "rawLinkCount": 2},
+        {"name": "Chưa rõ người đăng", "linkCount": 1, "rawLinkCount": 1},
+    ]
+    payload = reports.build_poster_export_payload_from_rows(sheet_rows, ["Phát", "Chưa rõ người đăng"], False, 100, "2026-11")
+    assert payload["filename"].startswith("bao_cao_nguoi_dang ") and payload["filename"].endswith(".zip")
+    with zipfile.ZipFile(io.BytesIO(payload["content"])) as archive:
+        books = {name.split(" ")[0]: load_workbook(io.BytesIO(archive.read(name))).active for name in archive.namelist()}
+    phat = books["Phát"]
+    assert phat["B1"].value == "BÁO CÁO TIKTOK - NGƯỜI ĐĂNG: Phát"
+    assert [cell.value for cell in phat[3]][-2:] == ["ĐỐI TÁC", "LOẠI BÀI"]
+    assert [(phat.cell(r, 3).value, phat.cell(r, 9).value, phat.cell(r, 10).value) for r in (4, 5)] == [
+        ("https://www.tiktok.com/@a/video/1", "Cafe A, Spa B", "Video lịch trình"),
+        ("https://www.tiktok.com/@a/photo/2", "Cafe A", "Ảnh độc quyền"),
+    ]
+    assert books["Chưa"]["B1"].value == "BÁO CÁO TIKTOK - NGƯỜI ĐĂNG: Chưa rõ người đăng"
+    with pytest.raises(ValueError):
+        reports.build_poster_export_payload_from_rows(sheet_rows, ["Không có"], False, 100, "2026-11")

@@ -5,33 +5,12 @@ import { Input, Skeleton } from '@/components/ui/misc';
 import { Picker, type PickerOption } from '@/components/ui/picker';
 import { formatNumber, formatResultNumber } from '@/lib/format';
 import { platformConfig, type PlatformKey } from '@/lib/platforms';
-import { columnTotals, filterRows, metricColumns, shortUpdate, type RdRow } from '@/lib/riviuData';
+import { NO_POSTER, columnTotals, comparePosters, filterRows, metricColumns, posterOf, posterReport, shortUpdate, type RdRow } from '@/lib/riviuData';
 import { DESKTOP_QUERY, useMediaQuery } from '@/lib/useMedia';
 import { cn } from '@/lib/utils';
 import { useApp } from '@/state/app';
 import { refreshView } from '@/state/riviuData';
 import { LinkCards, LinkCell, Partners, ROW_RENDER_LIMIT, StatusPill, WIDE_QUERY, td, th } from './LinkTable';
-
-/** Label for a link whose sheet row names no poster. */
-export const NO_POSTER = 'Chưa rõ người đăng';
-
-export function posterOf(row: RdRow): string {
-  return row.nguoiAir?.trim() || NO_POSTER;
-}
-
-/** Links per poster over the whole month, and the month's rows grouped by poster (A → Z, unknown last). */
-export function posterReport(rows: readonly RdRow[]): { counts: Map<string, number>; sorted: RdRow[] } {
-  const counts = new Map<string, number>();
-  for (const row of rows) counts.set(posterOf(row), (counts.get(posterOf(row)) || 0) + 1);
-  const rank = (name: string) => (name === NO_POSTER ? 1 : 0);
-  // Stable: within a poster the rows keep the month's own order.
-  const sorted = [...rows].sort((a, b) => {
-    const left = posterOf(a);
-    const right = posterOf(b);
-    return rank(left) - rank(right) || left.localeCompare(right, 'vi');
-  });
-  return { counts, sorted };
-}
 
 function PosterRow({ row, platform, links, showUpdated }: { row: RdRow; platform: PlatformKey; links: number; showUpdated: boolean }) {
   const poster = posterOf(row);
@@ -62,12 +41,12 @@ export function PosterPanel({ className }: { className?: string }) {
   const options = useMemo<PickerOption[]>(() => [
     { value: '', label: 'Tất cả người đăng', hint: formatNumber(allRows.length) },
     ...[...counts.keys()]
-      .sort((a, b) => (a === NO_POSTER ? 1 : b === NO_POSTER ? -1 : a.localeCompare(b, 'vi')))
+      .sort(comparePosters)
       .map(name => ({ value: name, label: name, hint: formatNumber(counts.get(name) || 0) })),
   ], [counts, allRows.length]);
   const poster = counts.has(posterFilter) ? posterFilter : '';
   const rows = useMemo(
-    () => filterRows(poster ? sorted.filter(row => posterOf(row) === poster) : sorted, { search, partner: '' }),
+    () => filterRows(sorted, { search, partner: '', poster }),
     [sorted, poster, search],
   );
   const totals = useMemo(() => columnTotals(rows, platform), [rows, platform]);

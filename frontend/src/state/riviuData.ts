@@ -90,8 +90,8 @@ export async function selectRdPlatform(platform: PlatformKey): Promise<void> {
   if (!isPlatform(platform) || platform === get().activePlatform) return;
   // Each platform keeps its own scan (they run side by side): park the shown one, show this one's.
   swapShownScan(platform);
-  // Tổng kết stays open across platforms; the scan tabs belong to the platform left behind.
-  set(state => ({ workspaceTab: state.workspaceTab === 'summary' ? 'summary' : 'sheet' }));
+  // Tổng kết and Báo cáo người đăng stay open across platforms; the scan tabs belong to the platform left behind.
+  set(state => ({ workspaceTab: state.workspaceTab === 'summary' || state.workspaceTab === 'posters' ? state.workspaceTab : 'sheet' }));
   savePlatform(platform);
   if (get().rd.months[platform] === null) await loadMonths(platform);
   await loadRows();

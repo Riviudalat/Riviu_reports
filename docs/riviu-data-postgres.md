@@ -20,7 +20,7 @@ background: Riviu Data `docs/integration-and-ops.md` §1 and §4.6, `docs/review
 | `riviu/store/postgres.py` | `PostgresStore` (reads, `open_scan`, `report_rows`), `PostgresScanSession` (buffered writes, `flush`), advisory lock and `scan_run` helpers |
 | `riviu/internal_scan.py` | The scan behind `POST /internal/scan`: lock, `scan_run`, run, close |
 | `riviu/api/internal.py` | `POST /internal/scan` (bearer token) |
-| `riviu/api/riviu_data.py` | `GET /riviu-data/report-partners`, `POST /riviu-data/export-report` |
+| `riviu/api/riviu_data.py` | `GET /riviu-data/report-partners`, `GET /riviu-data/report-posters`, `POST /riviu-data/export-report` |
 
 The scanners were not forked. `run_scraper(..., store_session=...)` and
 `run_threads_scraper(..., store_session=...)` take rows from the session and send each result to
@@ -147,7 +147,10 @@ Authorization: Bearer <token with scope scan:run>
 `GET /riviu-data/report-partners?platform=&thang=&apply_min_views=&min_views=` and
 `POST /riviu-data/export-report {"platform","thang","partners","applyMinViews","minViews"}` return the
 same partner list and the same Excel files as `/report-partners` / `/export-report` on a workbook
-(same filters, totals, fills, and the formula-injection guard `set_cell_literal`, review M-13). They
+(same filters, totals, LOẠI BÀI column, and the formula-injection guard `set_cell_literal`, review M-13).
+`GET /riviu-data/report-posters` (same query) and `export-report` with `"by": "poster", "posters": [...]`
+do the same per Người đăng (`nguoi_air`; a blank one is "Chưa rõ người đăng", listed last): each link
+counts once for its poster, and each poster's report adds an ĐỐI TÁC column. They
 read one month from `v_<platform>` LEFT JOIN `bao_cao.<platform>_chi_so` in one `REPEATABLE READ` transaction.
 
 ## The web app on Riviu Data

@@ -1,5 +1,5 @@
 import { useEffect, useRef } from 'react';
-import { ChartColumnIcon, Rows3Icon, WifiOffIcon } from 'lucide-react';
+import { ChartColumnIcon, Rows3Icon, UserRoundIcon, WifiOffIcon } from 'lucide-react';
 import { TooltipProvider } from '@/components/ui/misc';
 import type { Viewer } from '@/lib/auth';
 import { cn } from '@/lib/utils';
@@ -12,6 +12,7 @@ import { LinkTablePanel, ReportContext } from './LinkTable';
 import { ExportDialog } from './ExportDialog';
 import { AdminWorkspace, ScanCard } from './ScanPanel';
 import { ScheduleDialog } from './ScheduleDialog';
+import { PosterPanel } from './PosterPanel';
 import { SummaryPanel } from './SummaryPanel';
 
 function ConnectionBanner() {
@@ -27,13 +28,14 @@ function ConnectionBanner() {
 
 const VIEWER_TABS = [
   { key: 'sheet', label: 'Danh sách link', icon: <Rows3Icon /> },
+  { key: 'posters', label: 'Báo cáo người đăng', icon: <UserRoundIcon /> },
   { key: 'summary', label: 'Tổng kết', icon: <ChartColumnIcon /> },
 ] as const;
 
-/** The read-only page: the link list or the per-partner Tổng kết, for staff and visitors alike. */
+/** The read-only page: the link list, the per-poster report or the per-partner Tổng kết, for staff and visitors alike. */
 function ViewerWorkspace() {
   const stored = useApp(state => state.workspaceTab);
-  const tab = stored === 'summary' ? 'summary' : 'sheet';
+  const tab = stored === 'summary' || stored === 'posters' ? stored : 'sheet';
   return (
     <div className="flex min-w-0 flex-1 flex-col gap-3">
       <nav className="-mx-1 flex gap-1 overflow-x-auto px-1 pb-0.5" role="tablist" aria-label="Các vùng dữ liệu">
@@ -57,7 +59,7 @@ function ViewerWorkspace() {
           );
         })}
       </nav>
-      {tab === 'summary' ? <SummaryPanel /> : <LinkTablePanel />}
+      {tab === 'summary' ? <SummaryPanel /> : tab === 'posters' ? <PosterPanel /> : <LinkTablePanel />}
     </div>
   );
 }

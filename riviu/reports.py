@@ -170,25 +170,63 @@ def add_centered_image_to_cell(ws, cell_address, image_path, max_height_px=36):
 REPORT_LOGO_MAX_HEIGHT_PX = 40
 REPORT_ICON_PX = 24
 POST_TYPE_COLUMN = "LOẠI BÀI"
+# Poster reports (one file per Người đăng) also say which partners each link is for.
+PARTNERS_COLUMN = "ĐỐI TÁC"
+NO_POSTER = "Chưa rõ người đăng"
+SUBJECT_PARTNER = "partner"
+SUBJECT_POSTER = "poster"
+SUBJECT_TITLES = {SUBJECT_PARTNER: "ĐỐI TÁC", SUBJECT_POSTER: "NGƯỜI ĐĂNG"}
 # Header text shown in the report for a source column (the rows keep their workbook names).
 REPORT_HEADER_LABELS = {"NGÀY AIR": "NGÀY ĐĂNG"}
 REPORT_COLUMN_WIDTHS = {
     "NGÀY AIR": 14, "TÊN KÊNH": 24, "LINK AIR": 60, "LƯỢT XEM": 14, "TIM": 12,
-    "BÌNH LUẬN": 14, "LƯỢT LƯU": 14, "REPOST": 14, "CHIA SẺ": 12, POST_TYPE_COLUMN: 18,
+    "BÌNH LUẬN": 14, "LƯỢT LƯU": 14, "REPOST": 14, "CHIA SẺ": 12, POST_TYPE_COLUMN: 18, PARTNERS_COLUMN: 24,
 }
 # Text columns grow to their longest value (up to this width) instead of wrapping onto two lines.
-REPORT_MAX_TEXT_WIDTH = {"TÊN KÊNH": 40, "LINK AIR": 90}
+REPORT_MAX_TEXT_WIDTH = {"TÊN KÊNH": 40, "LINK AIR": 90, PARTNERS_COLUMN: 48}
 # Room for Excel's filter button at the right of each header cell, so it never covers the label.
 REPORT_FILTER_BUTTON_WIDTH = 7
-REPORT_TEXT_COLUMNS = {"LINK AIR", "TÊN KÊNH", POST_TYPE_COLUMN}
+REPORT_TEXT_COLUMNS = {"LINK AIR", "TÊN KÊNH", POST_TYPE_COLUMN, PARTNERS_COLUMN}
 REPORT_ACCENT = "FF6B00"
 REPORT_ACCENT_TEXT = "9A3412"
 REPORT_TOTAL_FILL = "FFF7ED"
 MEDIA_LABELS = {TIKTOK_MEDIA_PHOTO: "Ảnh", TIKTOK_MEDIA_VIDEO: "Video"}
 
 
-def report_columns(spec):
-    return [*spec.report_columns, POST_TYPE_COLUMN]
+def report_columns(spec, subject=SUBJECT_PARTNER):
+    extra = [PARTNERS_COLUMN] if subject == SUBJECT_POSTER else []
+    return [*spec.report_columns, *extra, POST_TYPE_COLUMN]
+
+
+def poster_of(row):
+    """A row's Người đăng (Riviu Data's nguoi_air), or NO_POSTER when the sheet names nobody."""
+    return clean_text(row.get("_nguoiAir", "")) or NO_POSTER
+
+
+def poster_sort_key(name):
+    return (name == NO_POSTER, name.casefold())
+
+
+def poster_link_counts(rows, *, apply_min_views=True, min_views=100):
+    """[{name, linkCount, rawLinkCount}] per Người đăng, A → Z with NO_POSTER last.
+
+    Like partner_link_counts: rawLinkCount is every link of the poster, linkCount the ones the
+    report keeps (readable channel, enough views when the filter is on). Each link counts once.
+    """
+    stats = {}
+    for row in rows:
+        item = stats.setdefault(poster_of(row), {"name": poster_of(row), "linkCount": 0, "rawLinkCount": 0})
+        item["rawLinkCount"] += 1
+        if is_exportable_report_row(row, apply_min_views=apply_min_views, min_views=min_views):
+            item["linkCount"] += 1
+    return sorted(stats.values(), key=lambda item: poster_sort_key(item["name"]))
+
+
+def group_rows_by_poster(rows):
+    groups = {}
+    for row in rows:
+        groups.setdefault(poster_of(row), []).append(row)
+    return groups
 
 
 def report_header_label(header):
@@ -231,6 +269,11 @@ def report_post_type(spec, source_row):
     return f"{media} {scope}" if media else scope.capitalize()
 
 
+def report_partners_text(source_row):
+    partners = source_row.get("partners")
+    return ", ".join(clean_text(name) for name in partners if clean_text(name)) if isinstance(partners, (list, tuple)) else ""
+
+
 def report_platform_icon_path(spec):
     return os.path.join(paths.REPORT_ICONS_DIR, f"{spec.key}.png")
 
@@ -248,7 +291,7 @@ def report_column_widths(columns, values_by_column):
     return widths
 
 
-def write_report_banner(ws, spec, partner, link_count, columns, widths):
+def write_report_banner(ws, spec, partner, link_count, columns, widths, subject=SUBJECT_PARTNER):
     ws.row_dimensions[1].height = 42
     ws.row_dimensions[2].height = 26
     # Final widths first: the images below are centred from them.
@@ -261,7 +304,7 @@ def write_report_banner(ws, spec, partner, link_count, columns, widths):
     last_column = get_column_letter(len(columns))
     ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=len(columns) - 1)
     title_cell = ws["B1"]
-    title_cell.value = f"BÁO CÁO {spec.label.upper()} - ĐỐI TÁC: {partner}"
+    title_cell.value = f"BÁO CÁO {spec.label.upper()} - {SUBJECT_TITLES[subject]}: {partner}"
     title_cell.fill = PatternFill("solid", fgColor=REPORT_ACCENT)
     title_cell.font = Font(color="FFFFFF", bold=True, size=14)
     title_cell.alignment = Alignment(horizontal="center", vertical="center")
@@ -296,10 +339,13 @@ def write_report_total(ws, spec, frame, columns, total_row, border):
         cell.alignment = Alignment(horizontal="right")
 
 
-def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100, platform="tiktok", parse_date=None):
+def build_partner_report(
+    partner, rows, *, apply_min_views=True, min_views=100, platform="tiktok", parse_date=None, subject=SUBJECT_PARTNER,
+):
+    """One partner's report; with subject=SUBJECT_POSTER, one Người đăng's (titled so, plus ĐỐI TÁC)."""
     spec = get_platform(platform)
     parse_date = parse_date or report_date_parser()
-    columns = report_columns(spec)
+    columns = report_columns(spec, subject)
     valid_rows = [
         row for row in rows
         if is_exportable_report_row(row, apply_min_views=apply_min_views, min_views=min_views)
@@ -318,11 +364,12 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100, 
     for _, source_row in frame.iterrows():
         table.append([
             report_post_type(spec, source_row) if header == POST_TYPE_COLUMN
+            else report_partners_text(source_row) if header == PARTNERS_COLUMN
             else report_cell_value(header, source_row.get(header, ""), parse_date)
             for header in columns
         ])
     values_by_column = {header: [row[index] for row in table] for index, header in enumerate(columns)}
-    write_report_banner(ws, spec, partner, len(frame), columns, report_column_widths(columns, values_by_column))
+    write_report_banner(ws, spec, partner, len(frame), columns, report_column_widths(columns, values_by_column), subject)
     for col_index, header in enumerate(columns, start=1):
         cell = ws.cell(row=table_header_row, column=col_index, value=report_header_label(header))
         cell.fill = PatternFill("solid", fgColor=REPORT_ACCENT)
@@ -476,17 +523,36 @@ def build_export_payload_from_rows(sheet_rows, selected_partners, apply_min_view
     return render_export_payload(spec, partners, rows_by_partner, report_sheet, apply_min_views, min_views, export_timestamp)
 
 
-def render_export_payload(spec, partners, rows_by_partner, report_sheet, apply_min_views, min_views, export_timestamp):
-    """One .xlsx (one partner) or a .zip of partner reports, from rows grouped by partner key."""
+def build_poster_export_payload_from_rows(sheet_rows, selected_posters, apply_min_views, min_views, report_sheet, platform="tiktok"):
+    """Like build_export_payload_from_rows, one report per Người đăng (rows need `_nguoiAir`)."""
+    spec = get_platform(platform)
+    groups = group_rows_by_poster(sheet_rows.rows)
+    wanted = {clean_text(name) for name in selected_posters if clean_text(name)}
+    posters = sorted((name for name in groups if name in wanted), key=poster_sort_key)
+    if not posters:
+        raise ValueError("Không tìm thấy người đăng đã chọn trong tháng này")
+    return render_export_payload(
+        spec, posters, groups, report_sheet, apply_min_views, min_views, format_filename_datetime(), subject=SUBJECT_POSTER,
+    )
+
+
+def render_export_payload(
+    spec, partners, rows_by_partner, report_sheet, apply_min_views, min_views, export_timestamp, subject=SUBJECT_PARTNER,
+):
+    """One .xlsx (one partner) or a .zip of partner reports, from rows grouped by partner key.
+
+    With subject=SUBJECT_POSTER the names are Người đăng and `rows_by_partner` is keyed by them.
+    """
     sheet_tag = safe_report_name(report_sheet) if report_sheet else ""
     name_tags = [tag for tag in (spec.file_tag, sheet_tag, export_timestamp) if tag]
     # Partners share rows and air dates, so every report in this export shares one date memo.
     parse_date = report_date_parser()
 
     def report_bytes(partner):
-        rows = rows_by_partner.get(partner_dedup_key(partner), [])
+        key = partner if subject == SUBJECT_POSTER else partner_dedup_key(partner)
         return build_partner_report(
-            partner, rows, apply_min_views=apply_min_views, min_views=min_views, platform=spec.key, parse_date=parse_date,
+            partner, rows_by_partner.get(key, []), apply_min_views=apply_min_views, min_views=min_views,
+            platform=spec.key, parse_date=parse_date, subject=subject,
         )
 
     if len(partners) == 1:
@@ -512,5 +578,5 @@ def render_export_payload(spec, partners, rows_by_partner, report_sheet, apply_m
     return {
         "content": archive.getvalue(),
         "media_type": "application/zip",
-        "filename": f"{' '.join(['bao_cao_doi_tac', *name_tags])}.zip",
+        "filename": f"{' '.join(['bao_cao_nguoi_dang' if subject == SUBJECT_POSTER else 'bao_cao_doi_tac', *name_tags])}.zip",
     }

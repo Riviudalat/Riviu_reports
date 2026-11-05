@@ -47,6 +47,9 @@ beforeEach(() => {
     calls.push({ url, init });
     if (url.startsWith('/riviu-data/months')) return json({ months: [{ thang: '2026-10', label: 'Tháng 10/2026', rows: 2 }], defaultThang: '2026-10' });
     if (url.startsWith('/riviu-data/rows')) return json({ partners: ['Cafe Mây', 'Spa'], rows: ROWS });
+    if (url.startsWith('/riviu-data/report-posters')) {
+      return json({ posters: [{ name: 'Phát', linkCount: 1, rawLinkCount: 1 }, { name: 'Chưa rõ người đăng', linkCount: 0, rawLinkCount: 1 }] });
+    }
     if (url.startsWith('/riviu-data/report-partners')) {
       return json({ partners: [{ name: 'Spa', linkCount: 0, rawLinkCount: 1 }, { name: 'Cafe Mây', linkCount: 1, rawLinkCount: 1 }] });
     }
@@ -111,6 +114,23 @@ describe('public viewer page (/)', () => {
     await userEvent.click(screen.getByRole('option', { name: /Tất cả đối tác/ }));
     await userEvent.type(screen.getByLabelText('Tìm trong danh sách link'), 'kenh6');
     expect(screen.getAllByTestId('link-row')).toHaveLength(1);
+  });
+
+  it('filters by Người đăng, every poster by default', async () => {
+    renderAs(ANON, false);
+    expect(screen.getByRole('combobox', { name: 'Lọc theo người đăng' })).toHaveTextContent('Tất cả người đăng');
+    await userEvent.click(screen.getByRole('combobox', { name: 'Lọc theo người đăng' }));
+    expect(screen.getAllByRole('option').map(option => option.textContent)).toEqual(['Tất cả người đăng2', 'Phát1', 'Chưa rõ người đăng1']);
+    await userEvent.click(screen.getByRole('option', { name: /Chưa rõ/ }));
+    expect(screen.getAllByTestId('link-row')).toHaveLength(1);
+    expect(screen.getByTestId('row-count')).toHaveTextContent('1 / 2');
+  });
+
+  it('shows staff the Báo cáo người đăng tab too', async () => {
+    renderAs(ANON, false);
+    expect(screen.getAllByRole('tab').map(tab => tab.textContent)).toEqual(['Danh sách link', 'Báo cáo người đăng', 'Tổng kết']);
+    await userEvent.click(screen.getByRole('tab', { name: 'Báo cáo người đăng' }));
+    expect(screen.getAllByTestId('poster-row')).toHaveLength(2);
   });
 
   it('shows partner names in full, up to three, then +N', () => {
@@ -262,6 +282,30 @@ describe('public viewer page (/)', () => {
     await vi.waitFor(() => expect(clicked).toEqual(['Cafe Mây 2026-10.xlsx']));
     const exportCall = calls.find(call => call.url === '/riviu-data/export-report');
     expect(JSON.parse(String(exportCall?.init?.body))).toEqual({ platform: 'tiktok', thang: '2026-10', partners: ['Cafe Mây'], applyMinViews: true, minViews: 100 });
+    click.mockRestore();
+  });
+
+  it("switches platform and partner/poster tabs inside the export dialog, keeping each tab's ticks", async () => {
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:x'), revokeObjectURL: vi.fn() }));
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+    renderAs(ANON, false);
+    act(() => openModal('export'));
+    const dialog = screen.getByRole('dialog');
+    expect(within(within(dialog).getByTestId('export-platform')).getAllByRole('tab').map(tab => tab.textContent)).toEqual(['TikTok', 'Threads']);
+    await userEvent.click(await within(dialog).findByRole('checkbox', { name: 'Cafe Mây' }));
+    await userEvent.click(within(dialog).getByRole('tab', { name: /Theo người đăng/ }));
+    await userEvent.click(await within(dialog).findByRole('checkbox', { name: 'Phát' }));
+    expect(calls.some(call => call.url === '/riviu-data/report-posters?platform=tiktok&thang=2026-10&apply_min_views=true&min_views=100')).toBe(true);
+    // Back and forth: each tab still has what was ticked in it.
+    await userEvent.click(within(dialog).getByRole('tab', { name: /Theo đối tác/ }));
+    expect(await within(dialog).findByRole('checkbox', { name: 'Cafe Mây' })).toBeChecked();
+    expect(within(dialog).getByRole('checkbox', { name: 'Spa' })).not.toBeChecked();
+    await userEvent.click(within(dialog).getByRole('tab', { name: /Theo người đăng/ }));
+    expect(await within(dialog).findByRole('checkbox', { name: 'Phát' })).toBeChecked();
+    await userEvent.click(within(dialog).getByTestId('export-report'));
+    await vi.waitFor(() => expect(calls.some(call => call.url === '/riviu-data/export-report')).toBe(true));
+    const body = JSON.parse(String(calls.find(call => call.url === '/riviu-data/export-report')?.init?.body));
+    expect(body).toEqual({ platform: 'tiktok', thang: '2026-10', by: 'poster', posters: ['Phát'], applyMinViews: true, minViews: 100 });
     click.mockRestore();
   });
 });

@@ -3,13 +3,16 @@
 GET  /riviu-data/months?platform=tiktok
 GET  /riviu-data/rows?platform=tiktok&thang=2026-10
 GET  /riviu-data/report-partners?platform=tiktok&thang=2026-10&apply_min_views=true&min_views=100
+GET  /riviu-data/report-posters?platform=tiktok&thang=2026-10&apply_min_views=true&min_views=100
 POST /riviu-data/export-report {"platform", "thang", "partners": [...], "applyMinViews", "minViews"}
+POST /riviu-data/export-report {"platform", "thang", "by": "poster", "posters": [...], ...}
 
 `months` lists the month sheets (newest first) and `rows` the posts of one month with their
 metrics and scan status, for the web app's table. The report routes give the same rows,
 partner list, filters and Excel files as /report-partners and /export-report on a workbook,
-read from the soft-delete view v_<platform> for one `thang_nam` month. All four are reads the
-public viewer makes (`security.VIEWER_GET_PATHS` / `VIEWER_POST_PATHS`).
+read from the soft-delete view v_<platform> for one `thang_nam` month. `report-posters` and
+`by: "poster"` do the same per Người đăng (nguoi_air; a blank one is "Chưa rõ người đăng"), one
+report per poster with an extra ĐỐI TÁC column. All of them are reads the public viewer makes (`security.VIEWER_GET_PATHS` / `VIEWER_POST_PATHS`).
 """
 
 from __future__ import annotations
@@ -20,7 +23,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse, Response
 
 from riviu import internal_scan
-from riviu.reports import build_export_payload_from_rows
+from riviu.reports import build_export_payload_from_rows, build_poster_export_payload_from_rows, poster_link_counts
 from riviu.source_files import content_disposition
 from riviu.store import config as store_config
 from riviu.store.rules import ALL_REPORT_METRICS, REPORT_METRIC_COLUMNS, MonthError, current_thang, parse_thang
@@ -126,6 +129,19 @@ async def riviu_data_report_partners(platform: str = "tiktok", thang: str = "", 
     return {"partners": partners, "total": len(partners), "platform": platform, "thang": thang, "rows": len(sheet_rows.rows)}
 
 
+@router.get("/riviu-data/report-posters")
+async def riviu_data_report_posters(platform: str = "tiktok", thang: str = "", apply_min_views: bool = True, min_views: int = 100):
+    denied = _check(platform, thang)
+    if denied is not None:
+        return denied
+    try:
+        sheet_rows = await internal_scan.make_store(platform).report_rows(thang, with_ids=True)
+    except Exception as error:  # noqa: BLE001
+        return _unavailable(error)
+    posters = poster_link_counts(sheet_rows.rows, apply_min_views=apply_min_views, min_views=max(int(min_views or 0), 0))
+    return {"posters": posters, "total": len(posters), "platform": platform, "thang": thang, "rows": len(sheet_rows.rows)}
+
+
 @router.post("/riviu-data/export-report")
 async def riviu_data_export_report(data: dict):
     platform = data.get("platform", "tiktok")
@@ -133,21 +149,22 @@ async def riviu_data_export_report(data: dict):
     denied = _check(platform, thang if isinstance(thang, str) else "")
     if denied is not None:
         return denied
-    selected = data.get("partners") or []
+    by_poster = data.get("by") == "poster"
+    selected = data.get("posters" if by_poster else "partners") or []
     if not isinstance(selected, list) or not selected:
-        return JSONResponse({"error": "Vui lòng chọn ít nhất một đối tác"}, status_code=400)
+        return JSONResponse({"error": f"Vui lòng chọn ít nhất một {'người đăng' if by_poster else 'đối tác'}"}, status_code=400)
     try:
         min_views = max(int(data.get("minViews", 100)), 0)
     except (TypeError, ValueError):
         min_views = 100
     try:
-        sheet_rows = await internal_scan.make_store(platform).report_rows(thang)
+        sheet_rows = await internal_scan.make_store(platform).report_rows(thang, with_ids=by_poster)
     except Exception as error:  # noqa: BLE001
         return _unavailable(error)
+    build = build_poster_export_payload_from_rows if by_poster else build_export_payload_from_rows
     try:
         payload = await asyncio.to_thread(
-            build_export_payload_from_rows, sheet_rows, selected, bool(data.get("applyMinViews", True)), min_views,
-            thang, platform,
+            build, sheet_rows, selected, bool(data.get("applyMinViews", True)), min_views, thang, platform,
         )
     except ValueError as error:
         return JSONResponse({"error": str(error)}, status_code=404 if "Không tìm thấy" in str(error) else 400)

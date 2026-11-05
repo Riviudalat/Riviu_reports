@@ -57,7 +57,7 @@ VIEWER_GET_PATHS = frozenset({
     "/", "/api/version", "/list-files", "/preview-excel", "/summary-dashboard",
     "/source-preferences", "/report-partners", "/scrape-history",
     # The same reads on the Riviu Data Postgres (riviu/api/riviu_data.py, 404 on workbook storage).
-    "/riviu-data/months", "/riviu-data/rows", "/riviu-data/report-partners",
+    "/riviu-data/months", "/riviu-data/rows", "/riviu-data/report-partners", "/riviu-data/report-posters",
 })
 VIEWER_POST_PATHS = frozenset({"/export-report", "/riviu-data/export-report"})
 # Built frontend assets (the React app under /app/) and the classic page's static files.
