@@ -333,7 +333,7 @@ describe('admin page (/admin)', () => {
       'Ngày đăng', 'Người đăng', 'Link', 'Lượt xem', 'Tim', 'Bình luận', 'Lượt lưu', 'Chia sẻ', 'Đối tác', 'Trạng thái', 'Tổng link', 'Cập nhật',
     ]);
     const rows = screen.getAllByTestId('poster-row');
-    expect(rows.map(row => row.cells[1].textContent)).toEqual(['Phát', 'Chưa rõ người đăng']);
+    expect(rows.map(row => (row as HTMLTableRowElement).cells[1].textContent)).toEqual(['Phát', 'Chưa rõ người đăng']);
     expect(screen.getAllByTestId('poster-links').map(cell => cell.textContent)).toEqual(['1', '1']);
     expect(screen.getByTestId('poster-count')).toHaveTextContent('2 người · 2 link');
     expect(screen.getByTestId('poster-total-links')).toHaveTextContent('2');
