@@ -15,11 +15,11 @@ const icon = (Icon: typeof InfoIcon, className: string) => (
 export function Toaster() {
   return (
     <Sonner
-      position="top-right"
+      position="bottom-right"
       closeButton
       gap={8}
-      offset={{ top: 64, right: 16 }}
-      mobileOffset={{ top: 64, left: 12, right: 12 }}
+      offset={{ bottom: 16, right: 16 }}
+      mobileOffset={{ bottom: 12, left: 12, right: 12 }}
       icons={{
         success: icon(CircleCheckIcon, 'bg-success/15 text-success'),
         error: icon(CircleAlertIcon, 'bg-destructive/15 text-destructive'),

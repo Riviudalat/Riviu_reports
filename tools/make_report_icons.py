@@ -5,7 +5,8 @@
 Source: the 256px web icons in riviu/web/static/platform-icons/ (not modified here). Each glyph
 is trimmed to its visible pixels, centred on a square canvas so its longer side fills it (both
 platforms then look the same size), and downsampled once with Lanczos to
-REPORT_ICON_SOURCE_PX. That is 3x the size the report shows (riviu.reports.REPORT_ICON_PX), so
+REPORT_ICON_SOURCE_PX, painted in the report's orange (riviu.reports.REPORT_ACCENT, the colour
+of the Riviu logo on the other side of row 1). That is 3x the size the report shows (riviu.reports.REPORT_ICON_PX), so
 Excel and Google Sheets only shrink it a little and it stays sharp at 100% and when zoomed.
 """
 
@@ -18,7 +19,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from riviu import paths  # noqa: E402
-from riviu.reports import REPORT_ICON_PX  # noqa: E402
+from riviu.reports import REPORT_ACCENT, REPORT_ICON_PX  # noqa: E402
 
 REPORT_ICON_SOURCE_PX = REPORT_ICON_PX * 3
 PLATFORMS = ("tiktok", "threads")
@@ -28,6 +29,11 @@ def render(source_path, target_path, size=REPORT_ICON_SOURCE_PX):
     with Image.open(source_path) as image:
         image = image.convert("RGBA")
         glyph = image.crop(image.getchannel("A").getbbox())
+    # One flat colour: the glyph's shape (alpha) in the report's orange.
+    accent = tuple(int(REPORT_ACCENT[index:index + 2], 16) for index in (0, 2, 4))
+    tinted = Image.new("RGBA", glyph.size, accent + (0,))
+    tinted.putalpha(glyph.getchannel("A"))
+    glyph = tinted
     side = max(glyph.size)
     canvas = Image.new("RGBA", (side, side), (0, 0, 0, 0))
     canvas.paste(glyph, ((side - glyph.width) // 2, (side - glyph.height) // 2))

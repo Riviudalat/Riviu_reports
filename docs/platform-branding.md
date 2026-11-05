@@ -4,7 +4,7 @@ Local platform icons live under `riviu/web/static/platform-icons`:
 - `tiktok.svg` and `threads.svg`: Simple Icons canonical vector paths, CC0 source/trademark note in that directory.
 - `tiktok.png` and `threads.png`: transparent 256px rasterizations of the SVGs.
 
-Partner Excel reports embed separate renditions from `riviu/web/report-icons/` (`tiktok.png`, `threads.png`), generated from those 256px PNGs by `tools/make_report_icons.py`: the glyph is trimmed to its visible pixels and centred on a square canvas so its longer side fills it (both platforms show the same glyph height), then downsampled once with Lanczos to 72x72, three times the 24px the report shows, so Excel and Google Sheets stay sharp at 100% and when zoomed. Rerun the tool if the web icons change.
+Partner Excel reports embed separate renditions from `riviu/web/report-icons/` (`tiktok.png`, `threads.png`), generated from those 256px PNGs by `tools/make_report_icons.py`: the glyph is trimmed to its visible pixels and centred on a square canvas so its longer side fills it (both platforms show the same glyph height), painted in the report's orange (`REPORT_ACCENT`, like the Riviu logo in A1), then downsampled once with Lanczos to 72x72, three times the 24px the report shows, so Excel and Google Sheets stay sharp at 100% and when zoomed. Rerun the tool if the web icons change.
 
 UI uses SVG with adjacent text, decorative empty alt, fixed sizing and white treatment on the selected dark platform button. Icons appear on platform selection, platform-specific source rows, and report dialog context. They load from bundled `/static`, not an external font/image service.
 

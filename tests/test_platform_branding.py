@@ -89,6 +89,10 @@ def test_report_icons_are_square_trimmed_3x_renditions(platform):
         left, top, right, bottom = image.getchannel("A").getbbox()
         assert (top, bottom) == (0, side) or (left, right) == (0, side)
         assert abs(left - (side - right)) <= 1 and abs(top - (side - bottom)) <= 1
+        # Painted in the report's orange, like the Riviu logo on the other side of row 1.
+        accent = tuple(int(reports.REPORT_ACCENT[index:index + 2], 16) for index in (0, 2, 4))
+        solid = [pixel[:3] for pixel in image.getdata() if pixel[3] == 255]
+        assert solid and all(max(abs(a - b) for a, b in zip(pixel, accent)) <= 12 for pixel in solid)
 
 
 def test_report_modal_brand_follows_platform():
