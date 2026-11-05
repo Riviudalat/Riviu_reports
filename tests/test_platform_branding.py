@@ -28,14 +28,16 @@ def test_partner_report_embeds_platform_icon_and_keeps_table(platform):
     try:
         sheet = book.active
         assert platform.upper() in sheet["B1"].value
-        # Both platforms share the 8-column layout: metadata A2:G2, platform icon at H2.
-        assert "A2:G2" in {str(merge) for merge in sheet.merged_cells.ranges}
+        # Both platforms share the 9-column layout: title B1:H1 and the platform icon at I1 in
+        # row 1, the metadata line alone across row 2.
+        merges = {str(merge) for merge in sheet.merged_cells.ranges}
+        assert {"B1:H1", "A2:I2"} <= merges
         assert sheet["C3"].value == "LINK AIR" and sheet["C4"].value == url
         assert sheet.freeze_panes == "A4"
         assert len(sheet._images) == 2
         logo, platform_image = sheet._images
-        assert platform_image.anchor._from.row == 1
-        assert platform_image.anchor._from.col == 7
+        assert platform_image.anchor._from.row == 0
+        assert platform_image.anchor._from.col == 8
 
         def placement(image, cell):
             # (left, top, width, height) in px; the cell must already have its final size.
@@ -54,9 +56,17 @@ def test_partner_report_embeds_platform_icon_and_keeps_table(platform):
         assert logo_size[1] == reports.REPORT_LOGO_MAX_HEIGHT_PX
         with Image.open(reports.LOGO_PATH) as source:
             assert abs(logo_size[0] / logo_size[1] - source.width / source.height) < 0.03
-        assert placement(platform_image, "H2") == (reports.REPORT_ICON_PX, reports.REPORT_ICON_PX)
+        assert placement(platform_image, "I1") == (reports.REPORT_ICON_PX, reports.REPORT_ICON_PX)
         assert sheet["A2"].alignment.vertical == "center"
-        assert sheet["H3"].value == "CHIA SẺ" and sheet["H4"].value is None and sheet["I3"].value is None
+        assert sheet["A3"].value == "NGÀY ĐĂNG"
+        assert sheet["H3"].value == "CHIA SẺ" and sheet["H4"].value is None
+        assert sheet["I3"].value == "LOẠI BÀI" and sheet["J3"].value is None
+        # Excel's filter button sits at the right of each header cell: every column leaves it room.
+        for column in "ABCDEFGHI":
+            label = sheet[f"{column}3"].value
+            assert sheet.column_dimensions[column].width >= len(label) + reports.REPORT_FILTER_BUTTON_WIDTH
+        # One line per row: no wrapped channel names or links.
+        assert not any(cell.alignment.wrap_text for cell in sheet[4])
         assert sheet["G3"].value == ("REPOST" if platform == "threads" else "LƯỢT LƯU")
     finally: book.close()
 

@@ -25,11 +25,12 @@ from riviu import paths
 from riviu.workbook_utils import (
     default_data_sheet,
     LAST_UPDATE_COLUMN,
-    SINGLE_LINK_FILL_COLOR,
-    VIDEO_LINK_FILL_COLOR,
+    TIKTOK_MEDIA_PHOTO,
+    TIKTOK_MEDIA_VIDEO,
     WorkbookSnapshot,
     build_partner_report_rows,
     clean_text,
+    detect_tiktok_media_type,
     find_data_sheet_names,
     format_display_datetime,
     format_filename_datetime,
@@ -43,7 +44,6 @@ from riviu.workbook_utils import (
     partner_dedup_key,
     partner_link_counts,
     set_cell_literal,
-    should_highlight_video_link,
 )
 
 
@@ -165,18 +165,34 @@ def add_centered_image_to_cell(ws, cell_address, image_path, max_height_px=36):
     return True
 
 
-# Banner images: Riviu logo in A1 (row 1 is 42pt = 56px), platform icon in the last column of
-# row 2 (26pt = 34px). The icon PNGs are 3x renditions of this size (tools/make_report_icons.py).
+# Banner images: Riviu logo in A1 and the platform icon in the last column, both in row 1
+# (42pt = 56px). The icon PNGs are 3x renditions of REPORT_ICON_PX (tools/make_report_icons.py).
 REPORT_LOGO_MAX_HEIGHT_PX = 40
 REPORT_ICON_PX = 24
+POST_TYPE_COLUMN = "LOẠI BÀI"
+# Header text shown in the report for a source column (the rows keep their workbook names).
+REPORT_HEADER_LABELS = {"NGÀY AIR": "NGÀY ĐĂNG"}
 REPORT_COLUMN_WIDTHS = {
-    "NGÀY AIR": 14, "TÊN KÊNH": 24, "LINK AIR": 72, "LƯỢT XEM": 14, "TIM": 12,
-    "BÌNH LUẬN": 14, "LƯỢT LƯU": 14, "REPOST": 14, "CHIA SẺ": 12,
+    "NGÀY AIR": 14, "TÊN KÊNH": 24, "LINK AIR": 60, "LƯỢT XEM": 14, "TIM": 12,
+    "BÌNH LUẬN": 14, "LƯỢT LƯU": 14, "REPOST": 14, "CHIA SẺ": 12, POST_TYPE_COLUMN: 18,
 }
-REPORT_TEXT_COLUMNS = {"LINK AIR", "TÊN KÊNH"}
+# Text columns grow to their longest value (up to this width) instead of wrapping onto two lines.
+REPORT_MAX_TEXT_WIDTH = {"TÊN KÊNH": 40, "LINK AIR": 90}
+# Room for Excel's filter button at the right of each header cell, so it never covers the label.
+REPORT_FILTER_BUTTON_WIDTH = 7
+REPORT_TEXT_COLUMNS = {"LINK AIR", "TÊN KÊNH", POST_TYPE_COLUMN}
 REPORT_ACCENT = "FF6B00"
 REPORT_ACCENT_TEXT = "9A3412"
 REPORT_TOTAL_FILL = "FFF7ED"
+MEDIA_LABELS = {TIKTOK_MEDIA_PHOTO: "Ảnh", TIKTOK_MEDIA_VIDEO: "Video"}
+
+
+def report_columns(spec):
+    return [*spec.report_columns, POST_TYPE_COLUMN]
+
+
+def report_header_label(header):
+    return REPORT_HEADER_LABELS.get(header, header)
 
 
 def report_cell_value(header, value, parse_date=None):
@@ -195,50 +211,66 @@ def report_cell_value(header, value, parse_date=None):
     return format_metric(value)
 
 
-def report_row_fill(spec, source_row):
+def report_post_type(spec, source_row):
+    """Ảnh/Video (Bài viết on Threads) + độc quyền (one partner) or lịch trình (several).
+
+    A TikTok short link that no scan has resolved yet has no known media type; it shows the
+    partner part alone.
+    """
     partners = source_row.get("partners")
     partners = partners if isinstance(partners, (list, tuple)) else []
-    if spec.highlights_video_links and should_highlight_video_link(
-        clean_text(source_row.get("LINK AIR", "")),
-        likes=source_row.get("TIM", 0),
-        shares=source_row.get("CHIA SẺ", 0),
-        resolved_url=source_row.get("_resolvedUrl", ""),
-        resolved_source_url=source_row.get("_resolvedSourceUrl", ""),
-        scan_status=source_row.get("_scanStatus", ""),
-    ):
-        return PatternFill("solid", fgColor=VIDEO_LINK_FILL_COLOR)
-    if len(partners) == 1:
-        return PatternFill("solid", fgColor=SINGLE_LINK_FILL_COLOR)
-    return None
+    if not partners:
+        return ""
+    scope = "độc quyền" if len(partners) == 1 else "lịch trình"
+    if spec.key == "threads":
+        media = "Bài viết"
+    else:
+        media = MEDIA_LABELS.get(detect_tiktok_media_type(
+            clean_text(source_row.get("LINK AIR", "")), resolved_url=clean_text(source_row.get("_resolvedUrl", "")),
+        ), "")
+    return f"{media} {scope}" if media else scope.capitalize()
 
 
 def report_platform_icon_path(spec):
     return os.path.join(paths.REPORT_ICONS_DIR, f"{spec.key}.png")
 
 
-def write_report_banner(ws, spec, partner, link_count, columns):
+def report_column_widths(columns, values_by_column):
+    widths = []
+    for header in columns:
+        width = REPORT_COLUMN_WIDTHS.get(header, 14)
+        longest = max((len(str(value)) for value in values_by_column.get(header, ()) if value), default=0)
+        if header in REPORT_MAX_TEXT_WIDTH:
+            width = max(width, min(longest + 2, REPORT_MAX_TEXT_WIDTH[header]))
+        # The label is bold, so it gets a little more than its character count.
+        width = max(width, round(len(report_header_label(header)) * 1.2) + REPORT_FILTER_BUTTON_WIDTH)
+        widths.append(width)
+    return widths
+
+
+def write_report_banner(ws, spec, partner, link_count, columns, widths):
     ws.row_dimensions[1].height = 42
     ws.row_dimensions[2].height = 26
     # Final widths first: the images below are centred from them.
-    for index, header in enumerate(columns, start=1):
-        ws.column_dimensions[get_column_letter(index)].width = REPORT_COLUMN_WIDTHS.get(header, 14)
+    for index, width in enumerate(widths, start=1):
+        ws.column_dimensions[get_column_letter(index)].width = width
     ws["A1"].alignment = Alignment(horizontal="center", vertical="center")
     add_centered_image_to_cell(ws, "A1", LOGO_PATH, max_height_px=REPORT_LOGO_MAX_HEIGHT_PX)
 
-    ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=len(columns))
+    # Row 1: logo, the title across the middle, the platform icon in the outermost column.
+    last_column = get_column_letter(len(columns))
+    ws.merge_cells(start_row=1, start_column=2, end_row=1, end_column=len(columns) - 1)
     title_cell = ws["B1"]
     title_cell.value = f"BÁO CÁO {spec.label.upper()} - ĐỐI TÁC: {partner}"
     title_cell.fill = PatternFill("solid", fgColor=REPORT_ACCENT)
     title_cell.font = Font(color="FFFFFF", bold=True, size=14)
     title_cell.alignment = Alignment(horizontal="center", vertical="center")
+    add_centered_image_to_cell(ws, f"{last_column}1", report_platform_icon_path(spec), max_height_px=REPORT_ICON_PX)
 
-    # Row 2: metadata across all but the last column, platform icon in the last one.
-    last_column = get_column_letter(len(columns))
-    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(columns) - 1)
-    add_centered_image_to_cell(ws, f"{last_column}2", report_platform_icon_path(spec), max_height_px=REPORT_ICON_PX)
+    # Row 2: only the metadata line, across the whole width.
+    ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=len(columns))
     ws["A2"] = f"Tổng link: {link_count} • Ngày cập nhật: {format_display_datetime()}"
     ws["A2"].font = Font(color=REPORT_ACCENT_TEXT, italic=True, bold=True)
-    # Vertically centred like the icon beside it.
     ws["A2"].alignment = Alignment(horizontal="center", vertical="center")
 
 
@@ -267,7 +299,7 @@ def write_report_total(ws, spec, frame, columns, total_row, border):
 def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100, platform="tiktok", parse_date=None):
     spec = get_platform(platform)
     parse_date = parse_date or report_date_parser()
-    columns = list(spec.report_columns)
+    columns = report_columns(spec)
     valid_rows = [
         row for row in rows
         if is_exportable_report_row(row, apply_min_views=apply_min_views, min_views=min_views)
@@ -281,44 +313,53 @@ def build_partner_report(partner, rows, *, apply_min_views=True, min_views=100, 
     thin = Side(style="thin", color="D8DEE9")
     border = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    write_report_banner(ws, spec, partner, len(frame), columns)
+    # Cell values first: the text columns are sized from them before the banner centres its images.
+    table = []
+    for _, source_row in frame.iterrows():
+        table.append([
+            report_post_type(spec, source_row) if header == POST_TYPE_COLUMN
+            else report_cell_value(header, source_row.get(header, ""), parse_date)
+            for header in columns
+        ])
+    values_by_column = {header: [row[index] for row in table] for index, header in enumerate(columns)}
+    write_report_banner(ws, spec, partner, len(frame), columns, report_column_widths(columns, values_by_column))
     for col_index, header in enumerate(columns, start=1):
-        cell = ws.cell(row=table_header_row, column=col_index, value=header)
+        cell = ws.cell(row=table_header_row, column=col_index, value=report_header_label(header))
         cell.fill = PatternFill("solid", fgColor=REPORT_ACCENT)
         cell.font = Font(color="FFFFFF", bold=True)
         cell.alignment = Alignment(horizontal="center", vertical="center")
         cell.border = border
 
-    # A data cell's finished style depends only on (column, hyperlink, row fill). openpyxl
-    # registers each style object on assignment, which dominated large exports, so the first
-    # cell of each kind is styled in full and the others copy its style ids.
+    # A data cell's finished style depends only on (column, hyperlink). openpyxl registers each
+    # style object on assignment, which dominated large exports, so the first cell of each kind
+    # is styled in full and the others copy its style ids. Rows are not coloured: LOẠI BÀI says
+    # what the colours used to.
     style_templates = {}
-    for row_index, (_, source_row) in enumerate(frame.iterrows(), start=data_start_row):
-        row_fill = report_row_fill(spec, source_row)
-        fill_key = row_fill.fgColor.rgb if row_fill is not None else None
-        for col_index, header in enumerate(columns, start=1):
-            value = report_cell_value(header, source_row.get(header, ""), parse_date)
+    for row_index, values in enumerate(table, start=data_start_row):
+        for col_index, (header, value) in enumerate(zip(columns, values), start=1):
             cell = set_cell_literal(ws.cell(row=row_index, column=col_index), value)
             is_hyperlink = header == "LINK AIR" and isinstance(value, str) and value.startswith("http")
             if is_hyperlink:
                 cell.hyperlink = value
-            style_key = (header, is_hyperlink, fill_key)
+            style_key = (header, is_hyperlink)
             template = style_templates.get(style_key)
             if template is not None:
                 cell._style = copy(template)
                 continue
             cell.border = border
-            cell.alignment = Alignment(vertical="top", wrap_text=(header in {"LINK AIR", "TÊN KÊNH"}))
+            # One line per link: long names are cut at the column edge, never wrapped.
+            cell.alignment = Alignment(vertical="top", wrap_text=False)
             if is_hyperlink:
                 cell.style = "Hyperlink"
+                cell.alignment = Alignment(vertical="top", wrap_text=False)
             elif header == "NGÀY AIR":
                 cell.number_format = "dd/mm/yyyy"
+                cell.alignment = Alignment(horizontal="center", vertical="top")
+            elif header == POST_TYPE_COLUMN:
                 cell.alignment = Alignment(horizontal="center", vertical="top")
             elif header not in REPORT_TEXT_COLUMNS:
                 cell.number_format = "#,##0"
                 cell.alignment = Alignment(horizontal="right", vertical="top")
-            if row_fill is not None:
-                cell.fill = row_fill
             style_templates[style_key] = copy(cell._style)
 
     total_row = len(frame) + data_start_row if len(frame) else None

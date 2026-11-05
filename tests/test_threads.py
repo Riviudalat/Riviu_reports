@@ -338,7 +338,7 @@ def test_threads_exports_use_repost_and_keep_unknown_blank():
     sheet = report.active
     assert sheet["G3"].value == "REPOST"
     assert sheet["G4"].value in (None, "")
-    assert sheet["I3"].value is None
+    assert sheet["I3"].value == "LOẠI BÀI" and sheet["J3"].value is None
     assert sheet["G5"].value is None
 
 
@@ -366,7 +366,7 @@ def test_threads_partner_export_excludes_tiktok(tmp_path):
     assert report.active["C4"].value == URL
     assert report.active["C5"].value is None
     assert report.active["G3"].value == "REPOST"
-    assert report.active["I3"].value is None
+    assert report.active["I3"].value == "LOẠI BÀI" and report.active["J3"].value is None
 
 
 def test_threads_runner_saves_before_done_and_ignores_tiktok(tmp_path, monkeypatch):
