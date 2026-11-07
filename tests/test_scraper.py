@@ -1663,25 +1663,37 @@ class _OembedResponse:
         return False
 
 
-@pytest.mark.parametrize("answer, verdict", [
-    ((200, '{"version":"1.0","type":"video","title":"x","author_unique_id":"demo"}'), False),
-    ((400, '{"message":"Something went wrong","code":400}'), True),
-    ((404, ""), True),
-    ((400, "<html>proxy error</html>"), None),
-    ((429, '{"message":"rate limited"}'), None),
-    ((503, ""), None),
-    (TimeoutError("timed out"), None),
+# Embed pages as TikTok served them on 2026-11-07 (trimmed): a live post carries its stats,
+# a deleted or made-up id gets HTTP 400 with the VideoError block.
+EMBED_LIVE = '<script>{"itemInfos":{"id":"7670401030210833685","playCount":"480","diggCount":"17"}}</script>'
+EMBED_GONE = ('<span class="css-1r14ksc eblccp12" data-e2e="VideoError-VideoError-TUXText">'
+              'Video currently unavailable</span><script>{"statusCode":10204}</script>')
+
+
+@pytest.mark.parametrize("answers, verdict, fetches", [
+    ([(200, EMBED_LIVE)], False, 1),
+    # Gone only when two answers in a row show the error block.
+    ([(400, EMBED_GONE), (400, EMBED_GONE)], True, 2),
+    ([(400, EMBED_GONE), (200, EMBED_LIVE)], False, 2),
+    ([(400, EMBED_GONE), (503, "")], None, 2),
+    # 503 is throttling (live posts get it too); a bare 400 may come from a proxy.
+    ([(503, "")], None, 1),
+    ([(400, "<html>proxy error</html>")], None, 1),
+    ([(200, "<html>login wall</html>")], None, 1),
+    ([TimeoutError("timed out")], None, 1),
 ])
-def test_oembed_confirmation_verdicts(monkeypatch, answer, verdict):
+def test_embed_page_confirmation_verdicts(monkeypatch, answers, verdict, fetches):
     import io
     import urllib.error
 
     from riviu.platforms import tiktok as scraper
 
     requested = []
+    queue = list(answers)
 
     def fake_urlopen(request, **_kwargs):
         requested.append(request.full_url)
+        answer = queue.pop(0)
         if isinstance(answer, Exception):
             raise answer
         code, body = answer
@@ -1690,12 +1702,24 @@ def test_oembed_confirmation_verdicts(monkeypatch, answer, verdict):
         return _OembedResponse(body)
 
     monkeypatch.setattr(scraper.gone, "urlopen_request", fake_urlopen)
+    monkeypatch.setattr(scraper.gone.time, "sleep", lambda _s: None)
 
     assert scraper.confirm_tiktok_post_gone("https://www.tiktok.com/@demo/photo/7670401030210833685?_r=1") is verdict
-    # oEmbed rejects every /photo/ URL, so the photo id is asked in the /video/ form.
-    assert requested == [
-        "https://www.tiktok.com/oembed?url=https%3A%2F%2Fwww.tiktok.com%2F%40demo%2Fvideo%2F7670401030210833685"
-    ]
+    # Asked by post id, so photo posts and renamed handles work alike.
+    assert requested == ["https://www.tiktok.com/embed/v2/7670401030210833685"] * fetches
+
+
+def test_a_refused_connection_moves_the_retry_to_the_next_proxy(monkeypatch):
+    from riviu.platforms.tiktok import fetch_request
+
+    moved = []
+    monkeypatch.setattr(fetch_request, "release_thread_proxy", lambda: moved.append(True))
+    attempt = fetch_request._RequestScrapeOutcome()
+    attempt.note_fetch_error(OSError("<urlopen error [Errno 111] Connection refused>"))
+    assert moved == [True]
+    # A timeout is TikTok being slow, not a dead route: same proxy.
+    attempt.note_fetch_error(OSError("timed out"))
+    assert moved == [True]
 
 
 def test_note_network_failure_pauses_after_streak(monkeypatch):

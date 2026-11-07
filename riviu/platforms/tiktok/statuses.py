@@ -9,6 +9,12 @@ def is_request_rate_limited_status(status):
     return "HTTP 403" in text or "HTTP 429" in text
 
 
+def is_dead_proxy_error(status):
+    """The connection itself was refused (a dead proxy route), not a slow or reset TikTok answer."""
+    text = str(status or "").casefold()
+    return "connection refused" in text or "tunnel connection failed" in text
+
+
 def is_transient_network_status(status):
     """DNS / connection reset / timeout / SSL đứt giữa chừng — lỗi tạm, nên retry đủ số lần."""
     text = str(status or "").casefold()
@@ -49,7 +55,7 @@ STATUS_MEDIA_REDIRECT_MISMATCH = "Error: Redirect không khớp video"
 # TikTok's post page answers "item not found" (statusCode 10204, rendered "page
 # unavailable") intermittently for live posts. That signal alone is only a
 # suspicion and keeps the old numbers; STATUS_TIKTOK_UNAVAILABLE (which clears
-# them) requires the independent oEmbed check in confirm_tiktok_post_gone.
+# them) requires the independent embed-page check in confirm_tiktok_post_gone.
 STATUS_TIKTOK_NOT_FOUND_UNCONFIRMED = "Error: TikTok báo không tìm thấy bài (chưa xác nhận, giữ số cũ)"
 STATUS_TIKTOK_UNAVAILABLE = "Error: Trang TikTok không khả dụng"
 

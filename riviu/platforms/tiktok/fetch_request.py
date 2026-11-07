@@ -19,6 +19,7 @@ from riviu.platforms.tiktok.statuses import (
     STATUS_TIKTOK_UNAVAILABLE,
     is_request_rate_limited_status,
     is_suspected_gone_status,
+    is_dead_proxy_error,
     is_transient_network_status,
     should_clear_stale_metrics,
     stronger_terminal_result,
@@ -54,6 +55,10 @@ class _RequestScrapeOutcome:
         self.status = f"Error: {error}"
         if is_transient_network_status(self.status):
             throttle.note_network_failure()
+        # A proxy that refuses connections (dead or out of credit) fails every retry on it:
+        # the retry moves to the next proxy instead.
+        if is_dead_proxy_error(self.status):
+            release_thread_proxy()
 
     def note_page(self, source_url, final_url, content):
         """Parse one fetched page; return True when it is a final success."""
@@ -168,7 +173,7 @@ def scrape_link_with_retries_request(
             return data, channel_name, status, attempts_used, last_resolved_url
         if is_suspected_gone_status(status):
             if confirmed_gone is None:
-                confirmed_gone = gone.confirm_tiktok_post_gone(url, last_resolved_url, timeout=min(timeout, gone.OEMBED_TIMEOUT_SECONDS))
+                confirmed_gone = gone.confirm_tiktok_post_gone(url, last_resolved_url, timeout=min(timeout, gone.CONFIRM_TIMEOUT_SECONDS))
             if confirmed_gone:
                 return data, channel_name, STATUS_TIKTOK_UNAVAILABLE, attempts_used, last_resolved_url
             # Live (or unknown): the page answer was transient; spend the retry budget.

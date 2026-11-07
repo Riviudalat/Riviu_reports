@@ -4,7 +4,7 @@ Modules, lowest layer first:
 - constants, statuses: shared settings and scan status strings/rules
 - parsing: pure HTML/JSON -> metrics, item status, channel names
 - throttle: the process-wide HTTP limiter and back-off state
-- fetch_html, gone: one TikTok page GET; oEmbed confirmation that a post is gone
+- fetch_html, gone: one TikTok page GET; embed-page confirmation that a post is gone
 - channels: channel-name enrichment (cache, overrides, profile lookups)
 - fetch_request, fetch_browser: one link in Request mode / in Chromium, with retries
 - lifecycle: owned async work, lazy Chromium launch, bounded browser close and driver stop
@@ -120,8 +120,8 @@ from riviu.platforms.tiktok.fetch_html import (
 )
 from riviu.platforms.tiktok.gone import (
     confirm_tiktok_post_gone,
-    TIKTOK_OEMBED_ENDPOINT,
-    tiktok_oembed_target,
+    TIKTOK_EMBED_ENDPOINT,
+    tiktok_embed_url,
 )
 from riviu.platforms.tiktok.channels import (
     author_unique_id_from_post,

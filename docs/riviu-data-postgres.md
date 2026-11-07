@@ -66,7 +66,7 @@ value to Riviu Data (`RDA_SCAN_SECRET`) and to the timer (`RIVIU_SCAN_TOKEN_FILE
   | TikTok outcome | metrics | `trang_thai_quet` | `link_phan_giai` / `link_nguon_phan_giai` | `ten_kenh` | `cap_nhat_lan_cuoi` |
   |---|---|---|---|---|---|
   | `Success` | `metric_or_none` (unknown → NULL, `0` stays 0) | set | set | best quality | `now()` |
-  | `should_clear_stale_metrics` (hidden stats, gone confirmed by oEmbed) | NULL | set | — | kept if usable | — |
+  | `should_clear_stale_metrics` (hidden stats, gone confirmed by the embed page) | NULL | set | — | kept if usable | — |
   | any other failure | — (not in the upsert) | set | — | kept if usable | — |
 
   A column marked — is not named in the upsert: an existing `bao_cao` row keeps its value, a new
